@@ -1,8 +1,9 @@
 # BUFFETT OPPORTUNITY SCANNER — Technical Design Review
 
-**Status:** v1.1 — w pełni scalona wersja (v1.0 + decyzje właściciela dot. 5 BLOCKERÓW + moduł MY HOLDINGS / EXIT MONITORING). Ten plik jest samodzielny — nie wymaga sięgania do historii commitów. Implementacja NIE została rozpoczęta.
-**Data:** 2026-09-20 (v1.0), zaktualizowano i scalono tego samego dnia (v1.1)
-**Zmiana względem pierwszej wersji v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania zamiast ogólnego „do ustalenia"; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING (schema, event model, wpływ na architekturę); (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera jako klucz) w oparciu o realne ryzyko „ticker recycling" znalezione podczas researchu do BLOCKER 2.
+**Status:** v1.2 — w pełni scalona wersja (v1.0 + decyzje właściciela dot. 5 BLOCKERÓW + moduł MY HOLDINGS / EXIT MONITORING + moduł BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK). Ten plik jest samodzielny — nie wymaga sięgania do historii commitów. Implementacja NIE została rozpoczęta.
+**Data:** 2026-09-20 (v1.0, v1.1, v1.2 — wszystkie tego samego dnia)
+**Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania zamiast ogólnego „do ustalenia"; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING (schema, event model, wpływ na architekturę); (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera jako klucz) w oparciu o realne ryzyko „ticker recycling" znalezione podczas researchu do BLOCKER 2.
+**Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) — relacje COMPANY→ASSET→TRIAL→PERSON→INSTITUTION→PUBLICATION→PARTNERSHIP→FUNDING, nowe źródła danych (ClinicalTrials.gov API, OpenAlex, ROR), nowa decyzja D15.
 
 ## Metodologia i zastrzeżenia
 
@@ -258,6 +259,8 @@ holding_user_actions(action_id PK, position_id FK, exit_review_report_id FK NULL
     action ENUM('HOLD','REDUCE','SOLD','REVIEW_LATER'),
     decided_at, note, review_later_until, review_later_trigger)
 ```
+
+**Tabele modułu BIOTECH (External Validation & Research Network)** — `assets`, `trials`, `persons`, `institutions`, `trial_person_roles`, `trial_institution_roles`, `partnerships`, `funding_events`, `publications`, `publication_authors`, `publication_asset_links`, `conflicts_dependencies`, `external_validation_assessments` — są opisane osobno w pkt 18.2, żeby nie przeciążać tej sekcji; dotyczą wyłącznie spółek biotech i są projektowane, ale nieimplementowane w V0/V1 (patrz 18.0).
 
 **Dlaczego pozycje liczone „on read", a nie jako mutowalne kolumny:** przy tak małej skali danych (pojedynczy użytkownik, kilkanaście pozycji) narzut obliczeniowy jest pomijalny, a uniknięcie klasy błędów „cache się rozjechał z transakcjami" jest ważniejsze niż wydajność. To jednoznacznie lepsze rozwiązanie techniczne przy tej skali — podjęta decyzja własna, niewymagająca wyboru właściciela. Jeśli w V2 pojawi się potrzeba wykresu wartości pozycji w czasie, dodać osobną tabelę `position_daily_snapshots` jako cache tylko do celów wizualizacji (nie jako źródło prawdy).
 
@@ -635,6 +638,164 @@ Sekcja MY HOLDINGS w przyszłym dashboardzie: spółka, ticker, liczba posiadany
 
 ---
 
+## 18. BIOTECH MODUŁ — EXTERNAL VALIDATION & RESEARCH NETWORK
+
+### 18.0 Status i zakres
+
+Ten moduł dotyczy wyłącznie spółek biotech i dziedziczy harmonogram już ustalony dla sektorów specjalnych: biotech jest świadomie **wykluczony z zakresu V0** (Decyzja D7 — GENERAL najpierw), więc External Validation jest **projektowany teraz** (schema, źródła, structured output), ale **implementowany dopiero**, gdy moduł BIOTECH faktycznie wejdzie w zakres (po V1 — patrz 18.6). Nie zastępuje Clinical Evidence, Trial Quality, Probability of Success, Financial Runway, Regulatory Analysis, Competitive Landscape ani Valuation/rNPW — to dodatkowa warstwa odpowiadająca na pytanie „kto poza samą spółką jest zaangażowany w ten program, w jaki sposób, i jak silnym sygnałem jest to zaangażowanie".
+
+### 18.1 Dodatkowe źródła danych
+
+| Źródło | Status | Co dostarcza | Uwagi |
+|---|---|---|---|
+| **ClinicalTrials.gov API v2** (`data-api.clinicaltrials.gov`) | Darmowe, bez klucza — potwierdzone researchem | `protocolSection.sponsorCollaboratorsModule` (lead sponsor, collaborators) — **potwierdzona struktura**; role indywidualnych badaczy (Principal Investigator/Study Chair/Study Director) istnieją w API, prawdopodobnie w `contactsLocationsModule.overallOfficials[].role`, ale **dokładna ścieżka/nazewnictwo pola nie zostało potwierdzone w tym przeglądzie** — do zweryfikowania bezpośrednio w dokumentacji API przed implementacją, nie zakładam tego jako pewnik. Lokalizacje ośrodków klinicznych (`locations[]`) — dane do sekcji Institutional Validation dla clinical sites. | Główne, ustrukturyzowane źródło dla sekcji 1 (Research Network) i częściowo 4 (kliniczne ośrodki). |
+| **OpenAlex API** (`openalex.org`) | Darmowe, **bez limitu zapytań** — potwierdzone researchem | `/authors` — zdisambiguowane rekordy osób powiązane z ORCID gdzie dostępne; `/institutions` — powiązane z ROR ID; dane o publikacjach z afiliacjami autorów, czerpane m.in. z PubMed/Crossref. | Rekomendowany jako **główne** źródło do rozróżniania osób/instytucji (sekcje 3, 7) — ORCID/ROR realnie redukuje ryzyko pomylenia dwóch badaczy o tym samym nazwisku, czego surowy string afiliacji z PubMed nie gwarantuje. |
+| PubMed/PMC (NCBI E-utilities) | Darmowe, limity zapytań (wymaga throttlingu, zalecany klucz API dla wyższych limitów) | MeSH terms, abstrakty, dodatkowe metadane publikacji | Źródło **drugorzędne** względem OpenAlex — brak natywnej disambiguacji autorów. |
+| SEC EDGAR (już warstwa podstawowa systemu) | Darmowe | 8-K, 10-K, umowy licencyjne/collaboration w exhibitach | Źródło materialności partnerstw/finansowania — tylko dla spółek notowanych i zarejestrowanych w SEC (część mikro-cap biotech może nie być). |
+| Allowlista IR / press release (już istniejący mechanizm) | — | Konkretne kwoty upfront/milestone payments | Często jedyne miejsce z faktycznymi liczbami — SEC filings bywają ogólnikowe. |
+| ROR — Research Organization Registry (`ror.org`) | Darmowe | Kanoniczne identyfikatory instytucji | Do deduplikacji „University X"/„Univ. of X"/pełna nazwa pod jednym rekordem `institutions`. |
+
+Wszystkie powyższe źródła podlegają **tej samej zasadzie co BLOCKER 3**: rekord relacji (osoba/instytucja/publikacja/partnerstwo) powstaje wyłącznie z realnie pobranych danych z konkretnym `source_id`; jeśli relacji nie da się zweryfikować → `UNVERIFIED`. Claude nie tworzy takich relacji z własnej wiedzy.
+
+### 18.2 Database schema — relacje COMPANY → ASSET → TRIAL → PERSON → INSTITUTION → PUBLICATION → PARTNERSHIP → FUNDING
+
+**Czy potrzebna jest graph database?** Nie. Przy tej skali (pojedynczy użytkownik, kilka–kilkanaście spółek biotech w polu uwagi, po kilka assetów/trial/osób na spółkę) liczba relacji jest ograniczona i w pełni obsługiwalna przez zwykłe tabele łącznikowe (many-to-many) w tej samej relacyjnej bazie (SQLite→Postgres), bez dodatkowej technologii. Graph DB (np. Neo4j) dodałby operacyjną złożoność sprzeczną z zasadą „tanie w utrzymaniu, obsługiwalne przez osobę nietechniczną" bez korzyści przy tym wolumenie danych — świadomie odradzam.
+
+```sql
+assets(asset_id PK, cik FK, name, modality, indication, development_stage,
+       created_at)
+
+trials(trial_id PK, asset_id FK, nct_id UNIQUE, title, phase, status,
+       source_id FK, ingested_at)
+
+persons(person_id PK, full_name, orcid NULL, current_institution_id FK NULL,
+        specialization, disambiguation_confidence ENUM('HIGH_ORCID_MATCH',
+        'MEDIUM_NAME_PLUS_AFFILIATION','LOW_NAME_ONLY'), source_id FK)
+
+institutions(institution_id PK, name, ror_id NULL,
+             type ENUM('ACADEMIC_MEDICAL_CENTER','UNIVERSITY',
+                        'RESEARCH_INSTITUTE','GOVERNMENT','PHARMA',
+                        'BIOTECH','HOSPITAL','OTHER'), source_id FK)
+
+trial_person_roles(id PK, trial_id FK, person_id FK,
+    role ENUM('PRINCIPAL_INVESTIGATOR','STUDY_CHAIR','STUDY_DIRECTOR',
+               'INVESTIGATOR','OTHER'),
+    since_date NULL, source_id FK, verified BOOLEAN)
+
+trial_institution_roles(id PK, trial_id FK, institution_id FK,
+    role ENUM('LEAD_SPONSOR','COLLABORATOR','CLINICAL_SITE','FUNDER',
+               'ACADEMIC_PARTNER','OTHER'),
+    since_date NULL, source_id FK, verified BOOLEAN)
+
+partnerships(partnership_id PK, asset_id FK, partner_institution_id FK,
+    role ENUM('LICENSING_PARTNER','CO_DEVELOPMENT_PARTNER',
+               'MANUFACTURING_PARTNER','FUNDER','COMMERCIAL_PARTNER','OTHER'),
+    since_date, what_exactly_contributed TEXT, source_id FK, verified BOOLEAN)
+
+funding_events(funding_id PK, asset_id FK, partnership_id FK NULL,
+    type ENUM('UPFRONT_PAYMENT','MILESTONE_PAYMENT','RESEARCH_FUNDING',
+               'GRANT','EQUITY_INVESTMENT','OTHER'),
+    amount NULL, currency NULL,   -- NULL to poprawny, częsty stan (kwoty
+                                   -- transakcji biotech bywają nieujawnione —
+                                   -- to NIE jest DATA UNAVAILABLE/błąd)
+    disclosed_date, source_id FK, verified BOOLEAN)
+
+publications(publication_id PK, title, journal_or_conference,
+    publication_date, doi NULL, openalex_id NULL, source_url,
+    study_type ENUM('TRIAL_RESULTS','MECHANISM_OF_ACTION','REVIEW',
+                      'CONFERENCE_ABSTRACT','OTHER'),
+    concerns_actual_product BOOLEAN,   -- rozróżnienie z pkt 7: mechanizm
+                                        -- vs faktyczny produkt
+    evidence_origin ENUM('COMPANY_GENERATED','COLLABORATOR_GENERATED',
+                           'INDEPENDENT_ACADEMIC','PEER_REVIEWED',
+                           'REGULATORY','OTHER'),
+    source_id FK)
+
+publication_authors(id PK, publication_id FK, person_id FK, author_order,
+                     affiliation_institution_id FK NULL)
+
+publication_asset_links(id PK, publication_id FK, asset_id FK,
+                         trial_id FK NULL, relation_note)
+
+conflicts_dependencies(id PK, asset_id FK, person_id FK NULL,
+    institution_id FK NULL,
+    type ENUM('EMPLOYED_BY_COMPANY','CONSULTING_FOR_COMPANY',
+               'COMPANY_FUNDED_RESEARCH','COMPANY_SPONSORED_TRIAL',
+               'LICENSING_RELATIONSHIP','EQUITY_FINANCIAL_RELATIONSHIP'),
+    disclosed BOOLEAN, source_id FK)
+
+-- Wynik syntezy — immutable, wersjonowane jak `analyses`
+external_validation_assessments(assessment_id PK, asset_id FK,
+    analysis_id FK, key_people JSON, key_institutions JSON,
+    commercial_partners JSON, independent_evidence JSON,
+    dependencies_conflicts JSON,
+    assessment ENUM('STRONG','MODERATE','LIMITED','INSUFFICIENT_DATA'),
+    confidence ENUM('HIGH','MEDIUM','LOW'), why TEXT, created_at)
+```
+
+Uwaga projektowa: `evidence_origin` jest kolumną wprost na `publications` (i analogicznie mogłaby być na `funding_events`/`partnerships`), zamiast jednej generycznej tabeli polimorficznej „evidence_provenance" — czytelniejsze i prostsze w relacyjnej bazie, ta sama informacja, mniej pośredniej złożoności. Wszystkie tabele relacyjne (`trial_person_roles`, `trial_institution_roles`, `partnerships`, `funding_events`, `publications`, `conflicts_dependencies`) mają `source_id FK` → `analysis_sources` i `verified BOOLEAN` — dokładnie ten sam mechanizm co reszta systemu (BLOCKER 3), rozszerzony z „dokumentów" na „relacje między encjami".
+
+### 18.3 Structured LLM output — External Validation Assessment
+
+Osobny schemat per kluczowy asset, budowany na bazie już zebranych (deterministycznie, z CT.gov/OpenAlex/EDGAR/IR) rekordów — LLM syntetyzuje i interpretuje fakty, nie ustala ich istnienia:
+
+```json
+{
+  "asset_id": "...",
+  "schema_version": "1.0",
+  "report_type": "EXTERNAL_VALIDATION",
+  "key_people": [
+    { "person_id": "", "name": "", "role": "PRINCIPAL_INVESTIGATOR",
+      "relevance_to_indication": "", "confidence": "MEDIUM",
+      "source_ids": [] }
+  ],
+  "key_institutions": [
+    { "institution_id": "", "name": "", "role": "LEAD_SPONSOR",
+      "since": null, "what_exactly_contributed": "", "source_ids": [] }
+  ],
+  "commercial_development_partners": [
+    { "institution_id": "", "role": "LICENSING_PARTNER",
+      "material_resources_committed": true, "source_ids": [] }
+  ],
+  "independent_evidence": [
+    { "publication_id": "", "evidence_origin": "INDEPENDENT_ACADEMIC",
+      "concerns_actual_product": false, "source_ids": [] }
+  ],
+  "dependencies_conflicts": [
+    { "type": "COMPANY_SPONSORED_TRIAL", "description": "", "source_ids": [] }
+  ],
+  "external_validation": "LIMITED",
+  "confidence": "MEDIUM",
+  "why": "",
+  "notable_external_validation": false
+}
+```
+
+Reguły walidacji — identyczne z pkt 8: każdy `source_ids` musi być podzbiorem realnie dostarczonych źródeł; brak numeru strony dla HTML; reject przy naruszeniu. Dodatkowo dwie reguły specyficzne dla tego modułu, wymuszane w post-processingu, nie tylko w prompt:
+1. Sam fakt wystąpienia osoby/instytucji w rekordzie CT.gov/publikacji **nie** podnosi automatycznie `external_validation` — ocena STRONG/MODERATE/LIMITED/INSUFFICIENT_DATA musi jawnie odróżniać „NAME APPEARS IN STUDY" od „ORGANIZATION COMMITTED MATERIAL RESOURCES" (pkt 5 wymagania) — deterministyczna reguła pomocnicza może np. wymagać, żeby STRONG wymagało co najmniej jednego rekordu `partnerships`/`funding_events` z `material_resources_committed: true`, nie tylko obecności w `trial_institution_roles`.
+2. Publikacja dotycząca mechanizmu działania (`study_type: MECHANISM_OF_ACTION`) nigdy nie może być jedynym uzasadnieniem oceny wyższej niż LIMITED bez dodatkowej publikacji z `concerns_actual_product: true`.
+
+### 18.4 Integralność z resztą architektury
+
+Moduł w całości reużywa istniejące mechanizmy zamiast budować nowy system: Source Assembly Layer (BLOCKER 3) rozszerzony o nowe typy źródeł (CT.gov, OpenAlex, ROR); ten sam wzorzec `verified`/`UNVERIFIED`; ten sam wzorzec confidence HIGH/MEDIUM/LOW z tym samym, już zidentyfikowanym w IMPORTANT braki rubryki (patrz niżej); ten sam mechanizm wersjonowania/immutability co `analyses`. **Istotna, korzystna właściwość architektoniczna:** większość danych z sekcji 1, 4, 7 (kto, jaka rola, jaka instytucja, jaka publikacja) da się pozyskać **w pełni deterministycznie** z CT.gov/OpenAlex/ROR bez udziału LLM — Claude potrzebny jest dopiero do syntezy/interpretacji (pkt 18.3, reguły 1–2) i do jakościowej oceny relevance badacza do wskazania medycznego (pkt 3 wymagania — „czy badacz ma istotne doświadczenie bezpośrednio związane z tym problemem"). To utrzymuje koszt pod kontrolą i zmniejsza powierzchnię ryzyka halucynacji, bo LLM operuje na już ustalonych faktach, nie ustala ich sam.
+
+### 18.5 Nowe ryzyka (uzupełnienie do IMPORTANT, patrz też sekcja niżej)
+
+- **Disambiguacja osób o tym samym nazwisku** (typowa w dużych bazach badaczy medycznych) — zmitygowane architektonicznie przez wymóg dopasowania ORCID/ROR (OpenAlex) jako warunku `disambiguation_confidence: HIGH_ORCID_MATCH`; dopasowanie po samym nazwisku+afiliacji ląduje jako `MEDIUM`/`LOW`, nigdy nie jest cicho podnoszone do pewności bez podstawy źródłowej.
+- **Ten sam brak rubryki dla confidence**, już zidentyfikowany w ogólnej sekcji IMPORTANT, dotyczy teraz też oceny `external_validation` (STRONG/MODERATE/LIMITED/INSUFFICIENT_DATA) — nie tworzę tu osobnego punktu, tylko rozszerzam istniejący.
+- **Koszt:** ograniczony przez to, że większość ekstrakcji jest deterministyczna (pkt 18.4); LLM wywoływany per kluczowy asset (nie per wszystkie programy spółki) — zgodnie z zasadą „kluczowy program/istotny asset" ze specyfikacji, nie każdy wpis w pipeline spółki. Nie wymaga osobnej decyzji właściciela — operacjonalizuję to jako „asset napędzający tezę inwestycyjną (zwykle najbardziej zaawansowany kliniczne)", konfigurowalne później.
+
+### 18.6 Wpływ na plan implementacji
+
+Nowa **Faza 8** (po Fazie 7 MY HOLDINGS, razem z lub po rozszerzeniu sektorowym o BIOTECH — nie wcześniej niż V1 jest stabilny):
+8.1 Ingest ClinicalTrials.gov API v2 dla spółek biotech w uniwersum (po potwierdzeniu dokładnej struktury pól ról badaczy).
+8.2 Integracja OpenAlex/ROR do disambiguacji osób/instytucji i pozyskiwania publikacji.
+8.3 Tabele z pkt 18.2 + reużycie Source Assembly Layer dla nowych typów źródeł.
+8.4 Schemat External Validation Assessment (pkt 18.3) + reguły post-processingu (1–2).
+8.5 Integracja z candidate card / raportem — sekcja EXTERNAL VALIDATION jako dodatek do (nie zamiennik) istniejących sekcji biotech-specyficznych (Clinical Evidence, PoS, Regulatory, rNPV — same wymagają odrębnego zaprojektowania, poza zakresem tej tury).
+
+---
+
 ## OPEN BLOCKERS
 
 Te dwa BLOCKERY **pozostają formalnie otwarte** — mają zidentyfikowaną, konkretną ścieżkę rozwiązania, ale wymagają bezpośredniej weryfikacji u dostawcy/w dokumentacji przed uznaniem za zamknięte. Nie rozpoczynać Fazy 5 (backtesting) bez tego potwierdzenia.
@@ -683,6 +844,8 @@ Poniższe trzy punkty **nie wymagają dalszej dyskusji** — decyzje przyjęte i
 - Źródło i granulacja klasyfikacji sektorowej (GICS sub-industry vs sector) — potrzebne do przełączania logiki z pkt 12, niespecyfikowane.
 - Fałszywe negatywy pre-filtra są z definicji niewidoczne (spółka odrzucona nigdy nie trafia do LLM) — potrzebny okresowy manualny audyt próbki odrzuconych spółek, niezależny od formalnego backtestingu.
 - **(Nowe, z MY HOLDINGS) Rekoncyliacja pozycji użytkownika z rzeczywistym rachunkiem maklerskim nie jest częścią systemu** (zgodnie z RULE 12 — brak integracji z brokerem) — dane w `purchase_transactions`/`sale_transactions` są tak dobre, jak ręczne wprowadzanie przez użytkownika. Warto rozważyć w V1.5/V2 prosty mechanizm „sanity check" (np. porównanie sumy zainwestowanego kapitału z oczekiwaniem użytkownika) — nie teraz, tylko odnotowane jako ryzyko jakości danych wejściowych.
+- **(Nowe, z modułu BIOTECH External Validation) Brak rubryki dla confidence dotyczy teraz też oceny STRONG/MODERATE/LIMITED/INSUFFICIENT_DATA** (pkt 18.3–18.5) — ten sam brak operacyjnego testu „confidence odzwierciedla jakość dowodów, nie retorykę", tylko w nowym kontekście; jedna rubryka do zaprojektowania powinna objąć oba przypadki.
+- **(Nowe, z modułu BIOTECH) Dokładna struktura pól ról badaczy w ClinicalTrials.gov API v2** (Principal Investigator/Study Chair/Study Director) nie została potwierdzona w tym przeglądzie — do zweryfikowania w oficjalnej dokumentacji przed implementacją Fazy 8, nie zakładać na pewno ścieżki pola.
 
 ---
 
@@ -717,6 +880,7 @@ Pytam wyłącznie o decyzje z realnym wpływem na działanie produktu, wiarygodn
 | **D12** | **Metoda rozliczania kosztu przy częściowej sprzedaży** | FIFO / average cost (ważona średnia) / specific lot identification | **FIFO jako domyślna** — najprostsza do wdrożenia deterministycznie, najczęstszy standard | To wyłącznie wewnętrzne liczenie realized/unrealized P/L do celów decyzyjnych — **system nie jest narzędziem podatkowym**. Jeśli wynik ma też służyć jako podstawa do rozliczeń podatkowych w Polsce, zalecam potwierdzenie właściwej metody z doradcą podatkowym — nie zakładam tu żadnych konkretnych przepisów, bo nie mam co do nich pewności | Brak | Niska — jeden parametr configu, logika ta sama niezależnie od wyboru |
 | **D13** | **Cadence pełnej (LLM-owej) reanalizy posiadanych pozycji** | (a) codziennie pełna analiza LLM dla każdej pozycji, (b) TRIGGER_GATED — deterministyczny pre-check codziennie + pełna analiza tylko po spełnieniu warunku lub nowym filingu, (c) stały rytm (np. tygodniowy/miesięczny) niezależny od triggerów | **(b) TRIGGER_GATED** | Zgodne z zasadą „tani filtr najpierw" już przyjętą w oryginalnej specyfikacji (§35); (a) skaluje koszt liniowo z liczbą pozycji bez proporcjonalnej korzyści; (c) ryzykuje przeoczenie istotnej zmiany między cyklami | (a) najdroższe, (b)/(c) marginalne | (b) wymaga logiki pre-triggera, ale reużywa istniejący silnik wskaźników deterministycznych z pre-filtra — umiarkowana |
 | **D14** | **Okno czasowe backtestingu** | (a) ograniczyć do ok. 2012–dziś (LIMITED_BUT_HONEST), (b) inwestycja w dodatkowe/droższe dane, by wydłużyć okno wstecz (koszt nieznany) | **(a)** na start V0.5, (b) tylko jeśli próbka z (a) okaże się statystycznie niewystarczająca | Realizuje wprost zasadę „priorytetem jest brak survivorship bias, nie maksymalna długość backtestu" | (a) bez dodatkowego kosztu; (b) nieznany, do wyceny gdyby był potrzebny | (a) brak dodatkowej złożoności |
+| **D15 (NOWA)** | **Miejsce modułu BIOTECH External Validation w harmonogramie** | (a) dopiero po V1 i po ustabilizowaniu wsparcia sektorowego GENERAL/BANK/INSURER/REIT (zgodnie z D7), jako Faza 8, (b) przyspieszyć i potraktować biotech jako priorytet równoległy do V1 | **(a)** — zgodnie z już przyjętą zasadą „rdzeń najpierw" (D7) | To realna decyzja o priorytetach, nie szczegół techniczny: moduł jest funkcjonalnie niezależny od rdzenia scannera i wymaga własnych źródeł (CT.gov, OpenAlex, ROR) — przyspieszenie go oznacza odłożenie ustabilizowania rdzenia dla wszystkich innych sektorów | (a) brak dodatkowego kosztu teraz; (b) oznacza wcześniejsze wydatki na integrację nowych źródeł | (a) utrzymuje V0/V1 proste; (b) zwiększa złożoność wczesnych faz |
 
 ---
 
@@ -726,7 +890,9 @@ Rdzeń specyfikacji (rozróżnienie price decline vs value destruction, moduł a
 
 Moduł MY HOLDINGS / EXIT MONITORING został w pełni zaprojektowany na poziomie schematu bazy danych, event modelu i audit trail, świadomie reużywając istniejące mechanizmy (Source Assembly Layer, Change Detection, silnik scoringu) zamiast budowania drugiego, niezależnego systemu. Przy okazji researchu do BLOCKER 2 wykryto i naprawiono realną lukę w pierwotnym projekcie (identyfikacja spółek po tickerze zamiast po CIK) — dotyczy to zarówno backtestingu, jak i integralności danych w MY HOLDINGS.
 
-Nie rozpoczęto implementacji. Czekam na: (1) decyzje D1–D14 z tabeli „DECISIONS REQUIRED FROM OWNER" (D12–D14 są nowe i wymagają wyboru; D1, D5–D11 pozostają jak w pierwotnej rekomendacji, jeśli się z nimi zgadzasz), (2) wynik bezpośredniej weryfikacji dostawców dla OPEN BLOCKER 1/2, zanim Faza 5 (backtesting) zostanie odblokowana.
+W tej turze zaprojektowano dodatkowo moduł BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) — relacje COMPANY→ASSET→TRIAL→PERSON→INSTITUTION→PUBLICATION→PARTNERSHIP→FUNDING w zwykłej relacyjnej bazie (graph DB świadomie odrzucona jako nieproporcjonalna do skali), nowe źródła (ClinicalTrials.gov API v2, OpenAlex, ROR), oraz structured output wymuszający rozróżnienie „obecność w badaniu" od „zaangażowanie materialnych zasobów" i „publikacja o mechanizmie" od „dowód skuteczności produktu" — dokładnie te rozróżnienia, o które proszono. Moduł w całości reużywa Source Assembly Layer i wzorzec `verified`/`UNVERIFIED` z BLOCKER 3, zamiast tworzyć osobny system źródeł.
+
+Nie rozpoczęto implementacji. Czekam na: (1) decyzje D1–D15 z tabeli „DECISIONS REQUIRED FROM OWNER" (D12–D15 są nowe i wymagają wyboru; D1, D5–D11 pozostają jak w pierwotnej rekomendacji, jeśli się z nimi zgadzasz), (2) wynik bezpośredniej weryfikacji dostawców dla OPEN BLOCKER 1/2, zanim Faza 5 (backtesting) zostanie odblokowana.
 
 ---
 
@@ -749,4 +915,9 @@ Nie rozpoczęto implementacji. Czekam na: (1) decyzje D1–D14 z tabeli „DECIS
 - [As-Reported vs Restated Financial Data: Why the Difference Matters for Backtesting](https://dev.to/tradevodata/as-reported-vs-restated-financial-data-why-the-difference-matters-for-backtesting-1big)
 - [How to Build a Point-in-Time Fundamentals Database from SEC EDGAR (and When Not To)](https://dev.to/tradevodata/how-to-build-a-point-in-time-fundamentals-database-from-sec-edgar-and-when-not-to-2gn6)
 - [Point in Time Fundamentals | LSEG Data & Analytics](https://www.lseg.com/en/data-analytics/financial-data/company-data/fundamentals-data/point-in-time-fundamentals)
+- [ClinicalTrials.gov API v2 Reference](https://conorscode.github.io/clinicaltrials-api-reference/)
+- [ClinicalTrials.gov API — Search Areas | ClinicalTrials.gov](https://clinicaltrials.gov/data-api/about-api/search-areas)
+- [ClinicalTrials.gov API](https://clinicaltrials.gov/data-api/api)
+- [Authors Overview | OpenAlex Help Center](https://help.openalex.org/data/authors/)
+- [API reference | OpenAlex Help Center](https://developers.openalex.org/api-reference/introduction)
 - Ceny Claude API (Sonnet 5: 2 USD/10 USD za MTok wejście/wyjście) — wewnętrzna, aktualna tabela cennika Anthropic (cache 2026-06-24).
