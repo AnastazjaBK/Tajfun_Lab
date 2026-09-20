@@ -1,9 +1,10 @@
 # BUFFETT OPPORTUNITY SCANNER — Technical Design Review
 
-**Status:** v1.2 — w pełni scalona wersja (v1.0 + decyzje właściciela dot. 5 BLOCKERÓW + moduł MY HOLDINGS / EXIT MONITORING + moduł BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK). Ten plik jest samodzielny — nie wymaga sięgania do historii commitów. Implementacja NIE została rozpoczęta.
-**Data:** 2026-09-20 (v1.0, v1.1, v1.2 — wszystkie tego samego dnia)
-**Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania zamiast ogólnego „do ustalenia"; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING (schema, event model, wpływ na architekturę); (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera jako klucz) w oparciu o realne ryzyko „ticker recycling" znalezione podczas researchu do BLOCKER 2.
-**Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) — relacje COMPANY→ASSET→TRIAL→PERSON→INSTITUTION→PUBLICATION→PARTNERSHIP→FUNDING, nowe źródła danych (ClinicalTrials.gov API, OpenAlex, ROR), nowa decyzja D15.
+**Status:** v1.3 — w pełni scalona wersja, po decyzjach właściciela wobec D1–D15. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów. Implementacja NIE została rozpoczęta.
+**Data:** 2026-09-20 (v1.0–v1.3, wszystkie tego samego dnia)
+**Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING; (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera).
+**Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) jako jedną warstwę przyszłego pełnego modelu biotech.
+**Zmiana w v1.3:** zamknięto decyzje D2, D4–D14 zgodnie z odpowiedziami właściciela (patrz sekcja DECISIONS); D1 i D3 pozostają w toku technicznej weryfikacji dostawców, z regułą wyboru już ustaloną przez właściciela; D15 rozstrzygnięte na rzecz nowej kolejności priorytetów — **BIOTECH ma wyższy priorytet niż pełne rozszerzenie BANK/INSURER/REIT**, plan implementacji (sekcja 15) i zakres modułu biotech (sekcja 18) zaktualizowane odpowiednio; dodano rejestr pełnego docelowego zakresu BIOTECH MODULE (Clinical Pipeline, Trial Quality, PoS jako zakres a nie punkt, Cash Runway, Dilution Risk, Catalyst Calendar, rNPV, biotech-specific Thesis Monitoring, integracja z MY HOLDINGS) jako scope do zaprojektowania w osobnej, przyszłej turze (nowa Faza 8 — DESIGN) — External Validation pozostaje tylko jedną z jego warstw.
 
 ## Metodologia i zastrzeżenia
 
@@ -129,13 +130,21 @@ Wszystkie kwoty poniżej to **rząd wielkości**, nie oferta handlowa — źród
 
 ### Identyfikacja spółek: CIK, nie ticker
 
+**Przenośność SQLite → Postgres (Decyzja D5):** schema poniżej celowo używa wyłącznie typów i konstrukcji przenośnych między SQLite a Postgres (proste kolumny, `ENUM` realizowany jako `CHECK`/tekst w SQLite i natywny typ w Postgres, `JSON` jako tekst w SQLite i `jsonb` w Postgres) — migracja V0→V1 to zmiana silnika połączenia i ewentualnie typu kolumny JSON, nie przeprojektowanie modelu danych.
+
 W trakcie researchu do BLOCKER 2 potwierdzone zostało realne ryzyko „ticker recycling" — po delistingu/fuzji ticker bywa **ponownie przypisywany zupełnie innej spółce** (udokumentowany przykład: `STI` należał do SunTrust Banks przed fuzją z Truist w 2019, potem został przypisany innej spółce). Przy kluczu głównym opartym na tickerze backtest lub — gorzej — **moduł MY HOLDINGS** mógłby po latach powiązać historyczną pozycję z zupełnie inną firmą. To nie jest tylko problem backtestingu — to również ryzyko integralności danych dla realnych posiadanych pozycji. Dlatego wszystkie tabele poniżej identyfikują spółki po `cik`, nie po `ticker`; ticker jest atrybutem zmiennym w czasie, wyświetlanym w UI, nigdy kluczem.
 
 ```sql
 -- Uniwersum, tożsamość spółek i historia tickerów
 companies(cik PK, name, sector, industry, sub_industry,
-          sector_profile ENUM('GENERAL','BANK','INSURER','REIT'),
+          sector_profile ENUM('GENERAL','BANK','INSURER','REIT','BIOTECH'),
           is_active BOOLEAN, created_at)
+  -- BIOTECH jest tu jako wartość identyfikująca spółkę, ale w V0/V1
+  -- spółki z sector_profile=BIOTECH są jawnie wykluczone ze standardowego
+  -- scoringu (status NOT_YET_SUPPORTED w raporcie, nie cichy błąd) —
+  -- dostają własny pipeline dopiero od Fazy 8/9 (sekcja 18), inaczej niż
+  -- BANK/INSURER/REIT, które współdzielą silnik GENERAL z podmienionymi
+  -- metrykami (Decyzja D7, D15)
 
 ticker_history(id PK, cik FK, ticker, start_date, end_date NULL)
   -- ticker jako atrybut zmienny w czasie, nie tożsamość;
@@ -306,7 +315,10 @@ hard_gates:
   status: UNCALIBRATED
 
 llm:
-  model: claude-sonnet-5
+  model: claude-sonnet-5   # zmiana modelu = zmiana configu, bez zmian w kodzie (Decyzja D6)
+  escalation_model: null   # np. claude-opus-5 — ręczny re-run niejednoznacznych
+                            # analiz, włączany dopiero jeśli testy pokażą realną
+                            # poprawę jakości; NIE domyślny model bez dowodu (D6)
   max_output_tokens: 4000
   schema_version: "1.0"
   reject_on_schema_violation: true
@@ -324,6 +336,9 @@ sector_overrides:
   bank: {...}
   insurer: {...}
   reit: {...}
+  # BIOTECH celowo NIE ma wpisu tutaj: to nie jest zestaw podmienionych
+  # metryk w tym samym silniku GENERAL/BANK/INSURER/REIT (D7), tylko
+  # odrębny pipeline projektowany od Fazy 8 — patrz sekcja 18
 
 holdings:
   monitoring_cadence: TRIGGER_GATED   # patrz Decyzja D13
@@ -428,7 +443,9 @@ Te same reguły walidacji obowiązują dla osobnego schematu Exit Review (pkt 16
 - Pełnotekstowe wyszukiwanie (`efts.sec.gov/LATEST/search-index`) do lokalizowania konkretnych fraz (np. „going concern") w filingach od 2001.
 - Wymogi techniczne: deklarowany User-Agent z danymi kontaktowymi, limit **10 req/s**, brak wymaganego klucza API — ale wymagane cache'owanie, żeby nie przekraczać limitu przy 503 spółkach dziennie.
 
-**Investor Relations:** SEC EDGAR nie ma odpowiednika dla dokumentów IR (prezentacje, press release). Brak scentralizowanego, weryfikowalnego indeksu → proponowana allowlista domen IR budowana ręcznie/stopniowo (patrz Decyzja D9), rozwiązywana najpierw z oficjalnej strony spółki wskazanej na stronie tytułowej 10-K, nigdy z wyników wyszukiwarki internetowej bez weryfikacji.
+**Investor Relations:** SEC EDGAR nie ma odpowiednika dla dokumentów IR (prezentacje, press release). Brak scentralizowanego, weryfikowalnego indeksu → allowlista domen IR budowana ręcznie/stopniowo (Decyzja D9), rozwiązywana najpierw z oficjalnej strony spółki wskazanej na stronie tytułowej 10-K, nigdy z wyników wyszukiwarki internetowej bez weryfikacji. Dodawana dla spółek, które faktycznie trafiają do głębszej analizy/watchlisty/holdings — nie z góry dla całego uniwersum.
+
+**Projekt pod przyszłą automatyzację (D9):** wykrycie kandydata na domenę IR da się zautomatyzować bezpiecznie — kod wyciąga adres oficjalnej strony spółki z pola na stronie tytułowej 10-K (dane ustrukturyzowane, nie zgadywane), a „weryfikacja" polega na porównaniu nazwy spółki/CIK widocznych na tej stronie z rekordem w `companies`. Wynik automatycznego wykrycia i tak trafia do allowlisty jako `verified: false` do czasu jednorazowego ręcznego potwierdzenia — automatyzacja przyspiesza pozyskanie kandydata, nie zastępuje weryfikacji. Nieimplementowane w V0/V1, tylko zaprojektowane jako ścieżka rozszerzenia.
 
 **Zasada nadrzędna (implementacja RULE 1 i §17, decyzja architektoniczna dot. BLOCKER 3):** każdy wiersz w `analysis_sources` musi odpowiadać realnie wykonanemu żądaniu HTTP z kodem 200 i zapisanym hashem treści w trakcie danego uruchomienia pipeline'u — nigdy nie jest zapisywany na podstawie samego twierdzenia LLM. Source Assembly Layer jest **jedynym** twórcą wierszy w `analysis_sources`; Claude cytuje wyłącznie po `source_id` z dostarczonej listy. Deterministyczny post-processing odrzuca/usuwa każdy URL lub numer strony niepochodzący z tej listy. Niezweryfikowane źródło → `SOURCE NOT VERIFIED`, nigdy nie prezentowane jako potwierdzone. Dotyczy identycznie głównego pipeline'u i Exit Review.
 
@@ -465,9 +482,9 @@ Te same reguły walidacji obowiązują dla osobnego schematu Exit Review (pkt 16
 | **Banki** | Dług to „towar", nie dźwignia w zwykłym sensie — Net Debt/EBITDA, EV/EBITDA nie mają sensu | CET1/Tier 1, marża odsetkowa netto (NIM), wskaźnik efektywności kosztowej, ROTCE/ROE, P/TBV, trend rezerw na straty kredytowe |
 | **Ubezpieczyciele** | Zysk netto silnie zniekształcony przez rezerwy; FCF nie jest głównym miernikiem | Combined ratio, rozwój rezerw szkodowych, float i koszt floatu, wartość księgowa na akcję, P/B, wskaźniki kapitału regulacyjnego (RBC) |
 | **REIT-y** | Amortyzacja realna, ale niegotówkowa i specyficzna dla branży — zysk netto/FCF wprost mylące | FFO/AFFO zamiast zysku netto/FCF, NAV vs P/AFFO, wzrost NOI same-store, obłożenie, payout liczony względem AFFO (nie netto — inaczej payout ratio strukturalnie >100%) |
-| **Spółki przedprzychodowe/biotech, wysoki wzrost reinwestujący cały FCF** | Reguła „exclude persistent negative FCF" z §7 wykluczyłaby je z definicji, mimo że mogą być wysokiej jakości biznesami | Rozwiązane decyzją dot. BLOCKER 5 — FLAG, nie EXCLUDE, domyślnie |
+| **BIOTECH** | Standardowe metryki GENERAL (P/E, FCF-jako-jakość, przychody) są bez sensu dla spółek przedklinicznych/klinicznych bez przychodu — wartość zależy od pipeline'u, prawdopodobieństwa sukcesu i kalendarza katalizatorów, nie od bieżących wyników finansowych | **Nie** metrics-swap w tym samym silniku jak BANK/INSURER/REIT — osobny pipeline (Clinical Pipeline, Trial Quality, PoS, Cash Runway, Dilution Risk, Catalyst Calendar, rNPV, External Validation — sekcja 18), traktowany priorytetowo względem pełnego BANK/INSURER/REIT (Decyzja D15) |
 
-**Rekomendacja V0:** pole `sector_profile` w configu (GENERAL / BANK / INSURER / REIT) przełączające zestaw metryk zasilających Financial Quality/Safety/Valuation. Domyślnie GENERAL dla ok. 440/503 spółek S&P 500; sektory specjalne dodać po ustabilizowaniu silnika na „zwykłych" spółkach (patrz Decyzja D7).
+**Rekomendacja V0:** pole `sector_profile` w configu (GENERAL / BANK / INSURER / REIT) przełączające zestaw metryk zasilających Financial Quality/Safety/Valuation w tym samym silniku. Domyślnie GENERAL dla ok. 440/503 spółek S&P 500; BANK/INSURER/REIT dodać po ustabilizowaniu silnika na „zwykłych" spółkach (Decyzja D7). BIOTECH jest kategorią jakościowo inną — nie dostaje podmienionych wag w istniejącym silniku, tylko odrębny model (sekcja 18), rozwijany zaraz po V1 i MY HOLDINGS, przed pełnym BANK/INSURER/REIT (Decyzja D15).
 
 ---
 
@@ -556,14 +573,23 @@ Oba BLOCKERY pozostają formalnie otwarte do czasu bezpośredniej weryfikacji do
 
 **Faza 6 (= V1)** — pełny przebieg na 503 spółkach, DB na skalę produkcyjną, dashboard, watchlist, automatyzacja dzienna (zgodnie z zakresem spec).
 
-**Faza 7 (po V1, w ramach V1.5/V2 — schema projektowana już teraz)**
+**Faza 7 — MY HOLDINGS, podstawowa obsługa pozycji** (po V1)
 7.1 Tabele `positions`, `purchase_transactions`, `sale_transactions`, `purchase_thesis` + logika BOUGHT tworząca snapshot tezy.
 7.2 Deterministyczny Holdings Monitor (krok 4b/4c z architektury) — tania bramka wyzwalająca pełną reanalizę tylko przy spełnieniu warunku.
 7.3 Schemat Exit Review + prompt LLM (reużywający Source Assembly Layer bez zmian).
 7.4 Raport Exit Review + akcje użytkownika (HOLD/REDUCE/SOLD/REVIEW LATER).
 7.5 Widok MY HOLDINGS w dashboardzie (minimalny zakres — nie pełny portfolio management).
 
-Każda faza powinna być samodzielnie testowalna na małej próbce tickerów przed skalowaniem do pełnych 503. Uzasadnienie umieszczenia tabel z 7.1 w projekcie już teraz, ale implementacji dopiero w Fazie 7: unika się kosztownej migracji schematu później (np. zmiany klucza głównego spółek na CIK już teraz, zamiast robić to pod presją, gdy w bazie będą już realne dane).
+**Faza 8 — BIOTECH MODULE: DESIGN** (priorytet wyższy niż pełne BANK/INSURER/REIT — Decyzja D15)
+Osobna, przyszła tura projektowa o tym samym rygorze co niniejszy dokument, obejmująca **cały** model biotech, nie tylko External Validation: Clinical Pipeline, Clinical Trial Quality, Clinical Evidence, Probability of Success (jako zakres z base rate + czynniki modyfikujące, nie punktowa liczba), Regulatory Status, Catalyst Calendar, Cash Runway, Dilution Risk, Pipeline Concentration, Competitive Landscape, risk-adjusted NPV/rNPV, External Validation & Research Network (już zaprojektowany — sekcja 18 — jako jedna z warstw), biotech-specific Thesis Monitoring, integracja z MY HOLDINGS/EXIT MONITORING (biotech-specific Purchase Thesis fields + Biotech Thesis Review). Pełny zarejestrowany zakres tej fazy — pkt 18.7. **Nie rozpoczynać implementacji przed ukończeniem tej fazy projektowej**, dokładnie tak jak V0 scannera nie zaczęło się bez tego dokumentu.
+
+**Faza 9 — BIOTECH MODULE: IMPLEMENTACJA**
+Wdrożenie osobnego pipeline'u/silnika scoringu dla spółek biotech na bazie projektu z Fazy 8, w tym warstwy External Validation z sekcji 18 jako jednego z komponentów. Reużywa Source Assembly Layer, wzorzec audytowalności i CIK-owy schemat tożsamości spółek z rdzenia — nie duplikuje tej infrastruktury.
+
+**Faza 10 (LATER, opcjonalnie) — pełne rozszerzenie BANK/INSURER/REIT**
+Tylko jeśli okaże się rzeczywiście potrzebne — **nie blokuje ani nie jest blokowane przez Fazę 8/9**; kolejność Faza 8/9 przed Fazą 10 wynika wprost z Decyzji D15 (biotech ma wyższy priorytet produktowy niż pełne pokrycie tych trzech sektorów).
+
+Każda faza powinna być samodzielnie testowalna na małej próbce tickerów/spółek przed skalowaniem. Uzasadnienie umieszczenia tabel MY HOLDINGS i BIOTECH (External Validation) w projekcie już teraz, ale implementacji dopiero w odpowiednich fazach: unika się kosztownej migracji schematu później (np. zmiany klucza głównego spółek na CIK już teraz, zamiast robić to pod presją, gdy w bazie będą już realne dane).
 
 ---
 
@@ -642,7 +668,7 @@ Sekcja MY HOLDINGS w przyszłym dashboardzie: spółka, ticker, liczba posiadany
 
 ### 18.0 Status i zakres
 
-Ten moduł dotyczy wyłącznie spółek biotech i dziedziczy harmonogram już ustalony dla sektorów specjalnych: biotech jest świadomie **wykluczony z zakresu V0** (Decyzja D7 — GENERAL najpierw), więc External Validation jest **projektowany teraz** (schema, źródła, structured output), ale **implementowany dopiero**, gdy moduł BIOTECH faktycznie wejdzie w zakres (po V1 — patrz 18.6). Nie zastępuje Clinical Evidence, Trial Quality, Probability of Success, Financial Runway, Regulatory Analysis, Competitive Landscape ani Valuation/rNPW — to dodatkowa warstwa odpowiadająca na pytanie „kto poza samą spółką jest zaangażowany w ten program, w jaki sposób, i jak silnym sygnałem jest to zaangażowanie".
+**External Validation & Research Network to JEDNA WARSTWA przyszłego pełnego BIOTECH MODULE, nie cały model.** Pełny zakres docelowy (Clinical Pipeline, Trial Quality, Clinical Evidence, Probability of Success, Regulatory Status, Catalyst Calendar, Cash Runway, Dilution Risk, Pipeline Concentration, Competitive Landscape, rNPV, External Validation, biotech-specific Thesis Monitoring, integracja z MY HOLDINGS) jest zarejestrowany w pkt 18.7 jako scope dla **Fazy 8 — osobnej, przyszłej tury projektowej**, nie zaprojektowany tutaj w całości. Ten moduł dotyczy wyłącznie spółek biotech; biotech jest świadomie **wykluczony z zakresu V0** (Decyzja D7 — GENERAL najpierw), ale — po decyzji D15 — ma **wyższy priorytet niż pełne rozszerzenie BANK/INSURER/REIT** w kolejności: V0 → V0.5 → V1 → MY HOLDINGS (Faza 7) → BIOTECH design + implementacja (Fazy 8–9) → BANK/INSURER/REIT pełne (Faza 10, opcjonalnie). External Validation jest **projektowany teraz** (ta sekcja: schema, źródła, structured output), ale **implementowany dopiero** w Fazie 9, jako jeden z komponentów pełnego modelu zaprojektowanego w Fazie 8. Nie zastępuje Clinical Evidence, Trial Quality, Probability of Success, Cash Runway, Regulatory Analysis, Competitive Landscape ani rNPV — to dodatkowa warstwa odpowiadająca na pytanie „kto poza samą spółką jest zaangażowany w ten program, w jaki sposób, i jak silnym sygnałem jest to zaangażowanie".
 
 ### 18.1 Dodatkowe źródła danych
 
@@ -787,18 +813,30 @@ Moduł w całości reużywa istniejące mechanizmy zamiast budować nowy system:
 
 ### 18.6 Wpływ na plan implementacji
 
-Nowa **Faza 8** (po Fazie 7 MY HOLDINGS, razem z lub po rozszerzeniu sektorowym o BIOTECH — nie wcześniej niż V1 jest stabilny):
-8.1 Ingest ClinicalTrials.gov API v2 dla spółek biotech w uniwersum (po potwierdzeniu dokładnej struktury pól ról badaczy).
-8.2 Integracja OpenAlex/ROR do disambiguacji osób/instytucji i pozyskiwania publikacji.
-8.3 Tabele z pkt 18.2 + reużycie Source Assembly Layer dla nowych typów źródeł.
-8.4 Schemat External Validation Assessment (pkt 18.3) + reguły post-processingu (1–2).
-8.5 Integracja z candidate card / raportem — sekcja EXTERNAL VALIDATION jako dodatek do (nie zamiennik) istniejących sekcji biotech-specyficznych (Clinical Evidence, PoS, Regulatory, rNPV — same wymagają odrębnego zaprojektowania, poza zakresem tej tury).
+Implementacja tej warstwy to część **Fazy 9 — BIOTECH MODULE: IMPLEMENTACJA** (patrz sekcja 15), poprzedzonej **Fazą 8 — BIOTECH MODULE: DESIGN** (pełny zakres w pkt 18.7). W ramach Fazy 9, ta warstwa obejmuje:
+9.1 Ingest ClinicalTrials.gov API v2 dla spółek biotech w uniwersum (po potwierdzeniu dokładnej struktury pól ról badaczy).
+9.2 Integracja OpenAlex/ROR do disambiguacji osób/instytucji i pozyskiwania publikacji.
+9.3 Tabele z pkt 18.2 + reużycie Source Assembly Layer dla nowych typów źródeł.
+9.4 Schemat External Validation Assessment (pkt 18.3) + reguły post-processingu (1–2).
+9.5 Integracja z candidate card / raportem — sekcja EXTERNAL VALIDATION jako dodatek do (nie zamiennik) pozostałych sekcji biotech-specyficznych zaprojektowanych w Fazie 8.
+
+### 18.7 Pełny docelowy zakres BIOTECH MODULE — zarejestrowany scope dla Fazy 8 (NIE zaprojektowany w tej turze)
+
+Poniższe to zapis wymagań produktowych przekazanych przez właściciela, żeby nic nie zostało utracone — **projekt techniczny tych elementów (schema, structured output, źródła danych) powstanie dopiero w Fazie 8**, jako osobna tura o rygorze analogicznym do niniejszego dokumentu.
+
+**Cel produktowy:** wyszukiwać spółki rozwijające nowe leki, terapie biologiczne/genowe/komórkowe i inne innowacyjne terapie, identyfikować programy zbliżające się do istotnego clinical/regulatory catalyst, i odpowiadać na 15 pytań: co dokładnie spółka rozwija; na jakim etapie jest program; jak wyglądają dotychczasowe wyniki; jak dobre jakościowo jest badanie; jaki jest kolejny catalyst i kiedy oczekiwany; jakie jest historyczne/base-rate probability of success dla tego typu programu; jak konkretne dane o programie powinny zmienić ten base rate; jakie są najważniejsze ryzyka; czy spółka ma wystarczający cash runway do catalystu; jak duże jest dilution risk; jak bardzo wartość spółki zależy od jednego assetu; jak wygląda konkurencja; jaka może być risk-adjusted wartość programu; kto poza samą spółką jest zaangażowany (= External Validation, już zaprojektowane).
+
+**Komponenty pełnego modelu (do zaprojektowania w Fazie 8):** Clinical Pipeline; Clinical Trial Quality; Clinical Evidence; Probability of Success; Regulatory Status; Catalyst Calendar; Cash Runway; Dilution Risk; Pipeline Concentration; Competitive Landscape; risk-adjusted NPV/rNPV; External Validation & Research Network (już zaprojektowane — sekcja 18.1–18.6); biotech-specific Thesis Monitoring; integracja z MY HOLDINGS/EXIT MONITORING.
+
+**Probability of Success — zasada nadrzędna dla Fazy 8:** żadna fałszywa precyzja. Historyczne phase-transition probabilities służą jako **base rate**, aktualizowany na podstawie m.in. indication, modality, mechanism, previous trial results, endpoint, trial design, sample size, safety, regulatory feedback, competitive evidence, external validation. Wynik to zawsze **zakres** (np. „25–40%"), nigdy pojedyncza arbitralna liczba (np. „63.7%"), i musi pokazywać: base rate; evidence increasing probability; evidence decreasing probability; biggest unknown; confidence; sources.
+
+**BIOTECH + MY HOLDINGS (do zaprojektowania w Fazie 8, jako rozszerzenie schematu z sekcji 16):** przy zakupie spółki biotech Purchase Thesis musi dodatkowo zamrozić: key asset(s); phase at purchase; clinical evidence available at purchase; probability range at purchase; expected catalyst; expected catalyst date/range; cash runway; dilution risk; rNPV assumptions; external validation status; binary-event risk; biotech-specific thesis invalidation conditions. Po nowych wynikach system wykonuje **BIOTECH THESIS REVIEW** — analogicznie do Exit Review z sekcji 16.2, ale z dodatkowymi polami biotech-specyficznymi — porównujący „WHAT WE BELIEVED AT PURCHASE" vs „WHAT ACTUALLY HAPPENED". To rozszerzenie istniejącego mechanizmu Exit Review/Change Detection, nie nowy silnik — ta sama zasada reużycia co w resztą modułu.
 
 ---
 
 ## OPEN BLOCKERS
 
-Te dwa BLOCKERY **pozostają formalnie otwarte** — mają zidentyfikowaną, konkretną ścieżkę rozwiązania, ale wymagają bezpośredniej weryfikacji u dostawcy/w dokumentacji przed uznaniem za zamknięte. Nie rozpoczynać Fazy 5 (backtesting) bez tego potwierdzenia.
+Te dwa BLOCKERY **pozostają formalnie otwarte** — mają zidentyfikowaną, konkretną ścieżkę rozwiązania, ale wymagają bezpośredniej weryfikacji u dostawcy/w dokumentacji przed uznaniem za zamknięte. **Nie blokują rozpoczęcia Fazy 0–4 (budowa V0)** — dotyczą wyłącznie backtestingu. **Muszą** zostać rozwiązane przed rozpoczęciem Fazy 5 (V0.5 — właściwy backtesting).
 
 **OPEN BLOCKER 1 — Point-in-time fundamentals.**
 Tani dostawca danych prawdopodobnie zwraca wyłącznie najnowsze, skorygowane („restated") dane finansowe, nie stan wiedzy z danego dnia historycznego — potwierdzone researchem dla FMP. Bez tego backtesting narusza wprost wymóg §30 („no look-ahead bias"). Ścieżka rozwiązania: własna warstwa PIT budowana na SEC EDGAR XBRL company-facts (pole `filed`), bez dodatkowego kosztu licencyjnego. Pozostaje do zrobienia: (a) prototyp ekstrakcji dla 3–5 spółek testowych i porównanie z danymi „as reported" z dokumentacji FMP/EODHD, żeby potwierdzić wykonalność przed budową pełnej warstwy; (b) potwierdzenie jakości/kompletności danych `filed` dla okresu 2009–2012 (obszar niepewny).
@@ -836,6 +874,8 @@ Poniższe trzy punkty **nie wymagają dalszej dyskusji** — decyzje przyjęte i
 
 ## IMPORTANT — do ustalenia przed V1
 
+Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
+
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.
 - Forward P/E / estymaty analityków zwykle wymagają droższego tier u dostawcy — decyzja include/exclude dla V0/V1 (rekomendacja: exclude, patrz D8).
 - Utrzymanie allowlisty domen IR dla (docelowo) 503 spółek to realna, powtarzalna praca ręczna, nigdzie w spec nieadresowana wprost — wymaga decyzji o skali na start (D9).
@@ -860,27 +900,27 @@ Poniższe trzy punkty **nie wymagają dalszej dyskusji** — decyzje przyjęte i
 
 ---
 
-## DECISIONS REQUIRED FROM OWNER
+## DECISIONS — STATUS PO TURZE WŁAŚCICIELA (2026-09-20)
 
-Pytam wyłącznie o decyzje z realnym wpływem na działanie produktu, wiarygodność analiz, koszt, zakres lub sposób korzystania z narzędzia. Decyzje czysto implementacyjne z jednoznacznie lepszym rozwiązaniem technicznym (identyfikacja spółek po CIK, sposób liczenia pozycji „on read", reużycie mechanizmu Change Detection dla Exit Review, brak osobnego schedulera dla holdingów) zostały podjęte samodzielnie i uzasadnione w odpowiednich sekcjach powyżej — nie wymagają Twojego wyboru.
+13 z 15 decyzji są **ZAMKNIĘTE** — poniższa tabela zawiera już nie „rekomendację", tylko dosłowną decyzję właściciela, z uzasadnieniem i wpływem na koszt/złożoność zachowanym dla kontekstu. D1 i D3 są **W TRAKCIE TECHNICZNEJ WERYFIKACJI** — reguła wyboru jest już ustalona przez właściciela (patrz kolumna „Decyzja właściciela"), pozostaje wyłącznie wykonanie researchu i zastosowanie tej reguły, nie kolejna decyzja właściciela. Lista decyzji **wciąż wymagających wyboru** — na samym końcu dokumentu.
 
-| # | Decyzja | Opcje | Rekomendacja | Uzasadnienie | Wpływ na koszt | Wpływ na złożoność |
+| # | Decyzja | Status | Decyzja właściciela | Uzasadnienie / kontekst | Wpływ na koszt | Wpływ na złożoność |
 |---|---|---|---|---|---|---|
-| D1 | Dostawca danych finansowych | FMP / EODHD / Polygon-Massive / kombinacja | **FMP lub EODHD** (jeden dostawca) + SEC EDGAR zawsze | Podobny zakres, mniej integracji, niższy koszt na start; real-time z Polygon niepotrzebny. Dodatkowo: sprawdzić przy wyborze, który z nich oferuje bardziej wiarygodny i aktualny produkt historical-constituents (patrz D3) — może przechylić wybór | 0–100 USD/mies. różnicy zależnie od planu | Niska przy jednym dostawcy, wyższa przy dwóch (reconciliacja DATA CONFLICT) |
-| D2 | Metoda point-in-time do backtestingu | (a) dane „restated" z disclaimerem, (b) własna warstwa na SEC XBRL `filed`, (c) płatny dataset instytucjonalny | **(b)** — potwierdzone jako jedyna realna, darmowa ścieżka | Zgodnie z decyzją właściciela: (a) nieakceptowane, (c) nieproporcjonalnie drogie dla tej skali projektu | 0 USD (koszt czasu implementacji) | Średnia-wysoka — osobny moduł ekstrakcji |
-| D3 | Źródło historycznego składu S&P 500 | (a) EODHD Historical Constituents (płatny dodatek), (b) FMP Legacy endpoint, (c) darmowy zbiór społecznościowy + walidacja krzyżowa | **Zweryfikować (a) i (b) bezpośrednio przed wyborem** — obecnie brak wystarczających danych, by rekomendować jedno; (c) jako uzupełniająca walidacja niezależnie od wyboru głównego źródła | Priorytet: brak survivorship bias, nie maksymalna długość backtestu | Zależnie od wyniku weryfikacji; nieznany dla (a) — do wyceny | Niska–średnia |
-| D4 | Źródło listy aktualnego uniwersum S&P 500 | Wikipedia scrape / endpoint dostawcy / ręczna lista kwartalna | **Endpoint dostawcy** (jeśli w cenie wybranego planu), inaczej ręczna lista z kwartalnym review | Mniejsze ryzyko błędu niż scraping w produkcji | Zwykle brak dodatkowego kosztu | Niska |
-| D5 | Baza danych | SQLite / od razu Postgres | **SQLite w V0, Supabase (Postgres) od V1** | Unika przedwczesnej złożoności w V0; Supabase ma darmowy tier + UI czytelny dla osoby nietechnicznej | 0 USD na obu etapach (darmowe tiery) | Niska |
-| D6 | Model Claude do warstwy jakościowej (dotyczy też Exit Review) | Sonnet 5 / Opus 5 | **Sonnet 5** domyślnie, ręczny re-run na Opus 5 dla granicznych finalistów jeśli backtesting pokaże potrzebę | Sonnet 5 ok. 2,5× tańszy (2/10 USD za MTok vs 5/25 USD), brak jeszcze danych o realnej różnicy jakości uzasadniającej wyższy koszt | Sonnet 5 istotnie tańszy | Brak różnicy strukturalnej — parametr configu |
-| D7 | Zakres sektorowy w V0 | Pełne wsparcie banków/ubezpieczycieli/REIT-ów od razu / wykluczyć z V0 | **Wykluczyć** (osobna flaga „sector not yet supported", nie EXCLUDE z powodu jakości), dodać po ustabilizowaniu silnika na GENERAL | To ok. 60–70 spółek wymagających innej logiki; bezpieczniej dowieźć rdzeń najpierw | Brak | Istotnie obniża złożoność V0 |
-| D8 | Forward P/E i estymaty analityków | Include / exclude w V0/V1 | **Exclude** | Zwykle droższy tier u dostawcy, trudniejsze do zweryfikowania pierwotnie — sprzeczne z naciskiem na źródła pierwotne | Oszczędność (unikamy droższego planu) | Niższa (mniej pól do walidacji/źródłowania) |
-| D9 | Skala allowlisty domen IR na start | Pełne 503 spółki / mały podzbiór rozszerzany stopniowo | **Mały podzbiór** (np. 20–30 spółek), dla reszty tylko SEC EDGAR | Zapobiega niekontrolowanemu obciążeniu ręcznemu na starcie; EDGAR sam spełnia priorytet #1 hierarchii źródeł | Koszt czasu własnego, nie budżetu | Niska — ogranicza zakres na start |
-| D10 | Hosting/scheduler | GitHub Actions / własny VPS z cron | **GitHub Actions** | Zero administracji serwera, sekrety w GitHub UI, logi bez SSH — pasuje do wymogu „obsługiwalne przez osobę nietechniczną" | 0 USD (mieści się w darmowych minutach) | Niska |
-| D11 | Zakres krzyżowej weryfikacji danych z SEC XBRL | Każde pole vs tylko pola kluczowe dla scoringu/bramek | **Tylko pola kluczowe** (dług, gotówka, przychody, zysk netto, komponenty FCF) | Pełna weryfikacja każdego pola dla 503 spółek dziennie zwiększa liczbę żądań do EDGAR (limit 10 req/s) bez proporcjonalnej korzyści | Brak dodatkowego kosztu API (EDGAR darmowy), wpływa na czas wykonania | Umiarkowana, ograniczona zakresem |
-| **D12** | **Metoda rozliczania kosztu przy częściowej sprzedaży** | FIFO / average cost (ważona średnia) / specific lot identification | **FIFO jako domyślna** — najprostsza do wdrożenia deterministycznie, najczęstszy standard | To wyłącznie wewnętrzne liczenie realized/unrealized P/L do celów decyzyjnych — **system nie jest narzędziem podatkowym**. Jeśli wynik ma też służyć jako podstawa do rozliczeń podatkowych w Polsce, zalecam potwierdzenie właściwej metody z doradcą podatkowym — nie zakładam tu żadnych konkretnych przepisów, bo nie mam co do nich pewności | Brak | Niska — jeden parametr configu, logika ta sama niezależnie od wyboru |
-| **D13** | **Cadence pełnej (LLM-owej) reanalizy posiadanych pozycji** | (a) codziennie pełna analiza LLM dla każdej pozycji, (b) TRIGGER_GATED — deterministyczny pre-check codziennie + pełna analiza tylko po spełnieniu warunku lub nowym filingu, (c) stały rytm (np. tygodniowy/miesięczny) niezależny od triggerów | **(b) TRIGGER_GATED** | Zgodne z zasadą „tani filtr najpierw" już przyjętą w oryginalnej specyfikacji (§35); (a) skaluje koszt liniowo z liczbą pozycji bez proporcjonalnej korzyści; (c) ryzykuje przeoczenie istotnej zmiany między cyklami | (a) najdroższe, (b)/(c) marginalne | (b) wymaga logiki pre-triggera, ale reużywa istniejący silnik wskaźników deterministycznych z pre-filtra — umiarkowana |
-| **D14** | **Okno czasowe backtestingu** | (a) ograniczyć do ok. 2012–dziś (LIMITED_BUT_HONEST), (b) inwestycja w dodatkowe/droższe dane, by wydłużyć okno wstecz (koszt nieznany) | **(a)** na start V0.5, (b) tylko jeśli próbka z (a) okaże się statystycznie niewystarczająca | Realizuje wprost zasadę „priorytetem jest brak survivorship bias, nie maksymalna długość backtestu" | (a) bez dodatkowego kosztu; (b) nieznany, do wyceny gdyby był potrzebny | (a) brak dodatkowej złożoności |
-| **D15 (NOWA)** | **Miejsce modułu BIOTECH External Validation w harmonogramie** | (a) dopiero po V1 i po ustabilizowaniu wsparcia sektorowego GENERAL/BANK/INSURER/REIT (zgodnie z D7), jako Faza 8, (b) przyspieszyć i potraktować biotech jako priorytet równoległy do V1 | **(a)** — zgodnie z już przyjętą zasadą „rdzeń najpierw" (D7) | To realna decyzja o priorytetach, nie szczegół techniczny: moduł jest funkcjonalnie niezależny od rdzenia scannera i wymaga własnych źródeł (CT.gov, OpenAlex, ROR) — przyspieszenie go oznacza odłożenie ustabilizowania rdzenia dla wszystkich innych sektorów | (a) brak dodatkowego kosztu teraz; (b) oznacza wcześniejsze wydatki na integrację nowych źródeł | (a) utrzymuje V0/V1 proste; (b) zwiększa złożoność wczesnych faz |
+| D1 | Dostawca danych finansowych | **W TRAKCIE WERYFIKACJI** | Jeszcze nie wybrany. Wykonać bezpośrednią weryfikację FMP i EODHD pod kątem: jakości danych, pokrycia, historycznego składu S&P 500 (D3), stabilności API, kosztu, prostoty architektury. Jeden główny dostawca + SEC EDGAR zawsze — **nie** integrować dwóch płatnych providerów bez konieczności. Jeżeli EODHD rozwiązuje jednocześnie bieżące dane finansowe i historical constituents w akceptowalnej cenie → **EODHD**; jeśli nie → **FMP**. Polygon/Massive odrzucone na V0/V1, chyba że podczas implementacji pojawi się konkretny problem, którego FMP/EODHD nie rozwiązują. | Reguła wyboru już ustalona — pozostaje wykonanie researchu | 0–100 USD/mies. różnicy zależnie od planu | Niska przy jednym dostawcy |
+| D2 | Metoda point-in-time do backtestingu | **ZAMKNIĘTA — decyzja B** | Budujemy własną warstwę PIT na SEC XBRL `filed`. Nie akceptujemy backtestu na restated fundamentals udającym rzeczywisty stan wiedzy z historycznej daty. Nie kupujemy instytucjonalnego datasetu PIT na tym etapie. Przed pełną warstwą — prototyp dla 3–5 spółek (patrz Faza 5.1). | Jedyna opcja spójna z zasadą braku fabrykacji, przy zerowym koszcie licencyjnym | 0 USD (koszt czasu implementacji) | Średnia-wysoka — osobny moduł ekstrakcji |
+| D3 | Źródło historycznego składu S&P 500 | **W TRAKCIE WERYFIKACJI** | Najpierw zweryfikować EODHD Historical Constituents oraz aktualny status FMP Legacy endpoint. Kolejność preferencji: (1) komercyjne, utrzymywane API przy rozsądnym koszcie; (2) drugie niezależne źródło jako cross-check; (3) darmowy zbiór społecznościowy wyłącznie jako dodatkowa walidacja, nigdy jedyne źródło prawdy. Jeżeli EODHD daje wiarygodny dataset od ok. 2012 lub wcześniej przy rozsądnym koszcie → preferować EODHD. Nie wydłużać backtestu kosztem survivorship bias. | Reguła wyboru już ustalona — pozostaje wykonanie researchu | Zależnie od wyniku weryfikacji; nieznany dla płatnego dodatku — do wyceny | Niska–średnia |
+| D4 | Źródło listy aktualnego uniwersum S&P 500 | **ZAMKNIĘTA** | Endpoint wybranego dostawcy danych. Jeśli niedostępny w planie — najprostsze wiarygodne rozwiązanie zastępcze. Nie produkcyjny scraping Wikipedii jako podstawowe źródło. | Mniejsze ryzyko błędu niż scraping w produkcji | Zwykle brak dodatkowego kosztu | Niska |
+| D5 | Baza danych | **ZAMKNIĘTA** | Zgodnie z rekomendacją: SQLite w V0, Supabase/Postgres w V1. Schema projektowana od początku pod migrację bez przebudowy modelu danych (patrz nota o przenośności w sekcji 5). | Unika przedwczesnej złożoności w V0; Supabase ma darmowy tier + UI czytelny dla osoby nietechnicznej | 0 USD na obu etapach (darmowe tiery) | Niska |
+| D6 | Model Claude do warstwy jakościowej | **ZAMKNIĘTA** | Claude Sonnet 5 jako domyślny. Architektura umożliwia zmianę modelu przez config bez zmian w kodzie (patrz `llm.model`/`llm.escalation_model` w sekcji 6). Dopuszczony późniejszy re-run szczególnie niejednoznacznych analiz na mocniejszym modelu, wyłącznie jeśli testy pokażą realną poprawę jakości — nie domyślnie bez dowodu. | Sonnet 5 ok. 2,5× tańszy (2/10 USD za MTok vs 5/25 USD) | Sonnet 5 istotnie tańszy | Brak różnicy strukturalnej — parametr configu |
+| D7 | Zakres sektorowy V0 | **ZAMKNIĘTA** | GENERAL w pierwszym V0. Banki, ubezpieczyciele i REIT-y czekają na osobne profile sektorowe (Faza 10). **BIOTECH traktowany osobno** — nie przepuszczany przez standardowy GENERAL scoring, dostaje odrębny model (patrz D15, sekcja 18). | To ok. 60–70 spółek BANK/INSURER/REIT wymagających innej logiki; bezpieczniej dowieźć rdzeń najpierw | Brak | Istotnie obniża złożoność V0 |
+| D8 | Forward P/E i estymaty analityków | **ZAMKNIĘTA** | Exclude z V0/V1. Nie płacimy za droższe dane ani nie zwiększamy zależności od konsensusu analityków na tym etapie. Możliwy powrót później, jeśli okaże się, że wnosi istotną wartość. | Zwykle droższy tier u dostawcy, trudniejsze do zweryfikowania pierwotnie | Oszczędność (unikamy droższego planu) | Niższa (mniej pól do walidacji/źródłowania) |
+| D9 | Skala allowlisty domen IR na start | **ZAMKNIĘTA** | Mały podzbiór rozwijany stopniowo. Nie tworzymy ręcznie allowlisty 503 spółek przed uruchomieniem. SEC EDGAR jest podstawą; IR dodawany dla spółek, które faktycznie trafiają do głębszej analizy/watchlisty/holdings. Zaprojektowana ścieżka późniejszej automatyzacji bezpiecznego wykrywania/weryfikacji domeny IR (patrz sekcja 9). | Zapobiega niekontrolowanemu obciążeniu ręcznemu na starcie | Koszt czasu własnego, nie budżetu | Niska — ogranicza zakres na start |
+| D10 | Hosting/scheduler | **ZAMKNIĘTA** | GitHub Actions. Brak własnego VPS ani ręcznej administracji serwerem. | Zero administracji serwera, sekrety w GitHub UI, logi bez SSH | 0 USD (mieści się w darmowych minutach) | Niska |
+| D11 | Zakres krzyżowej weryfikacji z SEC XBRL | **ZAMKNIĘTA** | Tylko pola kluczowe dla scoringu i hard gates: revenue, cash, debt, net income, kluczowe elementy FCF, oraz inne pola bezpośrednio uruchamiające hard gate. Nie cross-checkujemy każdego pola tylko dlatego, że jest to technicznie możliwe. | Pełna weryfikacja każdego pola zwiększyłaby liczbę żądań do EDGAR (limit 10 req/s) bez proporcjonalnej korzyści | Brak dodatkowego kosztu API (EDGAR darmowy) | Umiarkowana, ograniczona zakresem |
+| D12 | Metoda rozliczania kosztu przy częściowej sprzedaży | **ZAMKNIĘTA** | FIFO jako domyślna metoda wewnętrzna. Wyłącznie do analizy inwestycji i prezentowania wyniku pozycji — **nie do generowania deklaracji podatkowej**. `cost_basis_method` jako parametr konfiguracyjny, zmienny później bez przebudowy systemu (już tak zaprojektowane — sekcja 6). | To wyłącznie wewnętrzne liczenie realized/unrealized P/L; system nie jest narzędziem podatkowym | Brak | Niska — jeden parametr configu |
+| D13 | Cadence monitoringu MY HOLDINGS | **ZAMKNIĘTA** | TRIGGER_GATED. Codziennie tani deterministyczny monitoring; pełna analiza Claude uruchamia się po istotnym triggerze, po nowym istotnym filingu, lub po zdarzeniu mogącym zmienić Purchase Thesis. System **nie może polegać wyłącznie na zmianie ceny jako triggerze** (już tak zaprojektowane — `deterministic_pretrigger_thresholds` w sekcji 6 zawiera triggery niezależne od ceny: dywidenda, filing, dźwignia). | Nie chcemy codziennie płacić za pełną analizę LLM każdej posiadanej spółki | (a) najdroższe, (b) marginalne | Umiarkowana — logika pre-triggera reużywa silnik z pre-filtra |
+| D14 | Okno czasowe backtestingu | **ZAMKNIĘTA** | Ok. 2012 → dziś, status LIMITED_BUT_HONEST. Nie wydłużamy sztucznie, jeśli wymagałoby to danych powodujących survivorship bias lub look-ahead bias. Powrót do decyzji możliwy później, jeśli pojawi się wiarygodne źródło w rozsądnej cenie. | Realizuje zasadę „priorytetem jest brak survivorship bias, nie maksymalna długość backtestu" | Bez dodatkowego kosztu teraz | Brak dodatkowej złożoności |
+| D15 | Miejsce modułu BIOTECH w harmonogramie | **ZAMKNIĘTA — nowy wariant: CORE FIRST, BIOTECH SECOND** | Kolejność: (1) V0 GENERAL core, (2) V0.5 backtesting/kalibracja core, (3) V1 daily scanner/dashboard/watchlist GENERAL, (4) MY HOLDINGS podstawowa obsługa, (5) BIOTECH MODULE — osobny pipeline/scoring (Fazy 8–9), (6) dopiero później pełne BANK/INSURER/REIT (Faza 10), jeśli w ogóle potrzebne. BIOTECH **nie jest** uzależniony od ukończenia BANK/INSURER/REIT — ma wyższy priorytet produktowy. External Validation (sekcja 18.1–18.6) to tylko jedna warstwa pełnego modelu; reszta zakresu zarejestrowana w 18.7 jako scope dla Fazy 8 (design), niezaprojektowana w tej turze. | Biotech jest istotnym elementem docelowego produktu; jednocześnie V0 nie ma budować dwóch silników naraz | Brak dodatkowego kosztu teraz; Faza 8/9 poniesie koszt integracji CT.gov/OpenAlex/ROR gdy do niej dojdzie | Plan implementacji zaktualizowany (sekcja 15): Faza 7 MY HOLDINGS → Faza 8 BIOTECH design → Faza 9 BIOTECH implementacja → Faza 10 BANK/INSURER/REIT (opcjonalnie) |
 
 ---
 
@@ -892,7 +932,19 @@ Moduł MY HOLDINGS / EXIT MONITORING został w pełni zaprojektowany na poziomie
 
 W tej turze zaprojektowano dodatkowo moduł BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) — relacje COMPANY→ASSET→TRIAL→PERSON→INSTITUTION→PUBLICATION→PARTNERSHIP→FUNDING w zwykłej relacyjnej bazie (graph DB świadomie odrzucona jako nieproporcjonalna do skali), nowe źródła (ClinicalTrials.gov API v2, OpenAlex, ROR), oraz structured output wymuszający rozróżnienie „obecność w badaniu" od „zaangażowanie materialnych zasobów" i „publikacja o mechanizmie" od „dowód skuteczności produktu" — dokładnie te rozróżnienia, o które proszono. Moduł w całości reużywa Source Assembly Layer i wzorzec `verified`/`UNVERIFIED` z BLOCKER 3, zamiast tworzyć osobny system źródeł.
 
-Nie rozpoczęto implementacji. Czekam na: (1) decyzje D1–D15 z tabeli „DECISIONS REQUIRED FROM OWNER" (D12–D15 są nowe i wymagają wyboru; D1, D5–D11 pozostają jak w pierwotnej rekomendacji, jeśli się z nimi zgadzasz), (2) wynik bezpośredniej weryfikacji dostawców dla OPEN BLOCKER 1/2, zanim Faza 5 (backtesting) zostanie odblokowana.
+**W tej turze (v1.3) właściciel przejrzał i rozstrzygnął 15 decyzji.** 13 zamknięte bezpośrednio; D1 i D3 przechodzą w status „w trakcie technicznej weryfikacji" z regułą wyboru już ustaloną. Najważniejsza zmiana merytoryczna: **D15 odrzuca pierwotną rekomendację** („biotech po pełnym BANK/INSURER/REIT") na rzecz „CORE FIRST, BIOTECH SECOND" — BIOTECH MODULE ma wyższy priorytet produktowy niż pełne pokrycie sektorów specjalnych i nie jest uzależniony od ich ukończenia. Plan implementacji (sekcja 15) przebudowany: Faza 7 (MY HOLDINGS) → Faza 8 (BIOTECH MODULE — DESIGN, pełny zakres zarejestrowany w 18.7, nieszczegółowy) → Faza 9 (BIOTECH MODULE — IMPLEMENTACJA, obejmująca External Validation z sekcji 18.1–18.6 jako jeden komponent) → Faza 10 (BANK/INSURER/REIT pełne, opcjonalnie, jeśli w ogóle potrzebne).
+
+Nie rozpoczęto implementacji.
+
+---
+
+## DECYZJE WCIĄŻ WYMAGAJĄCE TWOJEGO WYBORU
+
+**Zero.** Po tej turze nie ma otwartej decyzji, która czeka na Twój osąd.
+
+D1 (dostawca danych) i D3 (źródło historycznego składu S&P 500) pozostają formalnie „w trakcie" — ale to zadanie badawcze do wykonania przeze mnie (bezpośrednia weryfikacja FMP/EODHD wg kryteriów z D1 i D3), nie kolejne pytanie do Ciebie. Regułę wyboru już ustaliłaś: preferencja dla jednego dostawcy + SEC EDGAR, EODHD jeśli rozwiąże jednocześnie dane bieżące i historyczny skład w rozsądnej cenie, inaczej FMP; dla D3 kolejność komercyjne→cross-check→społecznościowe, priorytet dla braku survivorship bias nad długością backtestu. Gdy wrócę z wynikami weryfikacji, zastosuję tę regułę i pokażę wynik — zapytam ponownie tylko, jeśli research da wynik niejednoznaczny w sposób, którego Twoja reguła nie pokrywa (np. oba źródła równie dobre i równie drogie).
+
+Jedyny kolejny naturalny krok wymagający Twojej zgody, nie wyboru: czy mam teraz przejść do wykonania tej weryfikacji dostawców (D1/D3), czy wolisz najpierw przejrzeć samą zaktualizowaną roadmapę powyżej.
 
 ---
 
