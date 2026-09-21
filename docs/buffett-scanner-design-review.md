@@ -1,11 +1,12 @@
 # BUFFETT OPPORTUNITY SCANNER — Technical Design Review
 
-**Status:** v1.4 — D1 i D3 zamknięte na podstawie bezpośredniej weryfikacji technicznej (FMP wybrany), korekta modelu wyboru kluczowego assetu biotech, sekcja FINAL PRE-IMPLEMENTATION STATUS. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów. Implementacja V0 NIE została rozpoczęta i wymaga wyraźnego potwierdzenia właściciela.
-**Data:** 2026-09-20 (v1.0–v1.4, wszystkie tego samego dnia)
+**Status:** v1.5 — dodano wymóg architektoniczny MULTI-USER / MULTI-PORTFOLIO (SHARED ANALYTICAL LAYER vs USER-SCOPED PORTFOLIO/DECISION LAYER) przed rozpoczęciem Fazy 0. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów. Implementacja Fazy 0 NIE została rozpoczęta i wymaga wyraźnego potwierdzenia właściciela na TĘ zaktualizowaną architekturę.
+**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5)
 **Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING; (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera).
 **Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) jako jedną warstwę przyszłego pełnego modelu biotech.
 **Zmiana w v1.3:** zamknięto decyzje D2, D4–D14 zgodnie z odpowiedziami właściciela; D15 rozstrzygnięte na rzecz nowej kolejności priorytetów — **BIOTECH ma wyższy priorytet niż pełne rozszerzenie BANK/INSURER/REIT**; dodano rejestr pełnego docelowego zakresu BIOTECH MODULE jako scope dla przyszłej Fazy 8 (DESIGN) — External Validation pozostaje tylko jedną z jego warstw.
 **Zmiana w v1.4:** wykonano bezpośrednią techniczną weryfikację D1 (dostawca danych) i D3 (historyczny skład S&P 500) — **wynik: FMP** (EODHD odrzucony regułą właściciela z powodu nieznanej ceny dodatku Historical Constituents); wyjaśniono sprzeczność EODHD z v1.1 (rzetelne dane od kwietnia 2012, nie 2000); potwierdzono aktualny, niewycofany endpoint FMP `stable/historical-sp-500`; skorygowano błędne założenie z v1.2, że „kluczowy asset" biotech = najbardziej zaawansowany klinicznie — zastąpione modelem screening-funnel (18.7) do zaprojektowania w Fazie 8; dodano sekcję **FINAL PRE-IMPLEMENTATION STATUS**.
+**Zmiana w v1.5:** dodano sekcję **1.1 MULTI-USER / MULTI-PORTFOLIO — SHARED vs USER-SCOPED** — nowa tabela `users`, `user_id` dodany do `watchlist`/`user_decisions`/`positions` (brakował w schemacie z v1.0–v1.4 — patrz 3 zgłoszone CONFLICT FOUND), rozdzielenie Holdings Monitor na SHARED COMPANY MONITOR i USER-SPECIFIC POSITION MONITOR, żeby drugi użytkownik nie podwajał kosztu analizy Claude API. Zaktualizowano schema (sekcja 5), plan implementacji (sekcja 15: Faza 0 zyskuje tabelę `users`, Faza 6/7 zaktualizowane o user-scoping), moduł MY HOLDINGS (sekcja 16). **Nie rozpoczęto implementacji Fazy 0** — czeka na akceptację tej aktualizacji.
 
 ## Metodologia i zastrzeżenia
 
@@ -71,6 +72,125 @@ Zgodnie z zasadą „nie zgaduj": poniżej rozróżniam trzy kategorie treści.
 ```
 
 Kluczowa zasada architektoniczna: **LLM nigdy nie jest wejściem do kroku 1–4 i 8** — tam wyłącznie deterministyczny kod. LLM wchodzi dopiero po redukcji zbioru przez tani filtr ilościowy (realizacja §35 spec).
+
+---
+
+## 1.1 MULTI-USER / MULTI-PORTFOLIO — SHARED vs USER-SCOPED
+
+Zasada nadrzędna wprowadzona w tej turze: **SHARED ANALYTICAL LAYER** (jedna analiza spółki, współdzielona) vs **USER-SCOPED PORTFOLIO/DECISION LAYER** (decyzje, transakcje, tezy, Exit Review — osobne dla każdego użytkownika). System ma być od Fazy 0 gotowy na ≥2 niezależnych użytkowników jednej instancji, bez dwóch osobnych silników analitycznych i bez dublowania kosztu Claude API.
+
+### A/B. Które tabele SHARED, które USER-SCOPED
+
+| SHARED (jedna spółka = jeden zestaw danych, niezależnie od liczby użytkowników) | USER-SCOPED (osobne dla każdego user_id) |
+|---|---|
+| `companies`, `ticker_history`, `universe_membership` | `users` (**nowa**) |
+| `price_daily`, `fundamentals_raw`, `derived_metrics` | `watchlist` (**+ user_id**, brakowało w v1.0–v1.4) |
+| `scoring_model_versions`, `analyses`, `analysis_sources` | `user_decisions` (**+ user_id**, brakowało w v1.0–v1.4) |
+| `data_snapshots`, `run_log` | `positions` (**+ user_id**, brakowało w v1.0–v1.4) — korzeń własności |
+| `assets`, `trials`, `persons`, `institutions` (moduł BIOTECH) | `purchase_transactions`, `sale_transactions` (scoping przez `position_id`) |
+| `trial_person_roles`, `trial_institution_roles`, `partnerships`, `funding_events` | `purchase_thesis` (scoping przez `position_id`) |
+| `publications`, `publication_authors`, `publication_asset_links`, `conflicts_dependencies` | `exit_review_triggers`, `exit_review_reports` (scoping przez `position_id`) |
+| `external_validation_assessments` | `holding_user_actions` (scoping przez `position_id`) |
+
+### C. Nowa tabela `users` + gdzie dokładnie żyje `user_id`
+
+```sql
+users(user_id PK, display_name, created_at)
+  -- minimalna w Fazie 0: bez haseł/auth (świadomie odłożone do UI/auth,
+  -- zgodnie z pkt 11/15 wymagania) — tylko identity, żeby żadna tabela
+  -- downstream nie musiała być przeprojektowywana, gdy auth faktycznie
+  -- powstanie
+```
+
+`user_id` jest zdefiniowany raz w `users`, a jako FK ownership root pojawia się **tylko na `watchlist`, `user_decisions` i `positions`** — NIE jest duplikowany na każdej tabeli potomnej. `purchase_transactions`, `sale_transactions`, `purchase_thesis`, `exit_review_triggers`, `exit_review_reports`, `holding_user_actions` dziedziczą właściciela tranzytywnie przez `position_id FK → positions.user_id`. To jednoznacznie lepsze rozwiązanie techniczne niż duplikowanie `user_id` wszędzie (jedno źródło prawdy, brak ryzyka rozjazdu) — podjęte samodzielnie, nie wymaga wyboru właściciela.
+
+### D. Struktura łącząca USER-scoped z SHARED
+
+```
+users.user_id
+      │
+      ▼
+positions(position_id, user_id FK, cik FK) ──────────► companies.cik (SHARED)
+      │                                                        │
+      ├─► purchase_transactions(position_id FK)                │
+      ├─► sale_transactions(position_id FK)                    ▼
+      │                                              analyses (SHARED, immutable,
+      ├─► purchase_thesis(position_id FK,                cik-scoped) ◄──┐
+      │       analysis_id FK ─────────────────────────────────────────┘
+      │       + snapshot_json — zamrożona kopia w momencie zakupu,
+      │       różna dla user A i user B nawet dla tej samej spółki)
+      │
+      └─► exit_review_triggers(position_id FK,
+              triggering_analysis_id FK → analyses SHARED)
+                  │
+                  └─► exit_review_reports(trigger_id FK,
+                          current_analysis_id FK → analyses SHARED)
+                              │
+                              └─► holding_user_actions(position_id FK)
+```
+
+Każde odwołanie do „aktualnego stanu spółki" (score, wycena, bull/bear case, źródła) idzie przez FK do `analyses`/`analysis_sources` — **nigdy nie jest kopiowane** do warstwy user-scoped, poza jednym celowym wyjątkiem: `purchase_thesis.snapshot_json`, który musi być zamrożoną kopią (bo `analyses` jako całość ewoluuje, a Purchase Thesis ma pozostać dokładnie tym, co było wiadome w momencie zakupu — to nie duplikacja bieżących danych, tylko archiwum stanu historycznego, zgodne z zasadą niemutowalności z sekcji 11).
+
+### E. Jak unikamy podwójnego kosztu Claude API dla dwóch użytkowników
+
+To w dużej mierze było już prawdą od v1.0, tylko teraz jest to jawne: `analyses` jest kluczowana po `cik`, nie po użytkowniku — codzienny pipeline (Fazy 0–6) analizuje każdą spółkę **raz**, niezależnie od tego, ilu użytkowników ją obserwuje/posiada. Realna zmiana dotyczy modułu MY HOLDINGS (Faza 7), gdzie pipeline z v1.4 („dla każdej pozycji sprawdź trigger, dla każdej pozycji uruchom pełny Exit Review") ukrywał ryzyko podwojenia kosztu przy dwóch użytkownikach trzymających tę samą spółkę. Poprawiony, dwuwarstwowy Holdings Monitor:
+
+```
+[A. SHARED COMPANY MONITOR — raz na spółkę (cik), nie na pozycję]
+   deterministyczny pre-check (cena vs wycena, nowy filing, dywidenda,
+   dźwignia — jak w v1.4) → jeśli spełniony warunek: JEDNA droga
+   analiza LLM → NOWY wiersz w SHARED `analyses`
+                    │
+                    ▼
+[B. USER-SPECIFIC POSITION MONITOR — osobno dla każdej pozycji]
+   deterministyczne porównanie nowego/aktualnego `analyses` z
+   zamrożonym `purchase_thesis` TEJ pozycji (score delta, MoS delta,
+   sprawdzenie warunków Thesis Invalidation) → BEZ LLM
+                    │
+                    ▼ tylko jeśli porównanie przekroczy próg triggera
+[C. Position-scoped Exit Review narrative — mały, tani kontekst]
+   LLM dostaje: już wygenerowany tekst bieżącej analizy (current bull/
+   bear case z SHARED `analyses`, nie źródła od nowa) + zamrożony
+   `purchase_thesis` tej pozycji → syntetyzuje "why still rational" /
+   "why reassessment required" DLA TEJ POZYCJI
+```
+
+Krok A jest kosztowny, ale wykonywany raz na spółkę. Krok B jest darmowy (czysty Python). Krok C jest tani — nie wysyła ponownie pełnego source packetu, tylko już wygenerowany tekst + zamrożoną tezę tej pozycji. Dwóch użytkowników trzymających tę samą spółkę płaci za krok A raz, a za krok C dwa razy — ale krok C jest rzędem wielkości tańszy niż krok A (mały kontekst, nie pełny pakiet źródłowy).
+
+### F. Wpływ na roadmapę / koszt / zakres Fazy 0
+
+- **Faza 0:** jedno dodanie — tabela `users` (minimalna, bez auth). Nie rozszerza checklisty 0.1–0.4 o UI, logowanie, Portfolio View, My Holdings, transaction UI, Exit Review, Holdings Monitor ani Claude position analysis — wszystko to zgodnie z instrukcją pozostaje w swoich późniejszych fazach (6, 7, 9). Faza 0 dostaje fundament pod `user_id`, nie funkcjonalność.
+- **Faza 6 (V1):** `watchlist`/`user_decisions` budowane od razu z `user_id` (zamiast wymagać późniejszej migracji) — REJECT/WATCH/SNOOZE jednego użytkownika nie mogą wpływać na widoczność kandydata dla innego (patrz NEW IMPORTANT ISSUE niżej).
+- **Faza 7 (MY HOLDINGS):** przeprojektowana zgodnie z A/B/C wyżej — `positions` z `user_id` od pierwszego wiersza, dwuwarstwowy Holdings Monitor zamiast jednowarstwowego z v1.4.
+- **Koszt:** bez zmiany rzędu wielkości z FINAL PRE-IMPLEMENTATION STATUS — koszt analiz spółek (dominujący) nie rośnie z liczbą użytkowników; koszt Exit Review rośnie z liczbą **pozycji**, nie użytkowników wprost, i pozostaje marginalny przy 2 użytkownikach z małą liczbą pozycji każdy.
+
+### CONFLICT FOUND (3 zgłoszone, żadna nie zmienia D1–D15)
+
+**CONFLICT 1 — `user_decisions`/`watchlist` bez `user_id`.**
+*Istniejący wymóg (v1.0–v1.4):* `user_decisions(decision_id PK, cik FK, analysis_id FK, status, decided_at, note, ...)` i `watchlist(watchlist_id PK, cik FK, ...)` — brak `user_id`, niejawne założenie jednego globalnego użytkownika.
+*Nowy, sprzeczny wymóg:* ta sama spółka może być jednocześnie REJECT dla użytkownika A i WATCH dla użytkownika B.
+*Proponowane rozwiązanie:* dodać `user_id FK` do obu tabel — czysto addytywna zmiana, bez przeprojektowania.
+*Konsekwencje nierozwiązania:* REJECT jednego użytkownika po cichu ukrywałby kandydata dla wszystkich — błąd niewidoczny w testach jednoosobowych, wykryty dopiero przy realnym drugim użytkowniku.
+
+**CONFLICT 2 — `positions` i cały łańcuch MY HOLDINGS bez właściciela.**
+*Istniejący wymóg (v1.4):* `positions(position_id PK, cik FK, status, ...)` — brak `user_id`, jeden domyślny portfel.
+*Nowy, sprzeczny wymóg:* każda pozycja należy do dokładnie jednego `user_id`; dwaj użytkownicy mogą niezależnie posiadać tę samą spółkę, w różnych ilościach, cenach i terminach.
+*Proponowane rozwiązanie:* `user_id FK NOT NULL` na `positions` jako korzeń własności; tabele potomne dziedziczą przez `position_id` (patrz pkt C).
+*Konsekwencje nierozwiązania:* Faza 7 musiałaby zostać przeprojektowana od zera po fakcie — dokładnie ten kosztowny scenariusz, któremu ta tura ma zapobiec.
+
+**CONFLICT 3 — Holdings Monitor z v1.4 liczony „na pozycję", nie „na spółkę".**
+*Istniejący wymóg (sekcja 16.3, v1.4):* pełna, kosztowna analiza LLM (Exit Review) uruchamiana per pozycja.
+*Nowy, sprzeczny wymóg:* kosztowna analiza spółki wykonywana raz, niezależnie od liczby użytkowników/pozycji.
+*Proponowane rozwiązanie:* dwuwarstwowy Holdings Monitor (SHARED COMPANY MONITOR → USER-SPECIFIC POSITION MONITOR → tani, position-scoped narrative), opisany w pkt E.
+*Konsekwencje nierozwiązania:* koszt Claude API skalowałby się z liczbą pozycji wszystkich użytkowników zamiast z liczbą unikalnych posiadanych spółek — wprost narusza już przyjętą zasadę cost-control (§35, D13), niewidoczne dopóki istnieje tylko jeden użytkownik testowy.
+
+### NEW IMPORTANT ISSUES (nie BLOCKER — nie zależą od żadnego niezweryfikowanego dostawcy)
+
+- **Dyscyplina zapytań user-scoped.** Każde zapytanie do tabel `watchlist`, `user_decisions`, `positions` i tabel potomnych musi filtrować po `user_id` od pierwszego dnia — nawet w Fazie 0–6, gdzie realnie istnieje jeden zasiany wiersz w `users`. Inaczej dyscyplina ta erozuje się przed pojawieniem się prawdziwego auth (Faza 11+), co tworzy ryzyko wycieku danych między użytkownikami w momencie, gdy auth faktycznie powstanie.
+- **Filtrowanie kandydatów per widz.** Lista kandydatów dziennego raportu jest SHARED (jedna analiza), ale jej finalne filtrowanie (czy pokazać kandydata, czy jest REJECT/SNOOZE) musi być stosowane per przeglądający `user_id` w momencie renderowania/zapytania, nie zapisywane jako właściwość samej spółki.
+- **Reinterpretacja szacunku kosztu MY HOLDINGS.** Wcześniejszy szacunek (FINAL PRE-IMPLEMENTATION STATUS, „~0–15 USD/mies.") był liczony na „typową liczbę pozycji inwestora indywidualnego" — przy 2 użytkownikach liczba pozycji może się z grubsza podwoić, mimo że koszt analizy spółek (dominujący) nie rośnie. Rząd wielkości szacunku pozostaje bez zmian, ale warto to przeliczyć dokładniej po realnych danych z Fazy 7, nie teraz.
+
+---
 
 Kluczowa zmiana wynikająca z MY HOLDINGS: **posiadane pozycje NIE przechodzą przez decline-scanner/pre-filter jako bramkę wejścia do LLM.** Wymóg „+40% nie oznacza automatycznie SELL, system musi badać aktualną wartość biznesu" oznacza, że monitoring pozycji musi działać niezależnie od tego, czy cena akurat spadła. Dodano więc osobną, równoległą ścieżkę (4b/4c) z własną, tańszą bramką deterministyczną, zamiast budowania drugiego niezależnego systemu analitycznego — holding monitoring korzysta z istniejącego pipeline'u (Source Assembly Layer, silnik scoringu), nie duplikuje go.
 
@@ -191,13 +311,18 @@ analysis_sources(source_id PK, analysis_id FK,
                   section, page, content_hash, verified BOOLEAN,
                   reason, question)
 
--- Watchlist
-watchlist(watchlist_id PK, cik FK, added_date, added_price,
+-- Tożsamość użytkownika (minimalna w Fazie 0, bez auth — patrz sekcja 1.1)
+users(user_id PK, display_name, created_at)
+
+-- Watchlist — USER-SCOPED (v1.5: dodano user_id, brakował w v1.0–v1.4,
+-- patrz CONFLICT 1 w sekcji 1.1)
+watchlist(watchlist_id PK, user_id FK, cik FK, added_date, added_price,
           current_status, last_analysis_id FK,
           next_review_trigger JSON, created_at, updated_at)
 
--- Decyzje użytkownika (workflow, NIE broker)
-user_decisions(decision_id PK, cik FK, analysis_id FK NULL,
+-- Decyzje użytkownika (workflow, NIE broker) — USER-SCOPED (v1.5: dodano
+-- user_id, brakował w v1.0–v1.4, patrz CONFLICT 1 w sekcji 1.1)
+user_decisions(decision_id PK, user_id FK, cik FK, analysis_id FK NULL,
                status ENUM('WATCH','REJECT','SNOOZE','BOUGHT'),
                decided_at, note, snooze_until, snooze_trigger)
 
@@ -214,9 +339,13 @@ run_log(run_id PK, run_date, universe_size, screened_count,
 ### MY HOLDINGS / EXIT MONITORING — nowe tabele
 
 ```sql
--- Pozycja = jeden "round trip" posiadania danej spółki (pozwala odróżnić
--- ponowne wejście po pełnym zamknięciu pozycji jako osobną historię)
-positions(position_id PK, cik FK, status ENUM('OPEN','CLOSED'),
+-- Pozycja = jeden "round trip" posiadania danej spółki PRZEZ JEDNEGO
+-- UŻYTKOWNIKA (pozwala odróżnić ponowne wejście po pełnym zamknięciu
+-- pozycji jako osobną historię). user_id to korzeń własności całego
+-- łańcucha MY HOLDINGS — v1.5, brakował w v1.0–v1.4 (CONFLICT 2, sekcja 1.1).
+-- Ta sama spółka (cik) może mieć wiele niezależnych, jednoczesnych wierszy
+-- positions dla różnych user_id — różne ilości, ceny, daty, statusy.
+positions(position_id PK, user_id FK NOT NULL, cik FK, status ENUM('OPEN','CLOSED'),
           opened_at, closed_at NULL, created_at, updated_at)
   -- shares_held, total_cost, avg_price, current_value, unrealized_pl,
   -- realized_pl NIE są przechowywane jako mutowalne kolumny — liczone
@@ -552,6 +681,7 @@ Po weryfikacji z v1.4 oba BLOCKERY przeszły ze stanu „brak wybranej ścieżki
 0.2 Ingest uniwersum (lista S&P 500), tabele `companies` + `ticker_history` (CIK jako klucz od początku).
 0.3 Ingest cen dla 5–10 tickerów testowych, tabela `price_daily`.
 0.4 Decline scanner (czysta kalkulacja, testy jednostkowe).
+0.5 Tabela `users` (minimalna, bez auth — patrz sekcja 1.1) — fundament pod `user_id` FK w Fazach 6/7/9, żeby żadna późniejsza faza nie wymagała migracji schematu. Nie dodaje UI ani logowania.
 
 **Faza 1 — fundamenty i pre-filter**
 1.1 Ingest fundamentów (rachunek wyników/bilans/cash flow) dla tych samych tickerów.
@@ -578,14 +708,14 @@ Po weryfikacji z v1.4 oba BLOCKERY przeszły ze stanu „brak wybranej ścieżki
 5.2 Bezpośrednia weryfikacja i wybór źródła historycznego składu S&P 500 (OPEN BLOCKER 2).
 5.3 Harness backtestu z oknem 2012–dziś, jawna adnotacja `LIMITED_BUT_HONEST`; pierwsza kalibracja progów/wag.
 
-**Faza 6 (= V1)** — pełny przebieg na 503 spółkach, DB na skalę produkcyjną, dashboard, watchlist, automatyzacja dzienna (zgodnie z zakresem spec).
+**Faza 6 (= V1)** — pełny przebieg na 503 spółkach, DB na skalę produkcyjną, dashboard, watchlist, automatyzacja dzienna (zgodnie z zakresem spec). `watchlist` i `user_decisions` budowane od razu z `user_id` (sekcja 1.1) — REJECT/WATCH/SNOOZE jednego użytkownika nie mogą wpływać na widoczność kandydata dla innego; filtrowanie po statusie stosowane per przeglądający użytkownik w momencie renderowania raportu, nie zapisywane jako cecha spółki.
 
-**Faza 7 — MY HOLDINGS, podstawowa obsługa pozycji** (po V1)
-7.1 Tabele `positions`, `purchase_transactions`, `sale_transactions`, `purchase_thesis` + logika BOUGHT tworząca snapshot tezy.
-7.2 Deterministyczny Holdings Monitor (krok 4b/4c z architektury) — tania bramka wyzwalająca pełną reanalizę tylko przy spełnieniu warunku.
-7.3 Schemat Exit Review + prompt LLM (reużywający Source Assembly Layer bez zmian).
-7.4 Raport Exit Review + akcje użytkownika (HOLD/REDUCE/SOLD/REVIEW LATER).
-7.5 Widok MY HOLDINGS w dashboardzie (minimalny zakres — nie pełny portfolio management).
+**Faza 7 — MY HOLDINGS, podstawowa obsługa pozycji, MULTI-USER od pierwszego wiersza** (po V1)
+7.1 Tabele `positions` (z `user_id NOT NULL` od startu), `purchase_transactions`, `sale_transactions`, `purchase_thesis` + logika BOUGHT tworząca snapshot tezy dla konkretnego użytkownika/pozycji.
+7.2 SHARED COMPANY MONITOR (raz na `cik`) — deterministyczny pre-check + ewentualna pełna reanaliza LLM zapisywana jako nowy wiersz SHARED `analyses` (sekcja 1.1E).
+7.3 USER-SPECIFIC POSITION MONITOR (raz na `position_id`) — deterministyczny diff aktualnej `analyses` względem `purchase_thesis` tej pozycji; dopiero po przekroczeniu progu: tani, position-scoped Exit Review LLM (kontekst = już wygenerowany tekst + zamrożona teza, nie pełny source packet).
+7.4 Raport Exit Review (per pozycja) + akcje użytkownika (HOLD/REDUCE/SOLD/REVIEW LATER), zapisywane pod właściwym `user_id`.
+7.5 Widok MY HOLDINGS w dashboardzie, osobny per zalogowany użytkownik (minimalny zakres — nie pełny portfolio management, bez „OTHER AUTHORIZED PORTFOLIO" — to poza V0/Fazą 7, patrz sekcja 1.1).
 
 **Faza 8 — BIOTECH MODULE: DESIGN** (priorytet wyższy niż pełne BANK/INSURER/REIT — Decyzja D15)
 Osobna, przyszła tura projektowa o tym samym rygorze co niniejszy dokument, obejmująca **cały** model biotech, nie tylko External Validation: Clinical Pipeline, Clinical Trial Quality, Clinical Evidence, Probability of Success (jako zakres z base rate + czynniki modyfikujące, nie punktowa liczba), Regulatory Status, Catalyst Calendar, Cash Runway, Dilution Risk, Pipeline Concentration, Competitive Landscape, risk-adjusted NPV/rNPV, External Validation & Research Network (już zaprojektowany — sekcja 18 — jako jedna z warstw), biotech-specific Thesis Monitoring, integracja z MY HOLDINGS/EXIT MONITORING (biotech-specific Purchase Thesis fields + Biotech Thesis Review). Pełny zarejestrowany zakres tej fazy — pkt 18.7. **Nie rozpoczynać implementacji przed ukończeniem tej fazy projektowej**, dokładnie tak jak V0 scannera nie zaczęło się bez tego dokumentu.
@@ -604,7 +734,7 @@ Każda faza powinna być samodzielnie testowalna na małej próbce tickerów/sp�
 
 ### 16.1 Purchase Transaction i Purchase Thesis
 
-Po wybraniu BOUGHT użytkownik zapisuje: ticker/spółkę, datę zakupu, liczbę akcji, cenę zakupu, całkowitą zainwestowaną kwotę, walutę, opcjonalne prowizje, opcjonalną notatkę — wiele zakupów tej samej spółki jako osobne rekordy (patrz tabele w pkt 5). Kluczowa zasada: **kod, nigdy LLM, liczy liczby pozycji** (shares held, koszt, średnia cena, wartość, unrealized P/L) — Claude nie jest wywoływany do tego kroku w ogóle.
+Po wybraniu BOUGHT **konkretny użytkownik** (`user_id`) zapisuje: ticker/spółkę, datę zakupu, liczbę akcji, cenę zakupu, całkowitą zainwestowaną kwotę, walutę, opcjonalne prowizje, opcjonalną notatkę — wiele zakupów tej samej spółki (przez tego samego lub różnych użytkowników, niezależnie) jako osobne rekordy (patrz tabele w pkt 5, korzeń własności = `positions.user_id`, sekcja 1.1). Kluczowa zasada: **kod, nigdy LLM, liczy liczby pozycji** (shares held, koszt, średnia cena, wartość, unrealized P/L) — Claude nie jest wywoływany do tego kroku w ogóle, i liczby te są liczone **osobno dla każdej pozycji każdego użytkownika**, nawet dla tej samej spółki.
 
 W momencie oznaczenia zakupu system automatycznie zapisuje **immutable snapshot** istniejącej analizy — Purchase Thesis: scoring version, total score, component scores, market price, intrinsic value range, Margin of Safety, Business Quality, Financial Safety, Fear Classification, Bull Case, Bear Case, Biggest Unknown, Thesis Invalidation Conditions, główne ryzyka, wykorzystane źródła, confidence. Ten rekord nie może zostać później nadpisany — umożliwia porównanie „WHAT WE BELIEVED AT PURCHASE" vs „WHAT WE KNOW NOW".
 
@@ -644,9 +774,14 @@ Te same reguły walidacji co w pkt 8 (cytaty tylko z dostarczonych źródeł, br
 
 System **nie generuje automatycznego SELL** — wyłącznie `EXIT REVIEW REQUIRED`. Po jego wygenerowaniu użytkownik wybiera: HOLD, REDUCE, SOLD lub REVIEW LATER — żaden status nie wykonuje transakcji u brokera. Sprzedaż zapisywana jest ręcznie (data, liczba akcji, cena, waluta, opcjonalne opłaty/notatka), kod deterministycznie aktualizuje pozostałe akcje, wartość pozycji, historię transakcji i realized/unrealized P/L.
 
-### 16.3 Cadence monitoringu
+### 16.3 Cadence monitoringu — dwuwarstwowy, per spółka i per pozycja (zaktualizowane w v1.5)
 
-Rekomendowany tryb: `TRIGGER_GATED` — codziennie, tanio, deterministycznie sprawdzane są warunki wstępne (cena vs zaktualizowana wycena, zmiana dywidendy, nowy filing, pogorszenie wskaźników zadłużenia); pełna, kosztowna analiza LLM (Exit Review) uruchamiana jest tylko gdy warunek wstępny się spełni, plus obowiązkowo po każdym nowym kwartalnym filingu (niezależnie od tego, czy coś „wygląda niepokojąco" — żeby nie przegapić cichej erozji tezy). To zachowuje zasadę „tani filtr deterministyczny najpierw, drogi LLM na końcu" (§35 oryginalnej specyfikacji) również dla holdingów, zamiast tworzyć dla nich wyjątek. Pełne uzasadnienie — Decyzja D13.
+Rekomendowany tryb: `TRIGGER_GATED` (Decyzja D13), teraz jawnie rozdzielony na dwie warstwy z sekcji 1.1E, żeby dwóch użytkowników trzymających tę samą spółkę nie podwajało kosztu:
+
+1. **SHARED COMPANY MONITOR** (raz na `cik`, nie na `position_id`) — codziennie, tanio, deterministycznie sprawdzane są warunki wstępne (cena vs zaktualizowana wycena, zmiana dywidendy, nowy filing, pogorszenie wskaźników zadłużenia); pełna, kosztowna analiza LLM uruchamiana jest tylko gdy warunek wstępny się spełni, plus obowiązkowo po każdym nowym kwartalnym filingu — wynik zapisywany jako nowy, SHARED wiersz `analyses`.
+2. **USER-SPECIFIC POSITION MONITOR** (dla każdej `position_id` niezależnie) — tani, deterministyczny diff między (ewentualnie nowym) SHARED `analyses` a zamrożonym `purchase_thesis` tej konkretnej pozycji; dopiero jeśli diff przekroczy próg, generowany jest tani, position-scoped narrative Exit Review (pkt 16.2, kontekst = już wygenerowany tekst + zamrożona teza tej pozycji, nie pełny source packet od nowa).
+
+To zachowuje zasadę „tani filtr deterministyczny najpierw, drogi LLM na końcu" (§35 oryginalnej specyfikacji) — teraz stosowaną na dwóch poziomach (spółka i pozycja), a nie tylko na poziomie pozycji jak w v1.4.
 
 ### 16.4 MY HOLDINGS — widok (przyszły UI, zakres minimalny)
 
@@ -907,6 +1042,8 @@ Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzen
 - **(Nowe, z MY HOLDINGS) Rekoncyliacja pozycji użytkownika z rzeczywistym rachunkiem maklerskim nie jest częścią systemu** (zgodnie z RULE 12 — brak integracji z brokerem) — dane w `purchase_transactions`/`sale_transactions` są tak dobre, jak ręczne wprowadzanie przez użytkownika. Warto rozważyć w V1.5/V2 prosty mechanizm „sanity check" (np. porównanie sumy zainwestowanego kapitału z oczekiwaniem użytkownika) — nie teraz, tylko odnotowane jako ryzyko jakości danych wejściowych.
 - **(Nowe, z modułu BIOTECH External Validation) Brak rubryki dla confidence dotyczy teraz też oceny STRONG/MODERATE/LIMITED/INSUFFICIENT_DATA** (pkt 18.3–18.5) — ten sam brak operacyjnego testu „confidence odzwierciedla jakość dowodów, nie retorykę", tylko w nowym kontekście; jedna rubryka do zaprojektowania powinna objąć oba przypadki.
 - **(Nowe, z modułu BIOTECH) Dokładna struktura pól ról badaczy w ClinicalTrials.gov API v2** (Principal Investigator/Study Chair/Study Director) nie została potwierdzona w tym przeglądzie — do zweryfikowania w oficjalnej dokumentacji przed implementacją Fazy 8, nie zakładać na pewno ścieżki pola.
+- **(Nowe, z architektury MULTI-USER, v1.5) Dyscyplina filtrowania po `user_id`** musi obowiązywać od Fazy 6, zanim faktyczne auth powstanie — patrz pełne uzasadnienie w sekcji 1.1 „NEW IMPORTANT ISSUES".
+- **(Nowe, z architektury MULTI-USER, v1.5) Filtrowanie kandydatów per przeglądający użytkownik** (REJECT/WATCH/SNOOZE) musi być stosowane przy renderowaniu, nie zapisywane jako cecha spółki — patrz sekcja 1.1.
 
 ---
 
@@ -955,7 +1092,9 @@ W tej turze zaprojektowano dodatkowo moduł BIOTECH: EXTERNAL VALIDATION & RESEA
 
 **W turze v1.3 właściciel przejrzał i rozstrzygnął wszystkie 15 decyzji**, w tym D15 na rzecz „CORE FIRST, BIOTECH SECOND" (biotech ma wyższy priorytet niż pełne BANK/INSURER/REIT, plan implementacji sekcji 15 przebudowany na Fazy 7→8→9→10). **W turze v1.4** wykonano bezpośrednią techniczną weryfikację D1/D3, zamykając oba wynikiem **FMP** jako wybranym dostawcą, wyjaśniono sprzeczność w danych EODHD (rzetelne dane od kwietnia 2012, potwierdzające zasadność okna backtestingu 2012+ przyjętego w D14), oraz skorygowano błędne założenie z v1.2 o domyślnym „kluczowym asset" biotech (zastąpione modelem screening-funnel, sekcja 18.7).
 
-Nie rozpoczęto implementacji. Pełny status gotowości — sekcja „FINAL PRE-IMPLEMENTATION STATUS": **SAFE TO START V0: NIE**, wyłącznie w oczekiwaniu na wyraźne potwierdzenie właściciela, nie z powodu nierozwiązanej kwestii technicznej.
+**W turze v1.5** wprowadzono wymóg architektury MULTI-USER/MULTI-PORTFOLIO przed rozpoczęciem Fazy 0 (sekcja 1.1): SHARED ANALYTICAL LAYER (spółka, jej analiza, scoring, wycena, źródła — jedna kopia, niezależnie od liczby użytkowników) vs USER-SCOPED PORTFOLIO/DECISION LAYER (watchlist, decyzje, transakcje, Purchase Thesis, Exit Review — osobne per `user_id`). Wykryto i rozwiązano trzy CONFLICT FOUND w istniejącym schemacie z v1.0–v1.4 (brak `user_id` w `watchlist`, `user_decisions` i całym łańcuchu MY HOLDINGS; Holdings Monitor liczony błędnie „na pozycję" zamiast „na spółkę", co groziło podwojeniem kosztu Claude API przy dwóch użytkownikach). Rozwiązanie: dodanie tabeli `users` i `user_id` tam, gdzie brakowało, oraz dwuwarstwowy Holdings Monitor (SHARED COMPANY MONITOR → USER-SPECIFIC POSITION MONITOR). Zmiana nie rusza żadnej z decyzji D1–D15 i nie rozszerza zakresu Fazy 0 poza jedną nową, minimalną tabelę.
+
+Nie rozpoczęto implementacji. Pełny status gotowości — sekcja „FINAL PRE-IMPLEMENTATION STATUS": **SAFE TO START FAZA 0: NIE**, w oczekiwaniu na wyraźne potwierdzenie właściciela zarówno co do treści tego dokumentu, jak i osobno co do architektury MULTI-USER z sekcji 1.1 — nie z powodu nierozwiązanej kwestii technicznej.
 
 ---
 
@@ -986,17 +1125,17 @@ Nie rozpoczęto implementacji. Pełny status gotowości — sekcja „FINAL PRE-
 4. Źródło i granulacja klasyfikacji sektorowej (GICS sub-industry vs sector) — niespecyfikowane, potrzebne do przełączania logiki sektorowej.
 5. Dokładna struktura pól ról badaczy w ClinicalTrials.gov API v2 (Principal Investigator/Study Chair/Study Director) — niepotwierdzona, do zweryfikowania przed Fazą 9.
 
-**SAFE TO START V0: NIE (jeszcze)**
+**SAFE TO START FAZA 0: NIE (jeszcze)**
 
-**WHY:** Sam rdzeń V0 (Fazy 0–4) nie jest technicznie blokowany przez nic z powyższego — BLOCKER 1/2 dotyczą wyłącznie backtestingu (Faza 5), nie budowy silnika. Mimo to nie zaczynam, bo (a) wybrany plan FMP (Starter vs Premium) nie jest jeszcze potwierdzony pod kątem konkretnych endpointów, (b) sama treść tego dokumentu wymaga Twojego wyraźnego „start" — zgodnie z Twoim wyraźnym poleceniem w tej wiadomości, nie rozpoczynam implementacji bez tego potwierdzenia, niezależnie od tego, że technicznie nic już tego nie blokuje.
+**WHY:** Sam rdzeń Fazy 0–4 nie jest technicznie blokowany przez nic z powyższego — BLOCKER 1/2 dotyczą wyłącznie backtestingu (Faza 5). Mimo to nie zaczynam, bo: (a) wybrany plan FMP (Starter vs Premium) nie jest jeszcze potwierdzony pod kątem konkretnych endpointów; (b) **w v1.5 dodano wymóg architektury MULTI-USER/MULTI-PORTFOLIO** (sekcja 1.1) ze zmianą schematu Fazy 0 (nowa tabela `users`, punkt 0.5) i trzema zgłoszonymi CONFLICT FOUND dotyczącymi tabel z późniejszych faz — to jawnie wymaga osobnej akceptacji właściciela przed kodowaniem, zgodnie z wyraźnym poleceniem „zatrzymaj się i czekaj na zgodę"; (c) niezależnie od (a)/(b), nie rozpoczynam implementacji bez wyraźnego potwierdzenia — zgodnie z instrukcją z każdej dotychczasowej tury.
 
 ---
 
 ## DECYZJE WCIĄŻ WYMAGAJĄCE TWOJEGO WYBORU
 
-**Zero.** Wszystkie 15 decyzji (D1–D15) są zamknięte. D1 i D3 zamknięte w tej turze na podstawie bezpośredniej weryfikacji technicznej i reguły, którą już ustaliłaś — wynik: **FMP**.
+**Zero decyzji w sensie wyboru między opcjami.** Wszystkie 15 pierwotnych decyzji (D1–D15) są zamknięte; architektura MULTI-USER (v1.5, sekcja 1.1) nie zmienia żadnej z nich — trzy zgłoszone CONFLICT FOUND są rozwiązane jednoznacznie (dodanie `user_id` tam, gdzie brakowało), bez potrzeby wyboru z opcji.
 
-Jedyna pozostała rzecz do zrobienia to nie decyzja, tylko **jedno wyraźne potwierdzenie z Twojej strony: czy zaczynam implementację V0** (Fazy 0–4), zgodnie z tym dokumentem. Nic technicznego już tego nie blokuje (patrz „SAFE TO START V0" wyżej) — czekam wyłącznie na Twoje słowo, bo wyraźnie o to poprosiłaś w tej wiadomości.
+Pozostaje **jedno wyraźne potwierdzenie z Twojej strony: akceptacja architektury z sekcji 1.1 i zgoda na rozpoczęcie Fazy 0** zgodnie z tym dokumentem. Nic technicznego tego nie blokuje — czekam wyłącznie na Twoje słowo, zgodnie z Twoim wyraźnym poleceniem „zatrzymaj się i czekaj na zgodę właściciela na rozpoczęcie Fazy 0".
 
 ---
 
