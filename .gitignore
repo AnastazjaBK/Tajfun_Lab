@@ -1,0 +1,18 @@
+# Secrets — nigdy nie commitować
+.env
+.env.*
+!.env.example
+
+# Python (przyszła Faza 0 pipeline'u)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Baza danych lokalna (SQLite, V0)
+*.db
+*.sqlite
+*.sqlite3
+
+# Systemowe
+.DS_Store
