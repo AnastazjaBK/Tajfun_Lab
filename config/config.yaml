@@ -1,0 +1,28 @@
+# Buffett Opportunity Scanner — konfiguracja
+#
+# Jedno źródło prawdy dla progów i parametrów pipeline'u (patrz
+# docs/buffett-scanner-design-review.md, sekcja 6). Tylko sekcje
+# potrzebne w Fazie 0 są tu wypełnione — pozostałe (prefilter, scoring,
+# hard_gates, llm, watchlist, sector_overrides, holdings, backtest)
+# dojdą w kolejnych fazach, razem z kodem, który je faktycznie używa.
+
+universe:
+  name: sp500
+  source: provider_endpoint   # FMP — patrz Decyzja D4
+  refresh: weekly
+
+decline_scanner:
+  thresholds:
+    daily_pct: -5.0
+    week_pct: -8.0
+    month_pct: -15.0
+    quarter_pct: -20.0
+    drawdown_from_52w_high_pct: -25.0
+    relative_volume_multiple: 2.0
+  status: UNCALIBRATED   # nie traktować jako reguły inwestycyjnej przed backtestingiem (Faza 5)
+
+data_provider:
+  fundamentals_prices: fmp
+  plan: starter            # Decyzja D1/D3 — potwierdzone przez właściciela
+  filings: sec_edgar
+  api_key_env_var: FMP_API_KEY

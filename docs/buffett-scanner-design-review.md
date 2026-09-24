@@ -1,13 +1,14 @@
 # BUFFETT OPPORTUNITY SCANNER — Technical Design Review
 
-**Status:** v1.6 — korekta v1.5: filtrowanie po `user_id` w zapytaniach aplikacji to tymczasowa dyscyplina Fazy 0/V0, nie docelowa granica bezpieczeństwa; dodano wymóg database-level authorization/RLS dla przyszłej fazy realnego multi-user auth. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów. Implementacja Fazy 0 NIE została rozpoczęta i wymaga wyraźnego potwierdzenia właściciela na TĘ zaktualizowaną architekturę.
-**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6)
+**Status:** v1.7 — właściciel zaakceptował v1.6 i potwierdził plan FMP Starter; **implementacja Fazy 0 rozpoczęta** (`buffett_scanner/`, `tests/`, `config/config.yaml`). Ten plik jest samodzielny — nie wymaga sięgania do historii commitów.
+**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6), 2026-09-24 (v1.7)
 **Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING; (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera).
 **Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) jako jedną warstwę przyszłego pełnego modelu biotech.
 **Zmiana w v1.3:** zamknięto decyzje D2, D4–D14 zgodnie z odpowiedziami właściciela; D15 rozstrzygnięte na rzecz nowej kolejności priorytetów — **BIOTECH ma wyższy priorytet niż pełne rozszerzenie BANK/INSURER/REIT**; dodano rejestr pełnego docelowego zakresu BIOTECH MODULE jako scope dla przyszłej Fazy 8 (DESIGN) — External Validation pozostaje tylko jedną z jego warstw.
 **Zmiana w v1.4:** wykonano bezpośrednią techniczną weryfikację D1 (dostawca danych) i D3 (historyczny skład S&P 500) — **wynik: FMP** (EODHD odrzucony regułą właściciela z powodu nieznanej ceny dodatku Historical Constituents); wyjaśniono sprzeczność EODHD z v1.1 (rzetelne dane od kwietnia 2012, nie 2000); potwierdzono aktualny, niewycofany endpoint FMP `stable/historical-sp-500`; skorygowano błędne założenie z v1.2, że „kluczowy asset" biotech = najbardziej zaawansowany klinicznie — zastąpione modelem screening-funnel (18.7) do zaprojektowania w Fazie 8; dodano sekcję **FINAL PRE-IMPLEMENTATION STATUS**.
 **Zmiana w v1.5:** dodano sekcję **1.1 MULTI-USER / MULTI-PORTFOLIO — SHARED vs USER-SCOPED** — nowa tabela `users`, `user_id` dodany do `watchlist`/`user_decisions`/`positions` (brakował w schemacie z v1.0–v1.4 — patrz 3 zgłoszone CONFLICT FOUND), rozdzielenie Holdings Monitor na SHARED COMPANY MONITOR i USER-SPECIFIC POSITION MONITOR, żeby drugi użytkownik nie podwajał kosztu analizy Claude API. Zaktualizowano schema (sekcja 5), plan implementacji (sekcja 15: Faza 0 zyskuje tabelę `users`, Faza 6/7 zaktualizowane o user-scoping), moduł MY HOLDINGS (sekcja 16).
-**Zmiana w v1.6:** korekta właściciela — filtrowanie zapytań po `user_id` (v1.5) było poprawnie zidentyfikowane jako ryzyko, ale błędnie mogło zostać odczytane jako docelowa granica bezpieczeństwa. Doprecyzowano: w Fazie 0/V0 (SQLite, bez auth) to tylko dyscyplina aplikacyjna modelująca ownership; **prawdziwa izolacja danych** (database-level authorization, docelowo Row Level Security przy Supabase Auth powiązane z `auth.uid()`) jest wymaganiem dla przyszłej fazy realnego multi-user access, jawnie **nie** dla Fazy 0. Dodano zasadę: ewentualny wzajemny podgląd portfeli realizowany wyłącznie przez jawny model uprawnień (przyszła tabela `portfolio_shares`), nigdy przez wyłączenie izolacji `user_id`. **Nie rozpoczęto implementacji Fazy 0** — czeka na akceptację tej aktualizacji.
+**Zmiana w v1.6:** korekta właściciela — filtrowanie zapytań po `user_id` (v1.5) było poprawnie zidentyfikowane jako ryzyko, ale błędnie mogło zostać odczytane jako docelowa granica bezpieczeństwa. Doprecyzowano: w Fazie 0/V0 (SQLite, bez auth) to tylko dyscyplina aplikacyjna modelująca ownership; **prawdziwa izolacja danych** (database-level authorization, docelowo Row Level Security przy Supabase Auth powiązane z `auth.uid()`) jest wymaganiem dla przyszłej fazy realnego multi-user access, jawnie **nie** dla Fazy 0. Dodano zasadę: ewentualny wzajemny podgląd portfeli realizowany wyłącznie przez jawny model uprawnień (przyszła tabela `portfolio_shares`), nigdy przez wyłączenie izolacji `user_id`.
+**Zmiana w v1.7:** właściciel potwierdził akceptację v1.6 oraz plan FMP Starter → **SAFE TO START FAZA 0: TAK**. Zaimplementowano Fazę 0: `buffett_scanner/config.py` (loader configu, pydantic), `buffett_scanner/db.py` (schema SQLite: `companies`, `ticker_history`, `price_daily`, `users` — CIK jako tożsamość, nie ticker), `buffett_scanner/providers/fmp.py` (klient FMP z jawnie oznaczonymi założeniami do weryfikacji + `fmp_smoketest.py`), `buffett_scanner/scanner.py` (decline scanner, czysta kalkulacja), `buffett_scanner/cli.py`. 32 testy jednostkowe zielone (`tests/`), 1 integracyjny pominięty bez klucza w tej sesji. `.gitignore` już wcześniej chronił `.env`/bazę SQLite/`__pycache__`.
 
 ## Metodologia i zastrzeżenia
 
@@ -1130,17 +1131,23 @@ Nie rozpoczęto implementacji. Pełny status gotowości — sekcja „FINAL PRE-
 4. Źródło i granulacja klasyfikacji sektorowej (GICS sub-industry vs sector) — niespecyfikowane, potrzebne do przełączania logiki sektorowej.
 5. Dokładna struktura pól ról badaczy w ClinicalTrials.gov API v2 (Principal Investigator/Study Chair/Study Director) — niepotwierdzona, do zweryfikowania przed Fazą 9.
 
-**SAFE TO START FAZA 0: NIE (jeszcze)**
+**SAFE TO START FAZA 0: TAK — właściciel potwierdził v1.6 i plan FMP Starter.**
 
-**WHY:** Sam rdzeń Fazy 0–4 nie jest technicznie blokowany przez nic z powyższego — BLOCKER 1/2 dotyczą wyłącznie backtestingu (Faza 5). Mimo to nie zaczynam, bo: (a) wybrany plan FMP (Starter vs Premium) nie jest jeszcze potwierdzony pod kątem konkretnych endpointów; (b) **w v1.5 dodano wymóg architektury MULTI-USER/MULTI-PORTFOLIO** (sekcja 1.1) ze zmianą schematu Fazy 0 (nowa tabela `users`, punkt 0.5) i trzema zgłoszonymi CONFLICT FOUND dotyczącymi tabel z późniejszych faz — to jawnie wymaga osobnej akceptacji właściciela przed kodowaniem, zgodnie z wyraźnym poleceniem „zatrzymaj się i czekaj na zgodę"; (c) niezależnie od (a)/(b), nie rozpoczynam implementacji bez wyraźnego potwierdzenia — zgodnie z instrukcją z każdej dotychczasowej tury.
+**WHY:** BLOCKER 1/2 dotyczą wyłącznie backtestingu (Faza 5), nie rdzenia Fazy 0–4. Właściciel zaakceptował architekturę MULTI-USER (v1.5/v1.6, sekcja 1.1) i potwierdził plan FMP Starter — oba warunki blokujące z poprzedniej wersji tego statusu są zamknięte. Endpoint `stable/historical-sp-500` (potrzebny dopiero w Fazie 5/6, nie w Fazie 0) nadal wymaga empirycznego potwierdzenia planu — bez zmian, nie blokuje startu.
+
+### Status Fazy 0 (v1.7)
+
+Kod wylądował w katalogu `buffett_scanner/` (config loader, schema SQLite — `companies`/`ticker_history`/`price_daily`/`users`, klient FMP, decline scanner, CLI) wraz z `tests/` (32 testy jednostkowe, hand-verified wartości referencyjne dla scannera, zielone; 1 test integracyjny pominięty — wymaga prawdziwego `FMP_API_KEY`, którego ta sesja nie ma). Szczegóły uruchomienia: `buffett_scanner/README.md`.
+
+**Świadomie niezweryfikowane w tej turze:** dokładny kształt odpowiedzi FMP (`providers/fmp.py` opiera się na ogólnie znanej strukturze API v3, nie na bezpośrednio odczytanej dokumentacji — patrz zastrzeżenie w tym samym pliku i niżej w Sources). Właścicielka ma klucz API i plan Starter — uruchomienie `python -m buffett_scanner.providers.fmp_smoketest` z jej strony potwierdzi lub obali te założenia, zanim ingest uniwersum/cen zostanie potraktowany jako wiarygodny.
 
 ---
 
 ## DECYZJE WCIĄŻ WYMAGAJĄCE TWOJEGO WYBORU
 
-**Zero decyzji w sensie wyboru między opcjami.** Wszystkie 15 pierwotnych decyzji (D1–D15) są zamknięte; architektura MULTI-USER (v1.5, sekcja 1.1) nie zmienia żadnej z nich — trzy zgłoszone CONFLICT FOUND są rozwiązane jednoznacznie (dodanie `user_id` tam, gdzie brakowało), bez potrzeby wyboru z opcji.
+**Zero.** Wszystkie 15 pierwotnych decyzji (D1–D15) są zamknięte, architektura MULTI-USER (v1.5/v1.6) zaakceptowana, Faza 0 rozpoczęta (v1.7).
 
-Pozostaje **jedno wyraźne potwierdzenie z Twojej strony: akceptacja architektury z sekcji 1.1 i zgoda na rozpoczęcie Fazy 0** zgodnie z tym dokumentem. Nic technicznego tego nie blokuje — czekam wyłącznie na Twoje słowo, zgodnie z Twoim wyraźnym poleceniem „zatrzymaj się i czekaj na zgodę właściciela na rozpoczęcie Fazy 0".
+Następny naturalny krok, gdy będziesz gotowa: uruchomienie `python -m buffett_scanner.providers.fmp_smoketest` z Twoim prawdziwym kluczem, żeby potwierdzić założenia o kształcie danych FMP opisane w „Status Fazy 0" wyżej, a potem `ingest-universe`/`ingest-prices`/`scan` na kilku testowych tickerach — to nie decyzja, tylko wykonanie.
 
 ---
 
