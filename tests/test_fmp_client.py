@@ -192,7 +192,7 @@ def test_normalize_fundamentals_rows_maps_canonical_line_items():
                 "totalCurrentAssets": 400.0, "totalCurrentLiabilities": 250.0}]
     cashflow = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
                  "operatingCashFlow": 900.0, "capitalExpenditure": -300.0,
-                 "dividendsPaid": -40.0, "commonStockRepurchased": -60.0}]
+                 "commonDividendsPaid": -40.0, "commonStockRepurchased": -60.0}]
 
     rows = normalize_fundamentals_rows(income, balance, cashflow)
     by_item = {r["line_item"]: r["value"] for r in rows}

@@ -1,7 +1,7 @@
 # BUFFETT OPPORTUNITY SCANNER — Technical Design Review
 
-**Status:** v1.16 — **Faza 0, Faza 1, Faza 2 i Faza 3 formalnie ukończone i dowiedzione na realnych danych.** **Faza 4 (silnik scoringu: business_quality/financial_safety/valuation/fear_opportunity/dividend_shareholder_return, hard gates, zapis `analyses`/`analysis_sources`, raport Markdown) zaimplementowana wraz z pełnym, zatwierdzonym designem wyceny (DCF na Owner Earnings, bear/base/bull) i dividend_shareholder_return (nowe dane w Fazie 1) — oczekuje empirycznej weryfikacji** — patrz „Status Fazy 4 (v1.16)" niżej. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów.
-**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6), 2026-09-24–25 (v1.7–v1.16)
+**Status:** v1.17 — **Wszystkie Fazy 0–4 formalnie ukończone i dowiedzione na realnych danych.** Silnik scoringu (business_quality/financial_safety/valuation/fear_opportunity/dividend_shareholder_return + hard gates + zapis `analyses`/`analysis_sources` + raport Markdown) działa end-to-end na AAPL. Jeden błąd znaleziony i naprawiony (nazwa pola FMP dla dywidend: `commonDividendsPaid`, nie zgadywane `dividendsPaid`) — patrz „Status Fazy 4 (v1.17)" niżej. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów.
+**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6), 2026-09-24–25 (v1.7–v1.17)
 **Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING; (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera).
 **Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) jako jedną warstwę przyszłego pełnego modelu biotech.
 **Zmiana w v1.3:** zamknięto decyzje D2, D4–D14 zgodnie z odpowiedziami właściciela; D15 rozstrzygnięte na rzecz nowej kolejności priorytetów — **BIOTECH ma wyższy priorytet niż pełne rozszerzenie BANK/INSURER/REIT**; dodano rejestr pełnego docelowego zakresu BIOTECH MODULE jako scope dla przyszłej Fazy 8 (DESIGN) — External Validation pozostaje tylko jedną z jego warstw.
@@ -1221,7 +1221,7 @@ Nowa sekcja configu `llm.api_key_env_var: ANTHROPIC_API_KEY` (ten sam wzorzec se
 
 **Faza 3 formalnie ukończona (v1.15).** Kryterium „dry-run na 2-3 tickerach, ręczna ocena jakości" z sekcji 15 spełnione: pipeline działa end-to-end na realnych danych, jakość merytoryczna dobra, a znaleziony błąd (max_score) jest dokładnie tym, po co ten dry-run istniał — złapany i naprawiony przed Fazą 4, gdzie silnik scoringu faktycznie zsumowałby te punkty w finalny wynik.
 
-### Status Fazy 4 (v1.16) — kod zbudowany, oczekuje empirycznej weryfikacji
+### Status Fazy 4 (v1.17) — empirycznie zweryfikowana i ukończona
 
 Przed implementacją, na wyraźną prośbę właściciela ("wejście do implementacji Fazy 4 z kompletną architekturą scoringu 100 pkt, zamiast implementowania teraz niepełnego scoringu i późniejszego łatania"), przedstawiono i zatwierdzono (2026-09-25) pełny design dwóch brakujących komponentów:
 
@@ -1251,17 +1251,19 @@ Rozszerzony `cli.py` o `score TICKERS... [--markdown-out DIR]` — pełny pipeli
 
 **57 nowych testów jednostkowych, wszystkie zielone (172 razem, w tym 1 integracyjny pominięty bez klucza w tej sesji).** Kluczowy niezależny hand-check: przy zerowym wzroście i zerowym terminal growth, `enterprise_value` musi być dokładnie równe `owner_earnings/discount_rate` (wzór perpetuity) — niezależnie od `projection_years`. Test to potwierdza dla wszystkich trzech scenariuszy, co jest silniejszą weryfikacją niż samo odtworzenie formuły DCF w teście.
 
-**Kod jeszcze nie zweryfikowany na realnym koncie** — wymaga uruchomienia „Phase 4 Proof Run" (te same sekrety co Faza 3, żadnego nowego). Dwie rzeczy szczególnie do potwierdzenia empirycznie: (1) trzy nowe nazwy pól FMP (`dividendsPaid`/`commonStockRepurchased`/`weightedAverageShsOutDil`) — niepotwierdzone, jak pierwotne 9 pól w Fazie 1; (2) czy silnik DCF na prawdziwych danych (nie ręcznie skonstruowanych w testach) produkuje sensowne, nie absurdalne wyceny — parametry są jawnie `UNCALIBRATED`, więc skrajne wyniki na starcie są oczekiwane i nie są same w sobie błędem, ale warto to zobaczyć na żywych danych przed Fazą 5.
+**Pierwsze uruchomienie „Phase 4 Proof Run" (2026-09-25) — pipeline zadziałał, ale dividend/shareholder-return wrócił pusty (`N/A` wszędzie).** Diagnoza przez surowy dump JSON (workflow „FMP Smoke Test", już istniejący z Fazy 1) zamiast kolejnego zgadywania: `share_buybacks`<-`commonStockRepurchased` i `diluted_shares_outstanding`<-`weightedAverageShsOutDil` były poprawne za pierwszym razem (potwierdzone: `share_count_trend` policzył się poprawnie jako `DECREASING`, zgodnie z rzeczywistością — AAPL agresywnie skupuje akcje). `dividends_paid`<-`dividendsPaid` było błędne: takiego pola w ogóle nie ma w odpowiedzi FMP. Prawdziwe pole to **`commonDividendsPaid`** (wybrane celowo zamiast `netDividendsPaid`, żeby DPS liczony na akcjach zwykłych wykluczał ewentualne dywidendy uprzywilejowane — AAPL akurat ma `preferredDividendsPaid: 0`, więc obie wartości były tu identyczne, ale semantycznie `common...` jest poprawnym wyborem). Naprawione w `normalize_fundamentals_rows`. Liczby po naprawie (ręczna weryfikacja z surowego JSON): dividend per share ≈ 1.03 USD, payout ratio (vs FCF) ≈ 15.6%, shareholder yield ≈ 2.1% przy cenie 339.55 — wszystkie realistyczne dla AAPL, silny sygnał poprawności poprawki.
+
+**Silnik DCF na prawdziwych danych: działa, wyniki skrajne — zgodnie z oczekiwaniami dla `UNCALIBRATED` parametrów.** BASE margin of safety wyszedł -271,5% (cena 339,55 USD vs intrinsic value BASE 91,41 USD) — DCF uznaje AAPL za mocno przewartościowaną przy tych konserwatywnych, nigdy niekalibrowanych założeniach (discount rate 9% dla planu wzrostu wyprowadzonego z historycznej CAGR FCF). To nie błąd kodu — to dokładnie to, czego uczy sekcja 6: „nic nie jest domyślnie prawdą" dopóki backtesting (Faza 5) nie skalibruje progów. `valuation_score` poprawnie zwrócił `0.0` (podłoga dla ujemnego MoS), `hard_gates` poprawnie `PASSED` (progi wciąż `null`/nieaktywne).
+
+**Faza 4 formalnie ukończona (v1.17).** Kryterium wyjścia z V0 (sekcja 15: „pełny pipeline działa end-to-end na próbce tickerów, generuje raport, bez dopracowanego UI") spełnione na realnych danych AAPL — pipeline liczy wszystkie 5 komponentów scoringu, stosuje hard gates, zapisuje IMMUTABLE wiersz do `analyses`/`analysis_sources`, generuje raport Markdown. Jedyny błąd znaleziony po drodze (nazwa pola dywidend) zdiagnozowany przez surowe dane, nie zgadywanie, i naprawiony w jednej rundzie.
 
 ---
 
 ## DECYZJE WCIĄŻ WYMAGAJĄCE TWOJEGO WYBORU
 
-**Zero.** Wszystkie 15 pierwotnych decyzji (D1–D15) są zamknięte, architektura MULTI-USER (v1.5/v1.6) zaakceptowana, Faza 0, Faza 1, Faza 2 i Faza 3 w pełni empirycznie zweryfikowane na realnych danych (v1.15), Faza 4 zaimplementowana wg zatwierdzonego designu (v1.16), oczekuje empirycznej weryfikacji.
+**Zero.** Wszystkie 15 pierwotnych decyzji (D1–D15) są zamknięte, architektura MULTI-USER (v1.5/v1.6) zaakceptowana, **wszystkie Fazy 0–4 w pełni empirycznie zweryfikowane na realnych danych (v1.17)**.
 
-Otwarte kwestie to nie decyzje, tylko kwestie czasu/budżetu:
-1. **Kiedy kupić plan Starter FMP** — potrzebny dopiero do `ingest-universe` (pełne 503 spółki), nie do dokończenia dowodu koncepcji na próbce tickerów. Można to zrobić teraz albo poczekać do Fazy 1/6.
-2. **Kiedy aktywować billing Claude API** — potrzebny od Fazy 3 (ten dry-run), koszt pojedynczych centów za ticker przy `claude-sonnet-5` na krótkim prompt. Bez tego kroku Faza 3 nie da się empirycznie zweryfikować, ale poza tym niczego pilnego nie blokuje.
+Jedyna otwarta kwestia to nie decyzja, tylko czas/budżet: **kiedy kupić plan Starter FMP** — potrzebny dopiero do `ingest-universe` (pełne 503 spółki), nie do dokończenia dowodu koncepcji na próbce tickerów. Można to zrobić teraz albo poczekać do Fazy 1/6. Billing Claude API już aktywowany (Faza 3/4).
 
 ---
 

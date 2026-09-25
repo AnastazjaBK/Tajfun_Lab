@@ -242,15 +242,19 @@ def normalize_fundamentals_rows(
     raportuje je jako wartości ujemne (odpływ gotówki); zapisujemy `abs()`,
     zgodnie z konwencją `FundamentalsPeriod` (dodatnia kwota wydatku/wypłaty).
 
-    Faza 4 (2026-09-25): trzy nowe pola dla `dividend_shareholder_return`
-    (`dividends_paid`<-`dividendsPaid`, `share_buybacks`<-
-    `commonStockRepurchased`, `diluted_shares_outstanding`<-
-    `weightedAverageShsOutDil`) — **NIEPOTWIERDZONE** dokładnie jak
-    pierwotne 9 pól w Fazie 1 przed empiryczną weryfikacją: nazwy kluczy
-    zgadywane na bazie konwencji FMP, nigdy nie zweryfikowane bezpośrednio
-    (te same ograniczenia sieciowe co reszta projektu). Do potwierdzenia
-    kolejnym uruchomieniem `ingest-fundamentals` na realnym koncie —
-    brak wiersza dla tych pól w wyniku będzie sygnałem błędnej nazwy.
+    Faza 4: trzy nowe pola dla `dividend_shareholder_return` —
+    **POTWIERDZONE empirycznie 2026-09-25** (workflow „FMP Smoke Test",
+    surowy JSON cash-flow-statement/income-statement na koncie
+    właścicielki): `share_buybacks`<-`commonStockRepurchased` i
+    `diluted_shares_outstanding`<-`weightedAverageShsOutDil` zgadnięte za
+    pierwszym razem. `dividends_paid` — **pierwsza wersja była błędna**:
+    zgadywane `dividendsPaid` w ogóle nie istnieje w odpowiedzi FMP;
+    prawdziwe pole to `commonDividendsPaid` (wybrane celowo zamiast
+    `netDividendsPaid`, żeby wykluczyć ewentualne dywidendy uprzywilejowane
+    z DPS liczonego na akcjach zwykłych). Błąd wykryty przez `score` na
+    realnych danych AAPL (wszystkie pola dividend/shareholder-return
+    wracały `N/A`), zdiagnozowany przez surowy dump JSON, nie zgadywany
+    ponownie.
     """
     rows: list[dict] = []
     # Pola cash-outflow, gdzie FMP prawdopodobnie raportuje wartość ujemną —
@@ -304,8 +308,14 @@ def normalize_fundamentals_rows(
         {
             "operating_cash_flow": "operatingCashFlow",
             "capital_expenditure": "capitalExpenditure",
-            "dividends_paid": "dividendsPaid",
-            "share_buybacks": "commonStockRepurchased",
+            # POTWIERDZONE empirycznie 2026-09-25 (FMP Smoke Test): pole
+            # nazywa się "commonDividendsPaid", nie zgadywane "dividendsPaid"
+            # (którego w odpowiedzi w ogóle nie ma). Wybrane celowo
+            # "common" (nie "netDividendsPaid") — wyklucza ewentualne
+            # dywidendy uprzywilejowane, dokładniej odpowiadając DPS liczonemu
+            # na akcjach zwykłych (diluted_shares_outstanding).
+            "dividends_paid": "commonDividendsPaid",
+            "share_buybacks": "commonStockRepurchased",  # POTWIERDZONE — nazwa zgadła
         },
     )
     return rows
