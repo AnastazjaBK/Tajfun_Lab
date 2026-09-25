@@ -36,14 +36,21 @@ class AnalysisValidationError(RuntimeError):
 
 class ScoredSection(BaseModel):
     score: int
-    max_score: int
+    # Stała waga rubryki z sekcji 8 (business_understandability) — NIE
+    # coś, co model ma sam wybierać. Literal wymusza tę wartość już na
+    # poziomie JSON Schema przekazanego do Claude API (output_format),
+    # więc API fizycznie nie pozwoli na inną liczbę — nie tylko
+    # sprawdzamy to po fakcie. Potwierdzone empirycznie 2026-09-25
+    # (Phase 3 Proof Run): bez tego ograniczenia model sam przyjął
+    # skalę 1-10 zamiast właściwej z sekcji 8.
+    max_score: Literal[7] = 7
     confidence: Confidence
     reasoning: str = ""
 
 
 class MoatSection(BaseModel):
     score: int
-    max_score: int
+    max_score: Literal[12] = 12  # stała waga z sekcji 8 — patrz ScoredSection
     confidence: Confidence
     evidence: list[str] = Field(default_factory=list)
     counterarguments: list[str] = Field(default_factory=list)
@@ -58,7 +65,7 @@ class FinancialQualityCommentary(BaseModel):
 
 class ManagementSection(BaseModel):
     score: int
-    max_score: int
+    max_score: Literal[10] = 10  # stała waga z sekcji 8 — patrz ScoredSection
     confidence: Confidence
     evidence: list[str] = Field(default_factory=list)
 

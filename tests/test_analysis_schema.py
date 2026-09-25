@@ -40,6 +40,26 @@ def test_parses_minimal_valid_output():
     assert result.moat.score == 10
 
 
+def test_max_score_is_fixed_by_schema_not_chosen_by_model():
+    """Potwierdzone empirycznie 2026-09-25 (Phase 3 Proof Run): bez tego
+    ograniczenia model sam przyjął skalę 1-10 zamiast stałych wag z
+    sekcji 8 (7/12/10). Literal w schemacie wymusza to już na poziomie
+    JSON Schema przekazanego do Claude API — nieprawidłowa wartość
+    max_score nie przechodzi nawet walidacji pydantic."""
+    result = make_valid_output()
+    assert result.business_understandability.max_score == 7
+    assert result.moat.max_score == 12
+    assert result.management_capital_allocation.max_score == 10
+
+    with pytest.raises(Exception):  # pydantic.ValidationError
+        AnalysisOutput.model_validate(
+            {
+                **make_valid_output().model_dump(),
+                "business_understandability": {"score": 9, "max_score": 10, "confidence": "HIGH"},
+            }
+        )
+
+
 def test_financial_quality_commentary_has_no_score_field():
     """Sekcja 8: wynik liczbowy financial_quality jest liczony
     deterministycznie w Fazie 4 — LLM dostarcza tylko komentarz."""
