@@ -1,0 +1,43 @@
+name: Phase 2 Proof Run
+
+# Ręczne uruchomienie z przeglądarki, jak "Phase 0/1 Proof Run". Dowodzi,
+# że Source Assembly Layer (sekcja 9, BLOCKER 3/4) realnie działa:
+# pobiera prawdziwą listę filingów z SEC EDGAR dla kilku ręcznie
+# wybranych tickerów, buduje deterministyczne URL-e i faktycznie
+# pobiera + hashuje dokumenty (SHA-256) — dowód, że źródła nie są
+# fabrykowane. SEC EDGAR jest darmowy, nie wymaga klucza API — wymaga
+# tylko sekretu SEC_EDGAR_USER_AGENT (dane kontaktowe w nagłówku
+# User-Agent, wymóg SEC: https://www.sec.gov/os/webmaster-faq#developers).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Tickery do przetestowania, oddzielone spacją"
+        required: false
+        default: "AAPL MSFT KO"
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: init-db
+        run: python -m buffett_scanner.cli init-db
+
+      - name: ingest-prices (rejestruje CIK, potrzebne przed source packet)
+        run: python -m buffett_scanner.cli ingest-prices ${{ inputs.tickers }} --days 400
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: build-source-packet
+        run: python -m buffett_scanner.cli build-source-packet ${{ inputs.tickers }}
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
