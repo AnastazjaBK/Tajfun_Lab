@@ -26,6 +26,16 @@ Treść błędów FMP (np. "Invalid API KEY. Feel free to create...") jest
 generycznym komunikatem, nie zawiera danych konta ani klucza — dlatego
 FMPError bezpiecznie pokazuje jej fragment, nawet w publicznym logu
 GitHub Actions.
+
+FAZA 1 — endpointy fundamentalne (income-statement, balance-sheet-statement,
+cash-flow-statement): ścieżki i nazwy pól NIE zostały jeszcze potwierdzone
+przez rzeczywiste wywołanie (WebFetch do dokumentacji FMP zablokowany
+przez proxy sieciowe sesji przez cały czas trwania tego projektu). Kod
+poniżej jest napisany defensywnie na bazie publicznie znanej konwencji
+nazewnictwa `/stable/`, dokładnie tym samym trybem co profile/historical
+w Fazie 0 — do zweryfikowania empirycznie przez `fmp_smoketest.py` na
+prawdziwym koncie, nie do potraktowania jako fakt, dopóki nie przyjdzie
+potwierdzenie.
 """
 
 from __future__ import annotations
@@ -155,3 +165,102 @@ class FMPClient:
         ]
         normalized.sort(key=lambda r: r["date"])
         return normalized
+
+    def _get_statement(self, path: str, symbol: str, *, period: str, limit: int) -> list[dict]:
+        data = self._get(path, symbol=symbol, period=period, limit=limit)
+        if not isinstance(data, list):
+            raise FMPError(
+                f"Nieoczekiwany kształt odpowiedzi {path} dla {symbol} "
+                f"(oczekiwano listy, dostałam {type(data).__name__})."
+            )
+        return data
+
+    def get_income_statement(
+        self, symbol: str, *, period: str = "annual", limit: int = 10
+    ) -> list[dict]:
+        """Surowe wiersze rachunku wyników (NIEPOTWIERDZONY kształt —
+        patrz docstring modułu). Ścieżka i parametry zgadywane na bazie
+        konwencji `/stable/` — do weryfikacji empirycznej."""
+        return self._get_statement("income-statement", symbol, period=period, limit=limit)
+
+    def get_balance_sheet_statement(
+        self, symbol: str, *, period: str = "annual", limit: int = 10
+    ) -> list[dict]:
+        """Surowe wiersze bilansu (NIEPOTWIERDZONY kształt — jak wyżej)."""
+        return self._get_statement("balance-sheet-statement", symbol, period=period, limit=limit)
+
+    def get_cash_flow_statement(
+        self, symbol: str, *, period: str = "annual", limit: int = 10
+    ) -> list[dict]:
+        """Surowe wiersze cash flow (NIEPOTWIERDZONY kształt — jak wyżej)."""
+        return self._get_statement("cash-flow-statement", symbol, period=period, limit=limit)
+
+
+def _statement_period_key(row: dict) -> str:
+    """Wyprowadza stabilny klucz okresu fiskalnego z wiersza sprawozdania.
+    Preferuje (fiscalYear|calendarYear)+period; fallback na `date`, bo
+    dokładne nazwy pól nie są potwierdzone (patrz docstring modułu)."""
+    fiscal_year = row.get("fiscalYear") or row.get("calendarYear")
+    period = row.get("period")
+    if fiscal_year and period:
+        return f"{fiscal_year}-{period}"
+    date = row.get("date")
+    if date:
+        return str(date)
+    raise FMPError("Nie można wyznaczyć fiscal_period — brak fiscalYear/period/date w wierszu.")
+
+
+def normalize_fundamentals_rows(
+    income_rows: list[dict], balance_rows: list[dict], cashflow_rows: list[dict]
+) -> list[dict]:
+    """Łączy trzy surowe sprawozdania FMP w jedną listę wierszy w formacie
+    oczekiwanym przez `db.insert_fundamentals_rows` (long, kanoniczne
+    line_item — patrz `buffett_scanner.db.LINE_ITEM_STATEMENT_TYPE`).
+
+    Brakujące pole w danym wierszu (np. spółka bez `ebitda` w odpowiedzi)
+    jest po prostu pomijane — nigdy nie zapisujemy zgadywanej wartości.
+    `capital_expenditure`: FMP prawdopodobnie raportuje capex jako wartość
+    ujemną (odpływ gotówki); zapisujemy `abs()`, zgodnie z konwencją
+    `FundamentalsPeriod.capital_expenditure` (dodatnia kwota wydatku).
+    """
+    rows: list[dict] = []
+
+    def _emit(source_rows: list[dict], field_map: dict[str, str]) -> None:
+        for r in source_rows:
+            period_end_date = r.get("date")
+            if not period_end_date:
+                continue
+            fiscal_period = _statement_period_key(r)
+            filed_date = r.get("filingDate") or r.get("acceptedDate")
+            for line_item, raw_key in field_map.items():
+                value = r.get(raw_key)
+                if value is None:
+                    continue
+                if line_item == "capital_expenditure":
+                    value = abs(value)
+                rows.append(
+                    {
+                        "fiscal_period": fiscal_period,
+                        "period_end_date": period_end_date,
+                        "filed_date": filed_date,
+                        "line_item": line_item,
+                        "value": value,
+                        "unit": "USD",
+                    }
+                )
+
+    _emit(income_rows, {"revenue": "revenue", "net_income": "netIncome", "ebitda": "ebitda"})
+    _emit(
+        balance_rows,
+        {
+            "total_debt": "totalDebt",
+            "cash_and_equivalents": "cashAndCashEquivalents",
+            "total_current_assets": "totalCurrentAssets",
+            "total_current_liabilities": "totalCurrentLiabilities",
+        },
+    )
+    _emit(
+        cashflow_rows,
+        {"operating_cash_flow": "operatingCashFlow", "capital_expenditure": "capitalExpenditure"},
+    )
+    return rows

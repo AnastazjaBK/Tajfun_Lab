@@ -12,7 +12,7 @@ def test_default_config_loads_and_validates():
     assert config.decline_scanner.status == "UNCALIBRATED"
     assert config.decline_scanner.thresholds.daily_pct == -5.0
     assert config.data_provider.fundamentals_prices == "fmp"
-    assert config.data_provider.plan == "starter"
+    assert config.data_provider.plan == "free"
 
 
 def test_missing_config_file_raises(tmp_path):
@@ -25,6 +25,26 @@ def test_invalid_config_raises_validation_error(tmp_path):
     bad.write_text("universe:\n  name: sp500\n")  # brakuje wymaganych sekcji
     with pytest.raises(ValidationError):
         load_config(bad)
+
+
+def test_prefilter_config_loads_flag_rules_and_empty_exclude_rules():
+    config = load_config(DEFAULT_CONFIG_PATH)
+    assert config.prefilter.status == "UNCALIBRATED"
+    assert config.prefilter.exclude_rules == []
+    assert len(config.prefilter.flag_rules) == 4
+    metrics = {r.metric for r in config.prefilter.flag_rules}
+    assert metrics == {
+        "fcf_ttm", "revenue_yoy_growth_pct", "net_debt_to_ebitda", "current_ratio",
+    }
+
+
+def test_prefilter_rule_with_below_or_above_condition_requires_threshold():
+    from pydantic import ValidationError as PydValidationError
+
+    from buffett_scanner.config import PrefilterRule
+
+    with pytest.raises(PydValidationError):
+        PrefilterRule(metric="x", condition="below", reason="brak progu")
 
 
 def test_resolve_api_key_missing_env_var_raises_clear_error(monkeypatch):

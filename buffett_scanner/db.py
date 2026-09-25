@@ -1,12 +1,13 @@
-"""Warstwa bazy danych — Faza 0.
+"""Warstwa bazy danych — Faza 0 + Faza 1.
 
-Tylko tabele potrzebne w Fazie 0 (sekcja 15, punkty 0.2/0.3/0.5 planu
-implementacji): companies, ticker_history, price_daily, users.
-Tożsamość spółki to CIK, nigdy ticker (patrz sekcja 5 design review —
-ryzyko "ticker recycling"). Pozostałe tabele ze zaprojektowanego
-schematu (fundamentals_raw, analyses, watchlist, positions, moduł
-BIOTECH, ...) należą do późniejszych faz i nie są tu tworzone — nie
-rozszerzamy MVP przed czasem.
+Faza 0 (sekcja 15, punkty 0.2/0.3/0.5 planu implementacji): companies,
+ticker_history, price_daily, users. Faza 1 (punkt 1.1): fundamentals_raw
+(format long, surowe dane "as reported"), derived_metrics (wyliczone
+wskaźniki, wersjonowane przez calc_version). Tożsamość spółki to CIK,
+nigdy ticker (patrz sekcja 5 design review — ryzyko "ticker recycling").
+Pozostałe tabele ze zaprojektowanego schematu (analyses, watchlist,
+positions, moduł BIOTECH, ...) należą do późniejszych faz i nie są tu
+tworzone — nie rozszerzamy MVP przed czasem.
 
 SQLite teraz, Postgres/Supabase od V1 (Decyzja D5) — typy i DDL
 poniżej celowo unikają konstrukcji specyficznych dla SQLite, żeby
@@ -17,6 +18,23 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
+
+from buffett_scanner.fundamentals import FundamentalsPeriod
+
+# Kanoniczne nazwy line_item używane przy zapisie/odczycie fundamentals_raw
+# — muszą być spójne między ingestem (cli.py) a pivotowaniem tutaj.
+_INCOME_STATEMENT_ITEMS = {"revenue", "net_income", "ebitda"}
+_BALANCE_SHEET_ITEMS = {
+    "total_debt", "cash_and_equivalents",
+    "total_current_assets", "total_current_liabilities",
+}
+_CASH_FLOW_ITEMS = {"operating_cash_flow", "capital_expenditure"}
+
+LINE_ITEM_STATEMENT_TYPE = {
+    **{k: "INCOME_STATEMENT" for k in _INCOME_STATEMENT_ITEMS},
+    **{k: "BALANCE_SHEET" for k in _BALANCE_SHEET_ITEMS},
+    **{k: "CASH_FLOW" for k in _CASH_FLOW_ITEMS},
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS companies (
@@ -61,6 +79,42 @@ CREATE TABLE IF NOT EXISTS users (
     user_id      INTEGER PRIMARY KEY AUTOINCREMENT,
     display_name TEXT NOT NULL,
     created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Faza 1 — surowe dane fundamentalne, format long: korekty/restatements
+-- NIE nadpisują wartości "as reported" (nowy wiersz, nie UPDATE).
+-- filed_date krytyczne dla point-in-time (sekcja 13 design review).
+CREATE TABLE IF NOT EXISTS fundamentals_raw (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    cik             TEXT NOT NULL REFERENCES companies(cik),
+    fiscal_period   TEXT NOT NULL,
+    period_end_date TEXT NOT NULL,
+    filed_date      TEXT,
+    statement_type  TEXT NOT NULL
+                    CHECK (statement_type IN ('INCOME_STATEMENT','BALANCE_SHEET','CASH_FLOW')),
+    line_item       TEXT NOT NULL,
+    value           REAL,
+    unit            TEXT,
+    source          TEXT NOT NULL,
+    source_doc_id   TEXT,
+    ingested_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (cik, fiscal_period, statement_type, line_item, source)
+);
+CREATE INDEX IF NOT EXISTS idx_fundamentals_raw_cik_period
+    ON fundamentals_raw(cik, fiscal_period);
+
+-- Faza 1 — wskaźniki wyliczone z fundamentals_raw. calc_version pozwala
+-- przeliczyć historię bez utraty poprzednich wyników (sekcja 10/11).
+CREATE TABLE IF NOT EXISTS derived_metrics (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    cik          TEXT NOT NULL REFERENCES companies(cik),
+    as_of_date   TEXT NOT NULL,
+    metric_name  TEXT NOT NULL,
+    value        REAL,
+    calc_version TEXT NOT NULL,
+    inputs_hash  TEXT,
+    ingested_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (cik, as_of_date, metric_name, calc_version)
 );
 """
 
@@ -169,3 +223,118 @@ def create_user(conn: sqlite3.Connection, display_name: str) -> int:
         "INSERT INTO users (display_name) VALUES (?)", (display_name,)
     )
     return cur.lastrowid
+
+
+def insert_fundamentals_rows(
+    conn: sqlite3.Connection, cik: str, source: str, rows: list[dict]
+) -> int:
+    """rows: [{fiscal_period, period_end_date, filed_date, line_item, value,
+    unit}, ...]. `statement_type` wyprowadzany z `line_item` przez
+    LINE_ITEM_STATEMENT_TYPE — nazwy line_item muszą być kanoniczne (patrz
+    moduł). Wartości None (brakujący line item w odpowiedzi providera) są
+    zapisywane jako NULL, nigdy jako 0."""
+    n = 0
+    for r in rows:
+        line_item = r["line_item"]
+        statement_type = LINE_ITEM_STATEMENT_TYPE.get(line_item)
+        if statement_type is None:
+            raise ValueError(f"Nieznany kanoniczny line_item: {line_item!r}")
+        conn.execute(
+            """
+            INSERT INTO fundamentals_raw
+                (cik, fiscal_period, period_end_date, filed_date,
+                 statement_type, line_item, value, unit, source, source_doc_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(cik, fiscal_period, statement_type, line_item, source)
+            DO UPDATE SET
+                period_end_date = excluded.period_end_date,
+                filed_date = excluded.filed_date,
+                value = excluded.value,
+                unit = excluded.unit,
+                source_doc_id = excluded.source_doc_id
+            """,
+            (
+                cik,
+                r["fiscal_period"],
+                r["period_end_date"],
+                r.get("filed_date"),
+                statement_type,
+                line_item,
+                r.get("value"),
+                r.get("unit"),
+                source,
+                r.get("source_doc_id"),
+            ),
+        )
+        n += 1
+    return n
+
+
+def get_fundamentals_periods(conn: sqlite3.Connection, cik: str) -> list[FundamentalsPeriod]:
+    """Pivotuje fundamentals_raw (format long) do listy `FundamentalsPeriod`,
+    posortowanej rosnąco po period_end_date (konwencja: [-1] = najnowszy,
+    patrz fundamentals.py). Brakujący line_item dla danego okresu -> None,
+    nigdy 0 — pole po prostu nie trafia do słownika przed przekazaniem do
+    FundamentalsPeriod(**{...}), gdzie dataclass ma domyślnie None."""
+    rows = conn.execute(
+        """
+        SELECT fiscal_period, period_end_date, filed_date, line_item, value
+        FROM fundamentals_raw
+        WHERE cik = ?
+        ORDER BY period_end_date ASC
+        """,
+        (cik,),
+    ).fetchall()
+
+    by_period: dict[str, dict] = {}
+    order: list[str] = []
+    for r in rows:
+        fp = r["fiscal_period"]
+        if fp not in by_period:
+            by_period[fp] = {
+                "fiscal_period": fp,
+                "period_end_date": r["period_end_date"],
+                "filed_date": r["filed_date"],
+            }
+            order.append(fp)
+        by_period[fp][r["line_item"]] = r["value"]
+
+    fields = (
+        "revenue", "net_income", "ebitda", "operating_cash_flow",
+        "capital_expenditure", "total_debt", "cash_and_equivalents",
+        "total_current_assets", "total_current_liabilities",
+    )
+    periods = []
+    for fp in order:
+        data = by_period[fp]
+        periods.append(
+            FundamentalsPeriod(
+                fiscal_period=data["fiscal_period"],
+                period_end_date=data["period_end_date"],
+                filed_date=data["filed_date"],
+                **{f: data.get(f) for f in fields},
+            )
+        )
+    return periods
+
+
+def upsert_derived_metric(
+    conn: sqlite3.Connection,
+    *,
+    cik: str,
+    as_of_date: str,
+    metric_name: str,
+    value: float | None,
+    calc_version: str,
+    inputs_hash: str | None = None,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO derived_metrics
+            (cik, as_of_date, metric_name, value, calc_version, inputs_hash)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(cik, as_of_date, metric_name, calc_version)
+        DO UPDATE SET value = excluded.value, inputs_hash = excluded.inputs_hash
+        """,
+        (cik, as_of_date, metric_name, value, calc_version, inputs_hash),
+    )

@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "config.yaml"
 
@@ -28,6 +29,34 @@ class DeclineScannerThresholds(BaseModel):
 
 class DeclineScannerConfig(BaseModel):
     thresholds: DeclineScannerThresholds
+    status: str = "UNCALIBRATED"
+
+
+class PrefilterRule(BaseModel):
+    """Jedna reguła FLAG lub EXCLUDE (§BLOCKER 5 design review).
+
+    `condition="negative"/"positive"` nie potrzebuje progu (`threshold`);
+    `condition="below"/"above"` go wymaga. Brak wartości metryki (None) w
+    danych NIGDY nie odpala reguły — patrz `fundamentals.evaluate_prefilter`.
+    """
+
+    metric: str
+    condition: Literal["negative", "positive", "below", "above"]
+    threshold: float | None = None
+    reason: str
+
+    @model_validator(mode="after")
+    def _threshold_required_for_below_above(self) -> "PrefilterRule":
+        if self.condition in ("below", "above") and self.threshold is None:
+            raise ValueError(
+                f"Reguła '{self.metric}' z condition='{self.condition}' wymaga 'threshold'."
+            )
+        return self
+
+
+class PrefilterConfig(BaseModel):
+    flag_rules: list[PrefilterRule] = Field(default_factory=list)
+    exclude_rules: list[PrefilterRule] = Field(default_factory=list)
     status: str = "UNCALIBRATED"
 
 
@@ -62,6 +91,7 @@ class DataProviderConfig(BaseModel):
 class AppConfig(BaseModel):
     universe: UniverseConfig
     decline_scanner: DeclineScannerConfig
+    prefilter: PrefilterConfig
     data_provider: DataProviderConfig
 
 

@@ -50,6 +50,33 @@ def main() -> int:
         except FMPError as exc:
             print(f"NIEZGODNE ZAŁOŻENIE: {exc}")
 
+        print("\n== income-statement/AAPL (najnowszy wpis) ==")
+        try:
+            income = client.get_income_statement("AAPL", limit=2)
+            print(f"Liczba okresów: {len(income)}")
+            if income:
+                print(income[0])
+        except FMPError as exc:
+            print(f"NIEZGODNE ZAŁOŻENIE: {exc}")
+
+        print("\n== balance-sheet-statement/AAPL (najnowszy wpis) ==")
+        try:
+            balance = client.get_balance_sheet_statement("AAPL", limit=2)
+            print(f"Liczba okresów: {len(balance)}")
+            if balance:
+                print(balance[0])
+        except FMPError as exc:
+            print(f"NIEZGODNE ZAŁOŻENIE: {exc}")
+
+        print("\n== cash-flow-statement/AAPL (najnowszy wpis) ==")
+        try:
+            cashflow = client.get_cash_flow_statement("AAPL", limit=2)
+            print(f"Liczba okresów: {len(cashflow)}")
+            if cashflow:
+                print(cashflow[0])
+        except FMPError as exc:
+            print(f"NIEZGODNE ZAŁOŻENIE: {exc}")
+
     return 0
 
 

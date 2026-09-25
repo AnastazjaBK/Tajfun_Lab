@@ -1,9 +1,11 @@
-"""CLI — Faza 0.
+"""CLI — Faza 0 + Faza 1.
 
     python -m buffett_scanner.cli init-db
     python -m buffett_scanner.cli ingest-universe
     python -m buffett_scanner.cli ingest-prices AAPL MSFT ... [--days 400]
     python -m buffett_scanner.cli scan AAPL MSFT ...
+    python -m buffett_scanner.cli ingest-fundamentals AAPL MSFT ...
+    python -m buffett_scanner.cli prefilter AAPL MSFT ...
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -17,16 +19,21 @@ import sys
 
 from buffett_scanner.config import load_config
 from buffett_scanner.db import (
+    get_fundamentals_periods,
     get_price_series,
     init_db,
+    insert_fundamentals_rows,
     insert_price_rows,
     upsert_company,
+    upsert_derived_metric,
     upsert_ticker_history,
 )
-from buffett_scanner.providers.fmp import FMPClient, FMPError
+from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
+from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
 from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
 
 DEFAULT_DB_PATH = "buffett_scanner.db"
+PREFILTER_CALC_VERSION = "0.1.0-phase1"
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
@@ -163,6 +170,72 @@ def cmd_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_ingest_fundamentals(args: argparse.Namespace) -> int:
+    config = load_config()
+    api_key = config.data_provider.resolve_api_key()
+    conn = init_db(args.db)
+
+    with FMPClient(api_key) as client:
+        for ticker in args.tickers:
+            cik = _resolve_cik(conn, ticker)
+            if cik is None:
+                print(
+                    f"POMINIĘTO {ticker}: brak w bazie "
+                    "(uruchom najpierw ingest-prices, które rejestruje CIK).",
+                    file=sys.stderr,
+                )
+                continue
+            try:
+                income = client.get_income_statement(ticker)
+                balance = client.get_balance_sheet_statement(ticker)
+                cashflow = client.get_cash_flow_statement(ticker)
+            except FMPError as exc:
+                print(f"BŁĄD pobierania fundamentów dla {ticker}: {exc}", file=sys.stderr)
+                continue
+            rows = normalize_fundamentals_rows(income, balance, cashflow)
+            if not rows:
+                print(f"{ticker} ({cik}): 0 wierszy fundamentalnych (nieoczekiwany kształt odpowiedzi?)")
+                continue
+            n = insert_fundamentals_rows(conn, cik, source="fmp", rows=rows)
+            conn.commit()
+            print(f"{ticker} ({cik}): zapisano {n} wierszy fundamentals_raw.")
+    return 0
+
+
+def cmd_prefilter(args: argparse.Namespace) -> int:
+    config = load_config()
+    conn = init_db(args.db)
+
+    for ticker in args.tickers:
+        cik = _resolve_cik(conn, ticker)
+        if cik is None:
+            print(f"{ticker}: brak w bazie (uruchom najpierw ingest-prices).")
+            continue
+        periods = get_fundamentals_periods(conn, cik)
+        if not periods:
+            print(f"{ticker}: brak danych fundamentalnych (uruchom najpierw ingest-fundamentals).")
+            continue
+        metrics = compute_metrics(periods)
+        as_of_date = periods[-1].period_end_date
+        for metric_name, value in metrics.items():
+            upsert_derived_metric(
+                conn, cik=cik, as_of_date=as_of_date, metric_name=metric_name,
+                value=value, calc_version=PREFILTER_CALC_VERSION,
+            )
+        conn.commit()
+
+        result = evaluate_prefilter(metrics, config.prefilter)
+        print(f"\n{ticker} ({cik}) — okres {periods[-1].fiscal_period} ({as_of_date})")
+        print(f"  metryki: {metrics}")
+        if result.excludes:
+            print(f"  EXCLUDE: {result.excludes}")
+        elif result.flags:
+            print(f"  FLAG (nie blokuje — patrz BLOCKER 5): {result.flags}")
+        else:
+            print("  brak przekroczonych progów prefiltra (UNCALIBRATED — patrz Faza 5)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -180,6 +253,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan = sub.add_parser("scan")
     p_scan.add_argument("tickers", nargs="+")
     p_scan.set_defaults(func=cmd_scan)
+
+    p_fund = sub.add_parser("ingest-fundamentals")
+    p_fund.add_argument("tickers", nargs="+")
+    p_fund.set_defaults(func=cmd_ingest_fundamentals)
+
+    p_prefilter = sub.add_parser("prefilter")
+    p_prefilter.add_argument("tickers", nargs="+")
+    p_prefilter.set_defaults(func=cmd_prefilter)
 
     return parser
 

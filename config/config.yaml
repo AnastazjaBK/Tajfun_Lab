@@ -1,10 +1,10 @@
 # Buffett Opportunity Scanner — konfiguracja
 #
 # Jedno źródło prawdy dla progów i parametrów pipeline'u (patrz
-# docs/buffett-scanner-design-review.md, sekcja 6). Tylko sekcje
-# potrzebne w Fazie 0 są tu wypełnione — pozostałe (prefilter, scoring,
-# hard_gates, llm, watchlist, sector_overrides, holdings, backtest)
-# dojdą w kolejnych fazach, razem z kodem, który je faktycznie używa.
+# docs/buffett-scanner-design-review.md, sekcja 6). Sekcje potrzebne w
+# Fazie 0 i Fazie 1 są tu wypełnione — pozostałe (scoring, hard_gates,
+# llm, watchlist, sector_overrides, holdings, backtest) dojdą w
+# kolejnych fazach, razem z kodem, który je faktycznie używa.
 
 universe:
   name: sp500
@@ -21,8 +21,37 @@ decline_scanner:
     relative_volume_multiple: 2.0
   status: UNCALIBRATED   # nie traktować jako reguły inwestycyjnej przed backtestingiem (Faza 5)
 
+prefilter:
+  # BLOCKER 5 (docs/buffett-scanner-design-review.md, §BLOCKER 5): ujemny
+  # FCF sam w sobie NIGDY nie jest automatycznym EXCLUDE — tylko FLAG.
+  flag_rules:
+    - metric: fcf_ttm
+      condition: negative
+      reason: "Ujemny FCF (TTM) — wymaga oceny kontekstu biznesowego (BLOCKER 5)"
+    - metric: revenue_yoy_growth_pct
+      condition: below
+      threshold: 0.0
+      reason: "Malejące przychody rok do roku"
+    - metric: net_debt_to_ebitda
+      condition: above
+      threshold: 4.0
+      reason: "Wysoka dźwignia (net debt / EBITDA)"
+    - metric: current_ratio
+      condition: below
+      threshold: 1.0
+      reason: "Niska płynność bieżąca (current ratio)"
+  # Celowo puste w Fazie 1. BLOCKER 5: hard EXCLUDE wymaga POŁĄCZENIA
+  # kilku krytycznych sygnałów (np. ujemny FCF + malejące przychody +
+  # going-concern), a going-concern nie jest jeszcze dostępny jako
+  # deterministyczny sygnał (to sygnał tekstowy/LLM z późniejszej fazy).
+  # Dodanie tu reguł EXCLUDE bez tego sygnału byłoby fabrykowaniem progu,
+  # którego nikt nie zweryfikował — więc zostaje puste do czasu, aż
+  # rzeczywiście deterministyczna kombinacja zostanie zaprojektowana.
+  exclude_rules: []
+  status: UNCALIBRATED
+
 data_provider:
   fundamentals_prices: fmp
-  plan: starter            # Decyzja D1/D3 — potwierdzone przez właściciela
+  plan: free                # aktualny plan właściciela; Starter odłożony (patrz v1.9)
   filings: sec_edgar
   api_key_env_var: FMP_API_KEY

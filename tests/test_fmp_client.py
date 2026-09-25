@@ -14,7 +14,7 @@ import httpx
 import pytest
 
 from buffett_scanner.config import load_config
-from buffett_scanner.providers.fmp import FMPClient, FMPError
+from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
 
 
 class _FakeResponse:
@@ -139,6 +139,78 @@ def test_non_200_status_includes_truncated_error_body(monkeypatch):
     with pytest.raises(FMPError) as exc_info:
         client.get_sp500_constituents()
     assert "Invalid API KEY" in str(exc_info.value)
+
+
+def test_get_income_statement_parses_list(monkeypatch):
+    client = FMPClient("dummy-key")
+    fake_payload = [
+        {"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
+         "revenue": 1000.0, "netIncome": 100.0, "ebitda": 200.0},
+    ]
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponse(200, fake_payload)
+    )
+    result = client.get_income_statement("AAPL")
+    assert result == fake_payload
+
+
+def test_get_income_statement_raises_on_unexpected_shape(monkeypatch):
+    client = FMPClient("dummy-key")
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponse(200, {"not": "a list"})
+    )
+    with pytest.raises(FMPError):
+        client.get_income_statement("AAPL")
+
+
+def test_get_balance_sheet_statement_parses_list(monkeypatch):
+    client = FMPClient("dummy-key")
+    fake_payload = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY", "totalDebt": 500.0}]
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponse(200, fake_payload)
+    )
+    assert client.get_balance_sheet_statement("AAPL") == fake_payload
+
+
+def test_get_cash_flow_statement_parses_list(monkeypatch):
+    client = FMPClient("dummy-key")
+    fake_payload = [
+        {"date": "2024-12-31", "fiscalYear": 2024, "period": "FY", "operatingCashFlow": 900.0},
+    ]
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponse(200, fake_payload)
+    )
+    assert client.get_cash_flow_statement("AAPL") == fake_payload
+
+
+def test_normalize_fundamentals_rows_maps_canonical_line_items():
+    income = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
+               "revenue": 1000.0, "netIncome": 100.0, "ebitda": 200.0}]
+    balance = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
+                "totalDebt": 500.0, "cashAndCashEquivalents": 150.0,
+                "totalCurrentAssets": 400.0, "totalCurrentLiabilities": 250.0}]
+    cashflow = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
+                 "operatingCashFlow": 900.0, "capitalExpenditure": -300.0}]
+
+    rows = normalize_fundamentals_rows(income, balance, cashflow)
+    by_item = {r["line_item"]: r["value"] for r in rows}
+
+    assert by_item["revenue"] == 1000.0
+    assert by_item["net_income"] == 100.0
+    assert by_item["ebitda"] == 200.0
+    assert by_item["total_debt"] == 500.0
+    assert by_item["cash_and_equivalents"] == 150.0
+    assert by_item["operating_cash_flow"] == 900.0
+    # capex ujemny w źródle FMP -> zapisany jako dodatnia kwota wydatku
+    assert by_item["capital_expenditure"] == 300.0
+    assert all(r["fiscal_period"] == "2024-FY" for r in rows)
+
+
+def test_normalize_fundamentals_rows_skips_missing_fields_without_fabricating():
+    income = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY", "revenue": 1000.0}]
+    rows = normalize_fundamentals_rows(income, [], [])
+    line_items = {r["line_item"] for r in rows}
+    assert line_items == {"revenue"}  # netIncome/ebitda brak w źródle -> nie fabrykujemy 0/None
 
 
 @pytest.mark.integration

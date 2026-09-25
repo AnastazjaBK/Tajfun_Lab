@@ -4,10 +4,13 @@ import pytest
 
 from buffett_scanner.db import (
     create_user,
+    get_fundamentals_periods,
     get_price_series,
     init_db,
+    insert_fundamentals_rows,
     insert_price_rows,
     upsert_company,
+    upsert_derived_metric,
     upsert_ticker_history,
 )
 
@@ -112,3 +115,84 @@ def test_create_user_minimal_no_auth(conn):
     conn.commit()
     row = conn.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
     assert row["display_name"] == "Anastazja"
+
+
+def test_init_db_creates_phase1_tables(conn):
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert {"fundamentals_raw", "derived_metrics"} <= tables
+
+
+def test_insert_fundamentals_rows_and_pivot_to_periods(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    rows = [
+        {"fiscal_period": "2023-FY", "period_end_date": "2023-12-31",
+         "filed_date": "2024-01-15", "line_item": "revenue", "value": 100.0},
+        {"fiscal_period": "2023-FY", "period_end_date": "2023-12-31",
+         "filed_date": "2024-01-15", "line_item": "net_income", "value": 10.0},
+        {"fiscal_period": "2024-FY", "period_end_date": "2024-12-31",
+         "filed_date": "2025-01-15", "line_item": "revenue", "value": 110.0},
+        {"fiscal_period": "2024-FY", "period_end_date": "2024-12-31",
+         "filed_date": "2025-01-15", "line_item": "operating_cash_flow", "value": 900.0},
+    ]
+    n = insert_fundamentals_rows(conn, "0000320193", source="fmp", rows=rows)
+    conn.commit()
+    assert n == 4
+
+    periods = get_fundamentals_periods(conn, "0000320193")
+    assert [p.fiscal_period for p in periods] == ["2023-FY", "2024-FY"]  # rosnąco
+    assert periods[0].revenue == 100.0
+    assert periods[0].net_income == 10.0
+    # brakujący line_item dla danego okresu -> None, nigdy 0
+    assert periods[0].operating_cash_flow is None
+    assert periods[-1].revenue == 110.0
+    assert periods[-1].operating_cash_flow == 900.0
+    assert periods[-1].net_income is None
+
+
+def test_insert_fundamentals_rows_rejects_unknown_line_item(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    with pytest.raises(ValueError):
+        insert_fundamentals_rows(
+            conn, "0000320193", source="fmp",
+            rows=[{"fiscal_period": "2024-FY", "period_end_date": "2024-12-31",
+                   "line_item": "not_a_real_metric", "value": 1.0}],
+        )
+
+
+def test_insert_fundamentals_rows_upserts_on_conflict(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    insert_fundamentals_rows(
+        conn, "0000320193", source="fmp",
+        rows=[{"fiscal_period": "2024-FY", "period_end_date": "2024-12-31",
+               "line_item": "revenue", "value": 100.0}],
+    )
+    insert_fundamentals_rows(
+        conn, "0000320193", source="fmp",
+        rows=[{"fiscal_period": "2024-FY", "period_end_date": "2024-12-31",
+               "line_item": "revenue", "value": 999.0}],
+    )
+    conn.commit()
+    periods = get_fundamentals_periods(conn, "0000320193")
+    assert len(periods) == 1
+    assert periods[0].revenue == 999.0
+
+
+def test_upsert_derived_metric_is_idempotent_per_calc_version(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_derived_metric(
+        conn, cik="0000320193", as_of_date="2024-12-31", metric_name="fcf_ttm",
+        value=700.0, calc_version="0.1.0",
+    )
+    upsert_derived_metric(
+        conn, cik="0000320193", as_of_date="2024-12-31", metric_name="fcf_ttm",
+        value=750.0, calc_version="0.1.0",
+    )
+    conn.commit()
+    rows = conn.execute("SELECT * FROM derived_metrics").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["value"] == 750.0

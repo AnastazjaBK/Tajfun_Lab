@@ -1,0 +1,50 @@
+name: Phase 1 Proof Run
+
+# Ręczne uruchomienie z przeglądarki, jak "Phase 0 Proof Run" — bez
+# instalowania czegokolwiek lokalnie. Dowodzi, że pipeline Fazy 1
+# (ingest fundamentów + silnik wskaźników + logika FLAG/EXCLUDE)
+# realnie działa na prawdziwych danych dla kilku ręcznie wybranych
+# tickerów. Baza SQLite żyje tylko w tym jednorazowym uruchomieniu —
+# to dowód koncepcji, nie trwałe przechowywanie.
+#
+# Ścieżki/kształt odpowiedzi FMP dla income/balance/cash-flow
+# statement NIE są jeszcze potwierdzone (patrz docstring
+# buffett_scanner/providers/fmp.py) — to uruchomienie jest właśnie
+# tym potwierdzeniem, dokładnie tak samo jak Faza 0 dla profile/
+# historical-price-eod.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Tickery do przetestowania, oddzielone spacją"
+        required: false
+        default: "AAPL MSFT KO"
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: init-db
+        run: python -m buffett_scanner.cli init-db
+
+      - name: ingest-prices (rejestruje CIK, potrzebne przed fundamentami)
+        run: python -m buffett_scanner.cli ingest-prices ${{ inputs.tickers }} --days 400
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: ingest-fundamentals
+        run: python -m buffett_scanner.cli ingest-fundamentals ${{ inputs.tickers }}
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: prefilter
+        run: python -m buffett_scanner.cli prefilter ${{ inputs.tickers }}
