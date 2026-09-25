@@ -1,0 +1,40 @@
+name: Phase 0 Proof Run
+
+# Ręczne uruchomienie z przeglądarki, jak "FMP Smoke Test" — bez
+# instalowania czegokolwiek lokalnie. Dowodzi, że pipeline z Fazy 0
+# realnie działa: ingest cen dla kilku ręcznie wybranych tickerów
+# (nie wymaga planu płatnego FMP — patrz docs/buffett-scanner-design-
+# review.md, "Status Fazy 0 (v1.8)") i decline scanner na prawdziwych
+# danych. Baza SQLite żyje tylko w tym jednorazowym uruchomieniu —
+# to dowód koncepcji, nie trwałe przechowywanie (to dopiero Faza 1+).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Tickery do przetestowania, oddzielone spacją"
+        required: false
+        default: "AAPL MSFT KO"
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: init-db
+        run: python -m buffett_scanner.cli init-db
+
+      - name: ingest-prices
+        run: python -m buffett_scanner.cli ingest-prices ${{ inputs.tickers }} --days 400
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: scan
+        run: python -m buffett_scanner.cli scan ${{ inputs.tickers }}
