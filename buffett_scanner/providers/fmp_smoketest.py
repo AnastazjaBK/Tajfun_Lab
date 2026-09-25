@@ -77,6 +77,23 @@ def main() -> int:
         except FMPError as exc:
             print(f"NIEZGODNE ZAŁOŻENIE: {exc}")
 
+        print("\n== historical-sp500-constituent (Faza 5.2, krok 1, OPEN BLOCKER 2) ==")
+        try:
+            path, rows = client.get_historical_sp500_constituents()
+            print(f"Zadziałała ścieżka: {path}")
+            print(f"Liczba wierszy: {len(rows)}")
+            if rows:
+                print(f"Pierwszy wiersz (kształt pól): {rows[0]}")
+                dates = sorted(r.get("date") for r in rows if r.get("date"))
+                if dates:
+                    print(f"Zakres dat w odpowiedzi: {dates[0]} .. {dates[-1]}")
+                    reaches_2012 = dates[0] <= "2012-01-01"
+                    print(f"Sięga do 2012-01-01 lub wcześniej: {reaches_2012}")
+                else:
+                    print("BRAK pola 'date' w żadnym wierszu — sprawdź surowy kształt wyżej.")
+        except FMPError as exc:
+            print(f"NIEZGODNE ZAŁOŻENIE (endpoint niedostępny na obecnym planie lub inna nazwa): {exc}")
+
     return 0
 
 

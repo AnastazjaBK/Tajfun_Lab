@@ -124,6 +124,37 @@ class FMPClient:
             )
         return data
 
+    # Kandydaci ścieżki dla historycznego logu zmian składu S&P 500
+    # (Faza 5.2, krok 1, OPEN BLOCKER 2) — nazwa endpointu NIEPOTWIERDZONA
+    # w oficjalnej dokumentacji FMP (strona zablokowana przez proxy sieciowy
+    # w sesji interaktywnej, patrz design review v1.21); próbujemy w
+    # kolejności i jawnie raportujemy, który zadziałał — ten sam wzorzec co
+    # `find_first_matching_tag` w point_in_time.py (Faza 5.1).
+    HISTORICAL_SP500_PATH_CANDIDATES = ("historical-sp500-constituent", "historical-sp-500")
+
+    def get_historical_sp500_constituents(self) -> tuple[str, list[dict]]:
+        """Historyczny log zmian składu S&P 500 (Faza 5.2, krok 1). Zwraca
+        `(ścieżka_która_zadziałała, dane)`. Próbuje kandydatów po kolei —
+        jeśli WSZYSTKIE zwrócą błąd, podnosi `FMPError` z treścią błędu
+        OSTATNIEGO kandydata (najbardziej prawdopodobnie właściwa nazwa
+        wg oficjalnej dokumentacji stable)."""
+        last_error: FMPError | None = None
+        for path in self.HISTORICAL_SP500_PATH_CANDIDATES:
+            try:
+                data = self._get(path)
+            except FMPError as exc:
+                last_error = exc
+                continue
+            if not isinstance(data, list):
+                last_error = FMPError(
+                    f"Nieoczekiwany kształt odpowiedzi {path} "
+                    f"(oczekiwano listy, dostałam {type(data).__name__})."
+                )
+                continue
+            return path, data
+        assert last_error is not None
+        raise last_error
+
     def get_company_profile(self, symbol: str) -> dict:
         """Profil spółki (m.in. CIK, sector, industry) dla pojedynczego tickera.
 

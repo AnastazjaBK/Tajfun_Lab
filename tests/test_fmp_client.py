@@ -57,6 +57,48 @@ def test_get_sp500_constituents_raises_on_unexpected_shape(monkeypatch):
         client.get_sp500_constituents()
 
 
+def test_get_historical_sp500_constituents_uses_first_working_candidate(monkeypatch):
+    """Faza 5.2 krok 1: nazwa endpointu niepotwierdzona -> próbujemy
+    kandydatów po kolei, dokładnie ten sam wzorzec co find_first_matching_tag
+    (Faza 5.1). Tu pierwszy kandydat (historical-sp500-constituent) działa."""
+    client = FMPClient("dummy-key")
+    fake_payload = [{"date": "2020-01-01", "symbol": "AAA", "addedSecurity": "AAA Inc"}]
+
+    def fake_get(url, params=None):
+        if "historical-sp500-constituent" in url:
+            return _FakeResponse(200, fake_payload)
+        return _FakeResponse(404, {"error": "not found"})
+
+    monkeypatch.setattr(client._client, "get", fake_get)
+    path, data = client.get_historical_sp500_constituents()
+    assert path == "historical-sp500-constituent"
+    assert data == fake_payload
+
+
+def test_get_historical_sp500_constituents_falls_back_to_second_candidate(monkeypatch):
+    client = FMPClient("dummy-key")
+    fake_payload = [{"date": "2020-01-01", "symbol": "BBB"}]
+
+    def fake_get(url, params=None):
+        if "historical-sp-500" in url and "historical-sp500-constituent" not in url:
+            return _FakeResponse(200, fake_payload)
+        return _FakeResponse(402, {"error": "Restricted Endpoint"})
+
+    monkeypatch.setattr(client._client, "get", fake_get)
+    path, data = client.get_historical_sp500_constituents()
+    assert path == "historical-sp-500"
+    assert data == fake_payload
+
+
+def test_get_historical_sp500_constituents_raises_when_all_candidates_fail(monkeypatch):
+    client = FMPClient("dummy-key")
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponse(402, {"error": "Restricted Endpoint"})
+    )
+    with pytest.raises(FMPError, match="402"):
+        client.get_historical_sp500_constituents()
+
+
 def test_get_company_profile_parses_first_element(monkeypatch):
     client = FMPClient("dummy-key")
     fake_payload = [{"symbol": "AAPL", "cik": "0000320193", "companyName": "Apple Inc."}]
