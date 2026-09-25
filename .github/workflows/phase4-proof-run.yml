@@ -1,0 +1,61 @@
+name: Phase 4 Proof Run
+
+# Ręczne uruchomienie z przeglądarki, jak "Phase 0/1/2/3 Proof Run".
+# Dowodzi, że silnik scoringu (sekcja 15, punkty 4.1-4.3) realnie
+# działa: łączy analizę LLM (Faza 3) z deterministycznym
+# financial_quality_score, silnikiem wyceny DCF (bear/base/bull) i
+# dividend_shareholder_return w total_score (0-100), stosuje hard
+# gates, zapisuje IMMUTABLE wiersz do `analyses`/`analysis_sources` i
+# generuje raport Markdown. To kryterium wyjścia z V0 (sekcja 15):
+# "pełny pipeline działa end-to-end, generuje raport, bez dopracowanego
+# UI" — na próbce 1 tickera zamiast 20-30 (wystarczające do dowodu
+# poprawności silnika, tak jak w poprzednich fazach).
+#
+# Domyślnie tylko 1 ticker — to nadal wywołuje realny, płatny Claude API
+# (jak "analyze" w Fazie 3).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Tickery do przetestowania, oddzielone spacją (uwaga: każdy kosztuje realne wywołanie Claude API)"
+        required: false
+        default: "AAPL"
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: init-db
+        run: python -m buffett_scanner.cli init-db
+
+      - name: ingest-prices (rejestruje CIK)
+        run: python -m buffett_scanner.cli ingest-prices ${{ inputs.tickers }} --days 400
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: ingest-fundamentals
+        run: python -m buffett_scanner.cli ingest-fundamentals ${{ inputs.tickers }}
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: score (pelny silnik scoringu + zapis do bazy + raport)
+        run: python -m buffett_scanner.cli score ${{ inputs.tickers }} --markdown-out reports
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: upload raporty Markdown
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase4-reports
+          path: reports/
+          if-no-files-found: ignore
