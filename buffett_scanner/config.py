@@ -88,10 +88,50 @@ class DataProviderConfig(BaseModel):
         return key
 
 
+class IrAllowlistEntry(BaseModel):
+    """Jeden zweryfikowany wpis allowlisty domen Investor Relations
+    (Decyzja D9, sekcja 9). `verified=True` wymaga faktycznej weryfikacji
+    przeciw oficjalnej stronie tytułowej 10-K danej spółki — nigdy nie
+    dodawany na podstawie samych wyników wyszukiwarki."""
+
+    cik: str
+    domain: str
+    verified: bool
+    note: str | None = None
+
+
+class SecEdgarConfig(BaseModel):
+    user_agent_env_var: str
+
+    def resolve_user_agent(self) -> str:
+        """Odczytuje dane kontaktowe wymagane przez SEC EDGAR ze zmiennej
+        środowiskowej (ten sam wzorzec co `DataProviderConfig.resolve_api_key`).
+        SEC wymaga realnych danych kontaktowych w nagłówku User-Agent —
+        to nie jest sekret do ukrycia, ale mimo to nie commitujemy go na
+        stałe do configu, żeby zmiana nie wymagała zmiany kodu/configu
+        w repo."""
+        value = os.environ.get(self.user_agent_env_var)
+        if not value:
+            raise RuntimeError(
+                f"Brak zmiennej środowiskowej '{self.user_agent_env_var}' z danymi "
+                "kontaktowymi wymaganymi przez SEC EDGAR (np. 'Tajfun Lab "
+                "kontakt@example.com' — patrz https://www.sec.gov/os/webmaster-faq#developers). "
+                "Ustaw ją lokalnie (.env, niecommitowany) albo jako sekret "
+                "repozytorium dla GitHub Actions."
+            )
+        return value
+
+
+class SourcesConfig(BaseModel):
+    sec_edgar: SecEdgarConfig
+    ir_allowlist: list[IrAllowlistEntry] = Field(default_factory=list)
+
+
 class AppConfig(BaseModel):
     universe: UniverseConfig
     decline_scanner: DeclineScannerConfig
     prefilter: PrefilterConfig
+    sources: SourcesConfig
     data_provider: DataProviderConfig
 
 

@@ -58,3 +58,22 @@ def test_resolve_api_key_reads_env_var(monkeypatch):
     config = load_config(DEFAULT_CONFIG_PATH)
     monkeypatch.setenv(config.data_provider.api_key_env_var, "dummy-test-key")
     assert config.data_provider.resolve_api_key() == "dummy-test-key"
+
+
+def test_sources_config_loads_sec_edgar_and_empty_ir_allowlist():
+    config = load_config(DEFAULT_CONFIG_PATH)
+    assert config.sources.sec_edgar.user_agent_env_var == "SEC_EDGAR_USER_AGENT"
+    assert config.sources.ir_allowlist == []
+
+
+def test_resolve_user_agent_missing_env_var_raises_clear_error(monkeypatch):
+    config = load_config(DEFAULT_CONFIG_PATH)
+    monkeypatch.delenv(config.sources.sec_edgar.user_agent_env_var, raising=False)
+    with pytest.raises(RuntimeError, match="SEC_EDGAR_USER_AGENT"):
+        config.sources.sec_edgar.resolve_user_agent()
+
+
+def test_resolve_user_agent_reads_env_var(monkeypatch):
+    config = load_config(DEFAULT_CONFIG_PATH)
+    monkeypatch.setenv(config.sources.sec_edgar.user_agent_env_var, "Tajfun Lab test@example.com")
+    assert config.sources.sec_edgar.resolve_user_agent() == "Tajfun Lab test@example.com"

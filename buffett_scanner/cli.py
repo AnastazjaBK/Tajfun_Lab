@@ -1,4 +1,4 @@
-"""CLI — Faza 0 + Faza 1.
+"""CLI — Faza 0 + Faza 1 + Faza 2.
 
     python -m buffett_scanner.cli init-db
     python -m buffett_scanner.cli ingest-universe
@@ -6,6 +6,7 @@
     python -m buffett_scanner.cli scan AAPL MSFT ...
     python -m buffett_scanner.cli ingest-fundamentals AAPL MSFT ...
     python -m buffett_scanner.cli prefilter AAPL MSFT ...
+    python -m buffett_scanner.cli build-source-packet AAPL MSFT ...
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -30,7 +31,9 @@ from buffett_scanner.db import (
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
+from buffett_scanner.providers.sec_edgar import SecEdgarClient
 from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
+from buffett_scanner.sources import build_sec_source_packet
 
 DEFAULT_DB_PATH = "buffett_scanner.db"
 PREFILTER_CALC_VERSION = "0.1.0-phase1"
@@ -236,6 +239,33 @@ def cmd_prefilter(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_build_source_packet(args: argparse.Namespace) -> int:
+    config = load_config()
+    user_agent = config.sources.sec_edgar.resolve_user_agent()
+    conn = init_db(args.db)
+    forms = tuple(f.strip() for f in args.forms.split(","))
+
+    with SecEdgarClient(user_agent) as client:
+        for ticker in args.tickers:
+            cik = _resolve_cik(conn, ticker)
+            if cik is None:
+                print(f"{ticker}: brak w bazie (uruchom najpierw ingest-prices).")
+                continue
+            row = conn.execute("SELECT name FROM companies WHERE cik = ?", (cik,)).fetchone()
+            issuer = row["name"] if row else ticker
+            packet = build_sec_source_packet(
+                client, cik=cik, issuer=issuer, forms=forms, limit_per_form=args.limit_per_form,
+            )
+            print(f"\n{ticker} ({cik}) — {len(packet)} źródeł w source packet")
+            for src in packet:
+                if src.verified:
+                    print(f"  [OK] {src.title} — {src.url}")
+                    print(f"       hash={src.content_hash[:16]}...")
+                else:
+                    print(f"  [SOURCE NOT VERIFIED] {src.title}: {src.reason}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -261,6 +291,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_prefilter = sub.add_parser("prefilter")
     p_prefilter.add_argument("tickers", nargs="+")
     p_prefilter.set_defaults(func=cmd_prefilter)
+
+    p_source_packet = sub.add_parser("build-source-packet")
+    p_source_packet.add_argument("tickers", nargs="+")
+    p_source_packet.add_argument("--forms", default="10-K,10-Q")
+    p_source_packet.add_argument("--limit-per-form", type=int, default=2)
+    p_source_packet.set_defaults(func=cmd_build_source_packet)
 
     return parser
 

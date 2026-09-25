@@ -50,6 +50,26 @@ prefilter:
   exclude_rules: []
   status: UNCALIBRATED
 
+sources:
+  sec_edgar:
+    # Dane kontaktowe wymagane przez SEC w nagłówku User-Agent (nie
+    # opcja — https://www.sec.gov/os/webmaster-faq#developers). Nie jest
+    # to sekret w sensie bezpieczeństwa, ale mimo to trzymany poza
+    # configiem/repo, żeby zmiana kontaktu nie wymagała zmiany kodu.
+    # Ustaw zmienną SEC_EDGAR_USER_AGENT lokalnie (.env) albo jako
+    # sekret repozytorium GitHub Actions, w formacie:
+    #   SEC_EDGAR_USER_AGENT="Nazwa aplikacji twoj-kontakt@example.com"
+    # (dowolny e-mail, na który SEC mogłaby się skontaktować w razie
+    # nadużycia limitu zapytań — nie musi to być e-mail osobisty)
+    user_agent_env_var: SEC_EDGAR_USER_AGENT
+  # Allowlista domen Investor Relations (Decyzja D9, sekcja 9). Celowo
+  # PUSTA: każdy wpis wymaga faktycznej weryfikacji przeciw oficjalnej
+  # stronie tytułowej 10-K danej spółki, nigdy zgadywania z pamięci ani
+  # z samych wyników wyszukiwarki. Dodawana stopniowo dla spółek, które
+  # faktycznie trafiają do głębszej analizy/watchlisty/holdings — nie z
+  # góry dla całego uniwersum.
+  ir_allowlist: []
+
 data_provider:
   fundamentals_prices: fmp
   plan: free                # aktualny plan właściciela; Starter odłożony (patrz v1.9)
