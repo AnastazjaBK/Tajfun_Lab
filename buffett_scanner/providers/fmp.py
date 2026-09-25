@@ -132,28 +132,35 @@ class FMPClient:
     # `find_first_matching_tag` w point_in_time.py (Faza 5.1).
     HISTORICAL_SP500_PATH_CANDIDATES = ("historical-sp500-constituent", "historical-sp-500")
 
-    def get_historical_sp500_constituents(self) -> tuple[str, list[dict]]:
+    def get_historical_sp500_constituents(
+        self,
+    ) -> tuple[str | None, list[dict] | None, list[tuple[str, str]]]:
         """Historyczny log zmian składu S&P 500 (Faza 5.2, krok 1). Zwraca
-        `(ścieżka_która_zadziałała, dane)`. Próbuje kandydatów po kolei —
-        jeśli WSZYSTKIE zwrócą błąd, podnosi `FMPError` z treścią błędu
-        OSTATNIEGO kandydata (najbardziej prawdopodobnie właściwa nazwa
-        wg oficjalnej dokumentacji stable)."""
-        last_error: FMPError | None = None
+        `(ścieżka_która_zadziałała_lub_None, dane_lub_None, próby)`, gdzie
+        `próby` to lista `(ścieżka, "OK" | treść_błędu)` dla KAŻDEGO
+        kandydata z osobna — nigdy nie tracimy informacji, który konkretny
+        kandydat dał jaki błąd. To rozróżnienie ma znaczenie: 402
+        "Restricted Endpoint" znaczy "zła ścieżka istnieje, ale wymaga
+        wyższego planu", a 404 znaczy "ta ścieżka prawdopodobnie w ogóle
+        nie istnieje" — wcześniejsza wersja tej metody zwracała tylko błąd
+        OSTATNIEGO kandydata, co ukrywało to rozróżnienie dla kandydatów
+        wcześniejszych w liście (naprawione po realnym uruchomieniu, patrz
+        design review v1.25/v1.26)."""
+        attempts: list[tuple[str, str]] = []
         for path in self.HISTORICAL_SP500_PATH_CANDIDATES:
             try:
                 data = self._get(path)
             except FMPError as exc:
-                last_error = exc
+                attempts.append((path, str(exc)))
                 continue
             if not isinstance(data, list):
-                last_error = FMPError(
-                    f"Nieoczekiwany kształt odpowiedzi {path} "
-                    f"(oczekiwano listy, dostałam {type(data).__name__})."
+                attempts.append(
+                    (path, f"Nieoczekiwany kształt odpowiedzi (oczekiwano listy, dostałam {type(data).__name__}).")
                 )
                 continue
-            return path, data
-        assert last_error is not None
-        raise last_error
+            attempts.append((path, "OK"))
+            return path, data, attempts
+        return None, None, attempts
 
     def get_company_profile(self, symbol: str) -> dict:
         """Profil spółki (m.in. CIK, sector, industry) dla pojedynczego tickera.

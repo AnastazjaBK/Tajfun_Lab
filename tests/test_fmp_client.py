@@ -70,9 +70,10 @@ def test_get_historical_sp500_constituents_uses_first_working_candidate(monkeypa
         return _FakeResponse(404, {"error": "not found"})
 
     monkeypatch.setattr(client._client, "get", fake_get)
-    path, data = client.get_historical_sp500_constituents()
+    path, data, attempts = client.get_historical_sp500_constituents()
     assert path == "historical-sp500-constituent"
     assert data == fake_payload
+    assert attempts == [("historical-sp500-constituent", "OK")]  # sukces za pierwszym razem -> drugi kandydat nietknięty
 
 
 def test_get_historical_sp500_constituents_falls_back_to_second_candidate(monkeypatch):
@@ -85,18 +86,33 @@ def test_get_historical_sp500_constituents_falls_back_to_second_candidate(monkey
         return _FakeResponse(402, {"error": "Restricted Endpoint"})
 
     monkeypatch.setattr(client._client, "get", fake_get)
-    path, data = client.get_historical_sp500_constituents()
+    path, data, attempts = client.get_historical_sp500_constituents()
     assert path == "historical-sp-500"
     assert data == fake_payload
+    assert len(attempts) == 2
+    assert attempts[0][0] == "historical-sp500-constituent" and "402" in attempts[0][1]
+    assert attempts[1] == ("historical-sp-500", "OK")
 
 
-def test_get_historical_sp500_constituents_raises_when_all_candidates_fail(monkeypatch):
+def test_get_historical_sp500_constituents_reports_every_candidate_individually_when_all_fail(monkeypatch):
+    """Regresja: wcześniejsza wersja zwracała tylko błąd OSTATNIEGO
+    kandydata, ukrywając np. że pierwszy dał 402 (wymaga planu), a drugi
+    404 (zła ścieżka) — to zupełnie różne wnioski, więc obie próby muszą
+    być widoczne osobno (znalezisko z realnego uruchomienia, v1.26)."""
     client = FMPClient("dummy-key")
-    monkeypatch.setattr(
-        client._client, "get", lambda url, params=None: _FakeResponse(402, {"error": "Restricted Endpoint"})
-    )
-    with pytest.raises(FMPError, match="402"):
-        client.get_historical_sp500_constituents()
+
+    def fake_get(url, params=None):
+        if "historical-sp500-constituent" in url:
+            return _FakeResponse(402, {"error": "Restricted Endpoint"})
+        return _FakeResponse(404, {"error": "not found"})
+
+    monkeypatch.setattr(client._client, "get", fake_get)
+    path, data, attempts = client.get_historical_sp500_constituents()
+    assert path is None
+    assert data is None
+    assert len(attempts) == 2
+    assert "402" in attempts[0][1]
+    assert "404" in attempts[1][1]
 
 
 def test_get_company_profile_parses_first_element(monkeypatch):

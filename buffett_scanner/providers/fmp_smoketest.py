@@ -78,9 +78,14 @@ def main() -> int:
             print(f"NIEZGODNE ZAŁOŻENIE: {exc}")
 
         print("\n== historical-sp500-constituent (Faza 5.2, krok 1, OPEN BLOCKER 2) ==")
-        try:
-            path, rows = client.get_historical_sp500_constituents()
-            print(f"Zadziałała ścieżka: {path}")
+        path, rows, attempts = client.get_historical_sp500_constituents()
+        print("Próby per kandydat (KAŻDY osobno, żeby odróżnić 402 'wymaga planu' od 404 'zła ścieżka'):")
+        for candidate_path, outcome in attempts:
+            print(f"  {candidate_path}: {outcome}")
+        if path is None:
+            print("ŻADEN kandydat nie zadziałał na obecnym planie/kluczu.")
+        else:
+            print(f"\nZadziałała ścieżka: {path}")
             print(f"Liczba wierszy: {len(rows)}")
             if rows:
                 print(f"Pierwszy wiersz (kształt pól): {rows[0]}")
@@ -91,8 +96,6 @@ def main() -> int:
                     print(f"Sięga do 2012-01-01 lub wcześniej: {reaches_2012}")
                 else:
                     print("BRAK pola 'date' w żadnym wierszu — sprawdź surowy kształt wyżej.")
-        except FMPError as exc:
-            print(f"NIEZGODNE ZAŁOŻENIE (endpoint niedostępny na obecnym planie lub inna nazwa): {exc}")
 
     return 0
 
