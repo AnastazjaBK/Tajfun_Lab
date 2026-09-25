@@ -1,7 +1,7 @@
 # BUFFETT OPPORTUNITY SCANNER — Technical Design Review
 
-**Status:** v1.7 — właściciel zaakceptował v1.6 i potwierdził plan FMP Starter; **implementacja Fazy 0 rozpoczęta** (`buffett_scanner/`, `tests/`, `config/config.yaml`). Ten plik jest samodzielny — nie wymaga sięgania do historii commitów.
-**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6), 2026-09-24 (v1.7)
+**Status:** v1.8 — Faza 0 empirycznie zweryfikowana na koncie właścicielki (plan Free): `profile` i `historical-price-eod/full` działają i potwierdzają założony kształt danych; `sp500-constituent` wymaga planu Starter (potwierdzone komunikatem FMP, nie zgadywane) — dokładnie tam, gdzie pierwotnie przewidziano (Faza 1/6), nie w Fazie 0. Po drodze naprawiony błąd w kliencie FMP (zła rodzina endpointów) i skorygowana nieścisłość z v1.7 (plan Starter NIE jest jeszcze aktywny). Ten plik jest samodzielny — nie wymaga sięgania do historii commitów.
+**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6), 2026-09-24–25 (v1.7–v1.8)
 **Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING; (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera).
 **Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) jako jedną warstwę przyszłego pełnego modelu biotech.
 **Zmiana w v1.3:** zamknięto decyzje D2, D4–D14 zgodnie z odpowiedziami właściciela; D15 rozstrzygnięte na rzecz nowej kolejności priorytetów — **BIOTECH ma wyższy priorytet niż pełne rozszerzenie BANK/INSURER/REIT**; dodano rejestr pełnego docelowego zakresu BIOTECH MODULE jako scope dla przyszłej Fazy 8 (DESIGN) — External Validation pozostaje tylko jedną z jego warstw.
@@ -1131,23 +1131,31 @@ Nie rozpoczęto implementacji. Pełny status gotowości — sekcja „FINAL PRE-
 4. Źródło i granulacja klasyfikacji sektorowej (GICS sub-industry vs sector) — niespecyfikowane, potrzebne do przełączania logiki sektorowej.
 5. Dokładna struktura pól ról badaczy w ClinicalTrials.gov API v2 (Principal Investigator/Study Chair/Study Director) — niepotwierdzona, do zweryfikowania przed Fazą 9.
 
-**SAFE TO START FAZA 0: TAK — właściciel potwierdził v1.6 i plan FMP Starter.**
+**SAFE TO START FAZA 0: TAK.**
 
-**WHY:** BLOCKER 1/2 dotyczą wyłącznie backtestingu (Faza 5), nie rdzenia Fazy 0–4. Właściciel zaakceptował architekturę MULTI-USER (v1.5/v1.6, sekcja 1.1) i potwierdził plan FMP Starter — oba warunki blokujące z poprzedniej wersji tego statusu są zamknięte. Endpoint `stable/historical-sp-500` (potrzebny dopiero w Fazie 5/6, nie w Fazie 0) nadal wymaga empirycznego potwierdzenia planu — bez zmian, nie blokuje startu.
+**WHY:** BLOCKER 1/2 dotyczą wyłącznie backtestingu (Faza 5), nie rdzenia Fazy 0–4. Właściciel zaakceptował architekturę MULTI-USER (v1.5/v1.6, sekcja 1.1). **Korekta względem v1.7:** ten status błędnie zakładał, że plan FMP Starter jest już aktywny — w rzeczywistości właścicielka na dzień pisania tego wpisu wciąż jest na **planie Free** i świadomie odłożyła zakup Startera. To nie blokuje Fazy 0 — patrz „Status Fazy 0" niżej.
 
-### Status Fazy 0 (v1.7)
+### Status Fazy 0 (v1.8) — empirycznie zweryfikowana
 
-Kod wylądował w katalogu `buffett_scanner/` (config loader, schema SQLite — `companies`/`ticker_history`/`price_daily`/`users`, klient FMP, decline scanner, CLI) wraz z `tests/` (32 testy jednostkowe, hand-verified wartości referencyjne dla scannera, zielone; 1 test integracyjny pominięty — wymaga prawdziwego `FMP_API_KEY`, którego ta sesja nie ma). Szczegóły uruchomienia: `buffett_scanner/README.md`.
+`fmp_smoketest.py` uruchomiony przez właścicielkę (GitHub Actions, plan **Free**, po dwóch rundach diagnostyki — patrz historia w tym pliku i w `buffett_scanner/providers/fmp.py`) dał **rozstrzygający wynik**, nie tylko „na razie działa":
 
-**Świadomie niezweryfikowane w tej turze:** dokładny kształt odpowiedzi FMP (`providers/fmp.py` opiera się na ogólnie znanej strukturze API v3, nie na bezpośrednio odczytanej dokumentacji — patrz zastrzeżenie w tym samym pliku i niżej w Sources). Właścicielka ma klucz API i plan Starter — uruchomienie `python -m buffett_scanner.providers.fmp_smoketest` z jej strony potwierdzi lub obali te założenia, zanim ingest uniwersum/cen zostanie potraktowany jako wiarygodny.
+| Endpoint (`/stable/...`) | Wynik na planie Free | Znaczenie |
+|---|---|---|
+| `profile` (pojedyncza spółka) | ✅ Działa, potwierdzony kształt: płaski obiekt z polem `cik` | Rozwiązuje resolving CIK dla dowolnego pojedynczego tickera bez planu płatnego |
+| `historical-price-eod/full` (ceny dzienne) | ✅ Działa, potwierdzony kształt: płaska lista OHLCV | Rozwiązuje ingest cen dla próbki tickerów (Faza 0, punkt 0.3) bez planu płatnego |
+| `sp500-constituent` (pełna lista S&P 500) | ❌ `402 Restricted Endpoint` — jawny komunikat FMP: „not available under your current subscription" | **Wymaga planu Starter lub wyższego** — potwierdzone empirycznie, nie zgadywane |
+
+**Wniosek:** Faza 0 (0.1–0.5) da się w pełni udowodnić na planie Free, na ręcznie podanej liście kilku–kilkunastu tickerów (kod w `cli.py` już to obsługuje — `ingest-prices` resolvuje CIK przez `profile`, jeśli tickera nie ma jeszcze w `ticker_history`). Starter jest potrzebny dopiero przy `ingest-universe` (pełne 503 spółki) — czyli faktycznie od Fazy 1/6, tak jak pierwotnie zakładano w sekcji 4, **nie od samej Fazy 0**. Właścicielka może kupić Starter, kiedy będzie tego realnie potrzebować, nie wcześniej.
+
+Po drodze poprawiony też realny błąd w kodzie: pierwsza wersja `providers/fmp.py` używała wycofywanej rodziny endpointów `/api/v3/...` (dawała 403 niezależnie od klucza/planu) — przepisana na `/stable/...` i pokryta dodatkowymi testami defensywnego parsowania (34 testy jednostkowe, zielone).
 
 ---
 
 ## DECYZJE WCIĄŻ WYMAGAJĄCE TWOJEGO WYBORU
 
-**Zero.** Wszystkie 15 pierwotnych decyzji (D1–D15) są zamknięte, architektura MULTI-USER (v1.5/v1.6) zaakceptowana, Faza 0 rozpoczęta (v1.7).
+**Zero.** Wszystkie 15 pierwotnych decyzji (D1–D15) są zamknięte, architektura MULTI-USER (v1.5/v1.6) zaakceptowana, Faza 0 rozpoczęta i częściowo empirycznie zweryfikowana (v1.8).
 
-Następny naturalny krok, gdy będziesz gotowa: uruchomienie `python -m buffett_scanner.providers.fmp_smoketest` z Twoim prawdziwym kluczem, żeby potwierdzić założenia o kształcie danych FMP opisane w „Status Fazy 0" wyżej, a potem `ingest-universe`/`ingest-prices`/`scan` na kilku testowych tickerach — to nie decyzja, tylko wykonanie.
+Jedyna otwarta kwestia to nie decyzja, tylko czas: **kiedy kupić plan Starter** — potrzebny dopiero do `ingest-universe` (pełne 503 spółki), nie do dokończenia dowodu koncepcji na próbce tickerów. Można to zrobić teraz albo poczekać do Fazy 1/6 — obie opcje są poprawne, to nie blokuje niczego pilnego.
 
 ---
 

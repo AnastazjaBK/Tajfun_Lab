@@ -2,19 +2,25 @@
 
 HISTORIA ZAŁOŻEŃ (ważne, przeczytaj przed dalszą zmianą tego pliku):
 Pierwsza wersja tego klienta używała starszej rodziny endpointów
-`/api/v3/...` — dla klucza właścicielki (plan Free, potwierdzony jako
-działający przez wsparcie FMP na endpointcie `/stable/earnings-calendar`)
-te stare endpointy konsekwentnie zwracały 403, podczas gdy `/stable/...`
-działa. Dlatego cały klient przepisany na rodzinę `/stable/...`.
+`/api/v3/...`, która dla klucza właścicielki konsekwentnie zwracała
+403. Przepisany na `/stable/...` i **empirycznie potwierdzony** przez
+`fmp_smoketest.py` uruchomiony z prawdziwym kluczem (plan Free):
 
-Mimo to dokładne nazwy pól w odpowiedziach (`historical-price-eod/full`,
-`sp500-constituent`) NIE zostały potwierdzone bezpośrednim odczytem
-dokumentacji — WebFetch do site.financialmodelingprep.com był
-zablokowany w sesji projektowej. Parsowanie poniżej jest więc celowo
-DEFENSYWNE (akceptuje kilka prawdopodobnych kształtów odpowiedzi) i
-loguje surowy kształt w fmp_smoketest.py, żeby dało się to szybko
-poprawić, jeśli któreś założenie się nie zgadza — bez zgadywania na
-ślepo po raz kolejny.
+- `profile` — POTWIERDZONY: zwraca pojedynczy płaski obiekt (nie listę),
+  z polem `cik` dokładnie tam, gdzie zakładał kod. Działa na planie Free.
+- `historical-price-eod/full` — POTWIERDZONY: zwraca płaską listę
+  obiektów z polami `date/open/high/low/close/volume` (bez `adjClose`
+  w przetestowanej odpowiedzi — kod używa `close` jako fallbacku, patrz
+  `get_historical_prices`). Działa na planie Free.
+- `sp500-constituent` — endpoint istnieje i jest poprawnie zaadresowany,
+  ale zwraca 402 „Restricted Endpoint" na planie Free — **wymaga planu
+  płatnego** (Starter lub wyższego). To nie jest błąd klucza ani kodu.
+
+Wniosek dla Fazy 0: ingest pojedynczych spółek (profil + ceny) działa
+już na planie Free — pełne uniwersum S&P 500 (0.2) będzie wymagało
+Startera dopiero wtedy, gdy faktycznie zechcemy go zaingestować, nie
+teraz. Do tego czasu `ingest-prices`/`scan` testujemy na ręcznie
+podanej liście tickerów (patrz cli.py).
 
 Treść błędów FMP (np. "Invalid API KEY. Feel free to create...") jest
 generycznym komunikatem, nie zawiera danych konta ani klucza — dlatego
