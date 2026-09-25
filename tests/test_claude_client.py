@@ -88,6 +88,21 @@ def test_generate_analysis_wraps_api_connection_error(monkeypatch):
         client.generate_analysis("dummy prompt")
 
 
+def test_generate_analysis_wraps_truncated_json_parse_failure(monkeypatch):
+    """Odtwarza realny błąd z Phase 3 Proof Run (2026-09-25): odpowiedź
+    ucięta przez max_output_tokens sprawia, że SDK rzuca błąd walidacji
+    pydantic z niekompletnego JSON-a, nie APIStatusError/
+    APIConnectionError — musi zostać złapany i czytelnie opisany."""
+    client = ClaudeClient("dummy-key", model="claude-sonnet-5", max_output_tokens=4000)
+
+    def raise_truncated_json_error(**kwargs):
+        raise ValueError("Invalid JSON: EOF while parsing a string at line 1 column 4832")
+
+    monkeypatch.setattr(client._client.messages, "parse", raise_truncated_json_error)
+    with pytest.raises(ClaudeError, match="max_output_tokens=4000"):
+        client.generate_analysis("dummy prompt")
+
+
 def test_generate_analysis_wraps_api_status_error(monkeypatch):
     client = ClaudeClient("dummy-key", model="claude-sonnet-5")
 

@@ -60,6 +60,18 @@ class ClaudeClient:
             ) from exc
         except anthropic.APIConnectionError as exc:
             raise ClaudeError(f"Błąd sieci przy wywołaniu Claude API: {exc}") from exc
+        except Exception as exc:
+            # Najczęstsza przyczyna: odpowiedź ucięta przez max_output_tokens,
+            # zanim model skończył generować JSON — SDK rzuca wtedy błąd
+            # walidacji pydantic z niekompletnego tekstu (nie APIStatusError/
+            # APIConnectionError), więc trzeba go złapać osobno. Potwierdzone
+            # empirycznie 2026-09-25 (Phase 3 Proof Run, patrz config.yaml).
+            raise ClaudeError(
+                "Nie udało się sparsować odpowiedzi Claude jako poprawny JSON zgodny ze "
+                f"schematem (aktualny max_output_tokens={self._max_output_tokens} — jeśli to "
+                "się powtarza, prawdopodobnie odpowiedź jest ucinana w połowie generowania; "
+                f"zwiększ config.yaml -> llm.max_output_tokens). Błąd źródłowy: {exc}"
+            ) from exc
 
         if response.stop_reason == "refusal":
             raise ClaudeError("Claude odmówił odpowiedzi (stop_reason=refusal).")

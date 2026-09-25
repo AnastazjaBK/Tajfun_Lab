@@ -75,7 +75,11 @@ llm:
   escalation_model: null   # np. claude-opus-5 — ręczny re-run niejednoznacznych analiz,
                             # włączany dopiero jeśli testy pokażą realną poprawę jakości;
                             # NIE domyślny model bez dowodu (D6)
-  max_output_tokens: 4000
+  # 4000 (wartość ilustracyjna z sekcji 6 design review) okazało się za
+  # mało — potwierdzone empirycznie 2026-09-25 (Phase 3 Proof Run):
+  # odpowiedź Claude ucinana w połowie generowania JSON, zanim model
+  # skończył. Podniesione do bezpiecznego zapasu.
+  max_output_tokens: 16000
   schema_version: "1.0"
   reject_on_schema_violation: true
   allow_citations_outside_source_packet: false   # bariera przeciw halucynacji, BLOCKER 3
