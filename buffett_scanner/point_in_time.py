@@ -95,8 +95,17 @@ def value_as_of(fact_history: list[PitFact], as_of_date: str) -> PitFact | None:
     To jest dokładnie mechanizm, który eliminuje look-ahead bias w
     backteście (sekcja 13): zapytanie o datę SPRZED restatement musi
     zwrócić oryginalną, jeszcze nieskorygowaną wartość, nie tę, którą
-    rynek pozna dopiero później."""
+    rynek pozna dopiero później.
+
+    Remis na `filed` (częsty przypadek: jeden 10-K/10-Q zawsze zawiera
+    też dane porównawcze z 1-2 poprzednich okresów, złożone tego samego
+    dnia co bieżący okres) jest rozstrzygany na korzyść najnowszego
+    `end` — inaczej zwrócilibyśmy przypadkowy (zależny od kolejności w
+    JSON SEC) stary okres porównawczy zamiast bieżącego, mimo że oba
+    mają tę samą datę `filed`. Empirycznie potwierdzone w Fazie 5.1
+    (v1.18 „Phase 5.1 Proof Run"): bez tego rozstrzygnięcia remisów
+    zwracane były okresy z `end` nawet 2 lata starszym niż `filed`."""
     eligible = [f for f in fact_history if f.filed <= as_of_date]
     if not eligible:
         return None
-    return max(eligible, key=lambda f: f.filed)
+    return max(eligible, key=lambda f: (f.filed, f.end))

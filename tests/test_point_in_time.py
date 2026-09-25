@@ -160,3 +160,29 @@ def test_value_as_of_restatement_scenario_avoids_look_ahead_bias():
     after_restatement = value_as_of(history, "2021-06-01")
     assert after_restatement.val == 105.0
     assert after_restatement.accession_number == "restated"
+
+
+def test_value_as_of_breaks_filed_tie_by_latest_end_not_json_order():
+    """Regresja ze znaleziska z realnego uruchomienia „Phase 5.1 Proof
+    Run" (2026-09-25, MSFT/AAPL/KO): jeden 10-K/10-Q zawsze zawiera też
+    dane porównawcze z 1-2 poprzednich okresów, złożone tego samego dnia
+    co bieżący okres -> wiele faktów z IDENTYCZNYM `filed`, różnym `end`.
+    Bez rozstrzygania remisu na korzyść najnowszego `end`, `max()` po
+    samym `filed` zwracał pierwszy napotkany w kolejności z SEC JSON
+    (najstarszy porównawczy okres), nie bieżący -> `end` nawet 2 lata
+    starszy niż `filed`, ewidentna anomalia (10-K/10-Q musi iść do SEC
+    w ciągu maksymalnie ~60-90 dni od `end`, nie lat)."""
+    history = [
+        # Kolejność jak w prawdziwym JSON SEC: starsze porównawcze lata
+        # najpierw, mimo tej samej daty `filed` co bieżący rok.
+        PitFact(end="2024-06-30", val=88_136_000_000.0, filed="2026-07-29",
+                 fiscal_year=2024, fiscal_period="FY", form="10-K", accession_number="fy2024-comparative"),
+        PitFact(end="2025-06-30", val=101_832_000_000.0, filed="2026-07-29",
+                 fiscal_year=2025, fiscal_period="FY", form="10-K", accession_number="fy2025-comparative"),
+        PitFact(end="2026-06-30", val=133_749_000_000.0, filed="2026-07-29",
+                 fiscal_year=2026, fiscal_period="FY", form="10-K", accession_number="fy2026-current"),
+    ]
+    result = value_as_of(history, "2026-09-25")
+    assert result.end == "2026-06-30"
+    assert result.val == 133_749_000_000.0
+    assert result.accession_number == "fy2026-current"
