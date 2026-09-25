@@ -1164,6 +1164,8 @@ Rozszerzony `cli.py` o `ingest-fundamentals TICKERS...` i `prefilter TICKERS...`
 
 **39 nowych testów jednostkowych, wszystkie zielone (71 razem z Fazą 0).** To, czego jeszcze NIE potwierdzono: czy prawdziwe ścieżki/kształt odpowiedzi FMP dla trzech endpointów statement zgadzają się z założeniami w kodzie — dokładnie ten sam typ niewiadomej, jaki miały `profile`/`historical-price-eod` przed empiryczną weryfikacją w Fazie 0. Następny krok: uruchomienie „Phase 1 Proof Run" na koncie właścicielki (plan Free) i korekta kodu na bazie rzeczywistej odpowiedzi, jeśli założenia się nie potwierdzą — nie inaczej.
 
+**Pierwsze uruchomienie „Phase 1 Proof Run" (2026-09-25, plan Free) — częściowy wynik, kod poprawiony.** `ingest-fundamentals` zwrócił błąd **402** dla wszystkich trzech tickerów przy `income-statement`, ale treść błędu jest rozstrzygająca i inna niż dla `sp500-constituent` w Fazie 0: „The values for 'limit' must be between 0 and 5 based on your current subscription" — czyli ścieżka `income-statement` JEST poprawnie zaadresowana i dostępna na planie Free, błąd dotyczył wyłącznie domyślnego parametru `limit=10` w kodzie (plan Free pozwala maks. 5 okresów). To odróżnia ten przypadek od `sp500-constituent`, który dawał jawne „Restricted Endpoint" — tu nie ma dowodu, że endpoint wymaga planu płatnego. Kod poprawiony (`STATEMENT_LIMIT_FREE_PLAN = 5` jako nowy domyślny limit), gotowy do ponownego uruchomienia. Kształt odpowiedzi (nazwy pól JSON) wciąż niepotwierdzony — to następny krok.
+
 ---
 
 ## DECYZJE WCIĄŻ WYMAGAJĄCE TWOJEGO WYBORU

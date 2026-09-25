@@ -36,6 +36,18 @@ nazewnictwa `/stable/`, dokładnie tym samym trybem co profile/historical
 w Fazie 0 — do zweryfikowania empirycznie przez `fmp_smoketest.py` na
 prawdziwym koncie, nie do potraktowania jako fakt, dopóki nie przyjdzie
 potwierdzenie.
+
+**EMPIRYCZNIE POTWIERDZONE (workflow „Phase 1 Proof Run", 2026-09-25,
+plan Free):** ścieżka `income-statement` jest poprawnie zaadresowana
+(FMP nie zwrócił 404) — zwróciła **402** wyłącznie z powodu parametru
+`limit`: „The values for 'limit' must be between 0 and 5 based on your
+current subscription." Plan Free pozwala maksymalnie na 5 okresów na
+zapytanie. To NIE oznacza, że endpoint wymaga planu płatnego (w
+przeciwieństwie do `sp500-constituent` w Fazie 0, który dawał jawne
+„Restricted Endpoint") — wymaga tylko poprawnego parametru. Kod
+poprawiony: domyślny `limit` to teraz `STATEMENT_LIMIT_FREE_PLAN = 5`.
+Kształt samej odpowiedzi (nazwy pól w JSON) wciąż niepotwierdzony —
+czeka na kolejne uruchomienie.
 """
 
 from __future__ import annotations
@@ -175,24 +187,31 @@ class FMPClient:
             )
         return data
 
+    # limit=5: POTWIERDZONY empirycznie sufit dla planu Free (Phase 1 Proof
+    # Run, 2026-09-25) — FMP zwraca 402 z komunikatem "The values for
+    # 'limit' must be between 0 and 5 based on your current subscription"
+    # dla income-statement przy limit=10 (domyślna wartość biblioteki dla
+    # planów płatnych). Nie zgadywane — to bezpośrednia treść błędu FMP.
+    STATEMENT_LIMIT_FREE_PLAN = 5
+
     def get_income_statement(
-        self, symbol: str, *, period: str = "annual", limit: int = 10
+        self, symbol: str, *, period: str = "annual", limit: int = STATEMENT_LIMIT_FREE_PLAN
     ) -> list[dict]:
-        """Surowe wiersze rachunku wyników (NIEPOTWIERDZONY kształt —
-        patrz docstring modułu). Ścieżka i parametry zgadywane na bazie
-        konwencji `/stable/` — do weryfikacji empirycznej."""
+        """Surowe wiersze rachunku wyników. Ścieżka i nazwy pól w
+        odpowiedzi wciąż NIEPOTWIERDZONE (patrz docstring modułu) —
+        `limit` natomiast JEST potwierdzony (patrz STATEMENT_LIMIT_FREE_PLAN)."""
         return self._get_statement("income-statement", symbol, period=period, limit=limit)
 
     def get_balance_sheet_statement(
-        self, symbol: str, *, period: str = "annual", limit: int = 10
+        self, symbol: str, *, period: str = "annual", limit: int = STATEMENT_LIMIT_FREE_PLAN
     ) -> list[dict]:
-        """Surowe wiersze bilansu (NIEPOTWIERDZONY kształt — jak wyżej)."""
+        """Surowe wiersze bilansu (kształt NIEPOTWIERDZONY — jak wyżej)."""
         return self._get_statement("balance-sheet-statement", symbol, period=period, limit=limit)
 
     def get_cash_flow_statement(
-        self, symbol: str, *, period: str = "annual", limit: int = 10
+        self, symbol: str, *, period: str = "annual", limit: int = STATEMENT_LIMIT_FREE_PLAN
     ) -> list[dict]:
-        """Surowe wiersze cash flow (NIEPOTWIERDZONY kształt — jak wyżej)."""
+        """Surowe wiersze cash flow (kształt NIEPOTWIERDZONY — jak wyżej)."""
         return self._get_statement("cash-flow-statement", symbol, period=period, limit=limit)
 
 
