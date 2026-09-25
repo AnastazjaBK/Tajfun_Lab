@@ -34,6 +34,10 @@ class FundamentalsPeriod:
     cash_and_equivalents: float | None
     total_current_assets: float | None
     total_current_liabilities: float | None
+    # Faza 4 — dane dla dividend_shareholder_return (patrz shareholder_returns.py)
+    dividends_paid: float | None = None  # konwencja: dodatnia kwota wypłacona
+    share_buybacks: float | None = None  # konwencja: dodatnia kwota wydana na skup
+    diluted_shares_outstanding: float | None = None
 
 
 def free_cash_flow(period: FundamentalsPeriod) -> float | None:

@@ -7,12 +7,16 @@ from buffett_scanner.db import (
     get_fundamentals_periods,
     get_price_series,
     init_db,
+    insert_analysis,
+    insert_analysis_sources,
     insert_fundamentals_rows,
     insert_price_rows,
     upsert_company,
     upsert_derived_metric,
+    upsert_scoring_model_version,
     upsert_ticker_history,
 )
+from buffett_scanner.sources import VerifiedSource
 
 
 @pytest.fixture
@@ -196,3 +200,82 @@ def test_upsert_derived_metric_is_idempotent_per_calc_version(conn):
     rows = conn.execute("SELECT * FROM derived_metrics").fetchall()
     assert len(rows) == 1
     assert rows[0]["value"] == 750.0
+
+
+def test_init_db_creates_phase4_tables(conn):
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert {"scoring_model_versions", "analyses", "analysis_sources"} <= tables
+
+
+def test_upsert_scoring_model_version_is_idempotent(conn):
+    upsert_scoring_model_version(
+        conn, version="0.1.0-draft", description="v1",
+        weights_json='{"business_quality": 45}', gates_json="{}",
+    )
+    upsert_scoring_model_version(
+        conn, version="0.1.0-draft", description="v2 (updated)",
+        weights_json='{"business_quality": 50}', gates_json="{}",
+    )
+    conn.commit()
+    rows = conn.execute("SELECT * FROM scoring_model_versions").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["description"] == "v2 (updated)"
+
+
+def test_insert_analysis_is_append_only(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_scoring_model_version(
+        conn, version="0.1.0-draft", description=None,
+        weights_json="{}", gates_json="{}",
+    )
+    id1 = insert_analysis(
+        conn, cik="0000320193", run_date="2026-09-25", price_at_analysis=15.0,
+        scoring_model_version="0.1.0-draft", total_score=80.0,
+    )
+    id2 = insert_analysis(
+        conn, cik="0000320193", run_date="2026-09-26", price_at_analysis=16.0,
+        scoring_model_version="0.1.0-draft", total_score=82.0,
+    )
+    conn.commit()
+    assert id1 != id2
+    rows = conn.execute("SELECT * FROM analyses WHERE cik = ?", ("0000320193",)).fetchall()
+    assert len(rows) == 2  # ponowna ocena = nowy wiersz, nigdy UPDATE
+
+
+def test_insert_analysis_sources_stores_verified_and_unverified(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_scoring_model_version(
+        conn, version="0.1.0-draft", description=None, weights_json="{}", gates_json="{}",
+    )
+    analysis_id = insert_analysis(
+        conn, cik="0000320193", run_date="2026-09-25",
+        scoring_model_version="0.1.0-draft",
+    )
+    sources = [
+        VerifiedSource(
+            source_type="SEC_FILING", title="10-K (2024-11-01)", issuer="Apple Inc.",
+            doc_date="2024-11-01", url="https://www.sec.gov/doc.htm",
+            accession_number="0000320193-24-000123", section=None,
+            content_hash="abc123", verified=True, reason=None,
+        ),
+        VerifiedSource(
+            source_type="SEC_FILING", title="(lista filingów)", issuer="Apple Inc.",
+            doc_date=None, url="", accession_number=None, section=None,
+            content_hash=None, verified=False, reason="Błąd sieci",
+        ),
+    ]
+    n = insert_analysis_sources(conn, analysis_id, sources)
+    conn.commit()
+    assert n == 2
+    rows = conn.execute(
+        "SELECT * FROM analysis_sources WHERE analysis_id = ? ORDER BY source_id", (analysis_id,)
+    ).fetchall()
+    assert rows[0]["verified"] == 1
+    assert rows[0]["content_hash"] == "abc123"
+    assert rows[1]["verified"] == 0
+    assert rows[1]["reason"] == "Błąd sieci"

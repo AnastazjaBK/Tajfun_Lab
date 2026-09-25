@@ -185,12 +185,14 @@ def test_get_cash_flow_statement_parses_list(monkeypatch):
 
 def test_normalize_fundamentals_rows_maps_canonical_line_items():
     income = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
-               "revenue": 1000.0, "netIncome": 100.0, "ebitda": 200.0}]
+               "revenue": 1000.0, "netIncome": 100.0, "ebitda": 200.0,
+               "weightedAverageShsOutDil": 50.0}]
     balance = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
                 "totalDebt": 500.0, "cashAndCashEquivalents": 150.0,
                 "totalCurrentAssets": 400.0, "totalCurrentLiabilities": 250.0}]
     cashflow = [{"date": "2024-12-31", "fiscalYear": 2024, "period": "FY",
-                 "operatingCashFlow": 900.0, "capitalExpenditure": -300.0}]
+                 "operatingCashFlow": 900.0, "capitalExpenditure": -300.0,
+                 "dividendsPaid": -40.0, "commonStockRepurchased": -60.0}]
 
     rows = normalize_fundamentals_rows(income, balance, cashflow)
     by_item = {r["line_item"]: r["value"] for r in rows}
@@ -201,8 +203,11 @@ def test_normalize_fundamentals_rows_maps_canonical_line_items():
     assert by_item["total_debt"] == 500.0
     assert by_item["cash_and_equivalents"] == 150.0
     assert by_item["operating_cash_flow"] == 900.0
-    # capex ujemny w źródle FMP -> zapisany jako dodatnia kwota wydatku
+    # capex/dywidendy/buybacki ujemne w źródle FMP -> zapisane jako dodatnia kwota
     assert by_item["capital_expenditure"] == 300.0
+    assert by_item["dividends_paid"] == 40.0
+    assert by_item["share_buybacks"] == 60.0
+    assert by_item["diluted_shares_outstanding"] == 50.0
     assert all(r["fiscal_period"] == "2024-FY" for r in rows)
 
 

@@ -238,11 +238,24 @@ def normalize_fundamentals_rows(
 
     Brakujące pole w danym wierszu (np. spółka bez `ebitda` w odpowiedzi)
     jest po prostu pomijane — nigdy nie zapisujemy zgadywanej wartości.
-    `capital_expenditure`: FMP prawdopodobnie raportuje capex jako wartość
-    ujemną (odpływ gotówki); zapisujemy `abs()`, zgodnie z konwencją
-    `FundamentalsPeriod.capital_expenditure` (dodatnia kwota wydatku).
+    `capital_expenditure`/`dividends_paid`/`share_buybacks`: FMP prawdopodobnie
+    raportuje je jako wartości ujemne (odpływ gotówki); zapisujemy `abs()`,
+    zgodnie z konwencją `FundamentalsPeriod` (dodatnia kwota wydatku/wypłaty).
+
+    Faza 4 (2026-09-25): trzy nowe pola dla `dividend_shareholder_return`
+    (`dividends_paid`<-`dividendsPaid`, `share_buybacks`<-
+    `commonStockRepurchased`, `diluted_shares_outstanding`<-
+    `weightedAverageShsOutDil`) — **NIEPOTWIERDZONE** dokładnie jak
+    pierwotne 9 pól w Fazie 1 przed empiryczną weryfikacją: nazwy kluczy
+    zgadywane na bazie konwencji FMP, nigdy nie zweryfikowane bezpośrednio
+    (te same ograniczenia sieciowe co reszta projektu). Do potwierdzenia
+    kolejnym uruchomieniem `ingest-fundamentals` na realnym koncie —
+    brak wiersza dla tych pól w wyniku będzie sygnałem błędnej nazwy.
     """
     rows: list[dict] = []
+    # Pola cash-outflow, gdzie FMP prawdopodobnie raportuje wartość ujemną —
+    # zapisujemy dodatnią kwotę zgodnie z konwencją FundamentalsPeriod.
+    _CASH_OUTFLOW_FIELDS = {"capital_expenditure", "dividends_paid", "share_buybacks"}
 
     def _emit(source_rows: list[dict], field_map: dict[str, str]) -> None:
         for r in source_rows:
@@ -255,7 +268,7 @@ def normalize_fundamentals_rows(
                 value = r.get(raw_key)
                 if value is None:
                     continue
-                if line_item == "capital_expenditure":
+                if line_item in _CASH_OUTFLOW_FIELDS:
                     value = abs(value)
                 rows.append(
                     {
@@ -268,7 +281,15 @@ def normalize_fundamentals_rows(
                     }
                 )
 
-    _emit(income_rows, {"revenue": "revenue", "net_income": "netIncome", "ebitda": "ebitda"})
+    _emit(
+        income_rows,
+        {
+            "revenue": "revenue",
+            "net_income": "netIncome",
+            "ebitda": "ebitda",
+            "diluted_shares_outstanding": "weightedAverageShsOutDil",
+        },
+    )
     _emit(
         balance_rows,
         {
@@ -280,6 +301,11 @@ def normalize_fundamentals_rows(
     )
     _emit(
         cashflow_rows,
-        {"operating_cash_flow": "operatingCashFlow", "capital_expenditure": "capitalExpenditure"},
+        {
+            "operating_cash_flow": "operatingCashFlow",
+            "capital_expenditure": "capitalExpenditure",
+            "dividends_paid": "dividendsPaid",
+            "share_buybacks": "commonStockRepurchased",
+        },
     )
     return rows

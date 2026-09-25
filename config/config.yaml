@@ -2,9 +2,9 @@
 #
 # Jedno źródło prawdy dla progów i parametrów pipeline'u (patrz
 # docs/buffett-scanner-design-review.md, sekcja 6). Sekcje potrzebne w
-# Fazie 0 i Fazie 1 są tu wypełnione — pozostałe (scoring, hard_gates,
-# llm, watchlist, sector_overrides, holdings, backtest) dojdą w
-# kolejnych fazach, razem z kodem, który je faktycznie używa.
+# Fazach 0-4 są tu wypełnione — pozostałe (watchlist, sector_overrides,
+# holdings, backtest) dojdą w kolejnych fazach, razem z kodem, który je
+# faktycznie używa.
 
 universe:
   name: sp500
@@ -87,6 +87,120 @@ llm:
   # zmienną środowiskową, nigdy w configu/repo. Ustaw ANTHROPIC_API_KEY
   # lokalnie (.env) albo jako sekret repozytorium GitHub Actions.
   api_key_env_var: ANTHROPIC_API_KEY
+
+# --- Faza 4: silnik scoringu (sekcja 15, punkty 4.1-4.3) -------------------
+# Zasada: KAŻDY próg/waga poniżej ma jawne `status: UNCALIBRATED`, dopóki
+# backtesting (Faza 5) go nie zatwierdzi — nic nie jest domyślnie "prawdą".
+# Silnik (scoring.py/valuation.py/shareholder_returns.py) nigdy nie
+# hardkoduje żadnej z tych liczb — wyłącznie czyta z tej sekcji.
+
+scoring:
+  version: "0.1.0-draft"
+  weights:
+    business_quality: 45
+    financial_safety: 15
+    valuation: 20
+    fear_opportunity: 10
+    dividend_shareholder_return: 10
+  status: UNCALIBRATED
+
+# financial_quality_score (0-16) — deterministyczny, zasila financial_safety
+# (waga 15 przez liniowe skalowanie 16->15). Sekcja 8: "LLM dostarcza
+# tylko komentarz", liczbę liczy kod.
+financial_quality:
+  weights:
+    fcf_positive: 3
+    fcf_margin_healthy: 3
+    low_leverage: 3
+    good_liquidity: 3
+    positive_revenue_growth: 2
+    no_persistent_losses: 2
+  fcf_margin_healthy_threshold_pct: 10.0
+  net_debt_to_ebitda_low_leverage_threshold: 2.0
+  current_ratio_good_threshold: 1.5
+  persistent_losses_lookback_years: 3
+  status: UNCALIBRATED
+
+# fear_opportunity_score (0-10) — macierz classification x confidence z
+# analizy LLM (Faza 3). Heurystyka: TEMPORARY = duża okazja (rynek się
+# myli, sytuacja przejściowa), STRUCTURAL = mała/brak okazji (spadek
+# uzasadniony), skalowane pewnością klasyfikacji.
+fear_opportunity:
+  points_by_classification_confidence:
+    TEMPORARY:
+      HIGH: 10
+      MEDIUM: 7
+      LOW: 4
+    UNCERTAIN:
+      HIGH: 6
+      MEDIUM: 4
+      LOW: 2
+    STRUCTURAL:
+      HIGH: 0
+      MEDIUM: 1
+      LOW: 2
+  status: UNCALIBRATED
+
+# dividend_shareholder_return_score (0-10) — wymaga pól z Fazy 4
+# (dividends_paid/share_buybacks/diluted_shares_outstanding, patrz
+# fundamentals.py). payout_ratio liczony względem FCF (Decyzja
+# właściciela 2026-09-25) — gdy FCF<=0, payout_ratio jest NOT_MEANINGFUL,
+# nigdy fałszywą wartością ujemną/mylącą.
+dividend_shareholder_return:
+  weights:
+    positive_shareholder_yield: 3
+    no_dividend_cut: 3
+    sustainable_payout_ratio: 2
+    shrinking_or_flat_share_count: 2
+  max_sustainable_payout_ratio_pct: 75.0
+  min_shareholder_yield_pct: 0.0
+  status: UNCALIBRATED
+
+# valuation_score (0-20) — DCF na Owner Earnings (proxy: FCF z Fazy 1,
+# jawnie nazwane owner_earnings_proxy_fcf w kodzie — nie pełna klasyczna
+# koncepcja Owner Earnings). Zatwierdzony design (2026-09-25):
+# - tylko GENERAL ma zaimplementowaną metodę; BANK/INSURER/REIT
+#   NOT_YET_IMPLEMENTED (Faza 10, Decyzja D7); BIOTECH ma odrębny
+#   pipeline rNPV (sekcja 18) — nie ten silnik.
+# - discount_rate/terminal_growth to założenia inwestora, config-driven,
+#   NIGDY hardkodowane w kodzie jako stała.
+# - tempo wzrostu w oknie projekcji DERIVED z historycznej CAGR FCF
+#   spółki (nie zgadywane), potem skalowane mnożnikiem scenariusza
+#   poniżej, z sufitem/podłogą bezpieczeństwa.
+# - hard gate min_margin_of_safety_pct sprawdzany względem BASE (nie
+#   BEAR) — Decyzja właściciela 2026-09-25; BEAR/BULL to dodatkowe,
+#   widoczne w raporcie wskaźniki konserwatywne/optymistyczne.
+valuation:
+  method_by_sector_profile:
+    GENERAL: dcf_owner_earnings
+    BANK: null
+    INSURER: null
+    REIT: null
+    BIOTECH: null
+  dcf_owner_earnings:
+    projection_years: 10
+    discount_rate_pct:
+      bear: 11.0
+      base: 9.0
+      bull: 7.0
+    terminal_growth_rate_pct:
+      bear: 1.0
+      base: 2.5
+      bull: 3.5
+    historical_growth_multiplier:
+      bear: 0.5
+      base: 1.0
+      bull: 1.3
+    max_projected_growth_rate_pct: 20.0   # sufit bezpieczeństwa, niezależny od historii
+    min_projected_growth_rate_pct: -5.0   # podłoga (unikanie nieskończonego kurczenia)
+    mos_pct_for_full_score: 50.0          # MoS (BASE) dający pełne 20 pkt valuation_score
+  status: UNCALIBRATED
+
+hard_gates:
+  min_business_quality: null
+  min_financial_safety: null
+  min_margin_of_safety_pct: null   # sprawdzane względem scenariusza BASE
+  status: UNCALIBRATED
 
 data_provider:
   fundamentals_prices: fmp

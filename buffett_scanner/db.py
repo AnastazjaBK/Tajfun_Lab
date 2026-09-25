@@ -23,12 +23,12 @@ from buffett_scanner.fundamentals import FundamentalsPeriod
 
 # Kanoniczne nazwy line_item używane przy zapisie/odczycie fundamentals_raw
 # — muszą być spójne między ingestem (cli.py) a pivotowaniem tutaj.
-_INCOME_STATEMENT_ITEMS = {"revenue", "net_income", "ebitda"}
+_INCOME_STATEMENT_ITEMS = {"revenue", "net_income", "ebitda", "diluted_shares_outstanding"}
 _BALANCE_SHEET_ITEMS = {
     "total_debt", "cash_and_equivalents",
     "total_current_assets", "total_current_liabilities",
 }
-_CASH_FLOW_ITEMS = {"operating_cash_flow", "capital_expenditure"}
+_CASH_FLOW_ITEMS = {"operating_cash_flow", "capital_expenditure", "dividends_paid", "share_buybacks"}
 
 LINE_ITEM_STATEMENT_TYPE = {
     **{k: "INCOME_STATEMENT" for k in _INCOME_STATEMENT_ITEMS},
@@ -116,6 +116,83 @@ CREATE TABLE IF NOT EXISTS derived_metrics (
     ingested_at  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (cik, as_of_date, metric_name, calc_version)
 );
+
+-- Faza 4 — wersjonowanie modelu scoringu (sekcja 11 design review):
+-- każdy wiersz `analyses` wskazuje na ZAMROŻONY snapshot wag/bramek tu
+-- zapisany, nie na "aktualny" config — v1.3 configu nie może nadpisać
+-- wyników policzonych pod v1.2.
+CREATE TABLE IF NOT EXISTS scoring_model_versions (
+    version        TEXT PRIMARY KEY,
+    description    TEXT,
+    weights_json   TEXT NOT NULL,
+    gates_json     TEXT NOT NULL,
+    effective_from TEXT NOT NULL DEFAULT (datetime('now')),
+    effective_to   TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Faza 4 — wyniki analiz. IMMUTABLE: ponowna ocena spółki = nowy
+-- wiersz (INSERT), nigdy UPDATE (sekcja 11). `input_dataset_snapshot_id`
+-- z projektu schematu (sekcja 5) celowo pominięty na razie — pełna
+-- infrastruktura data_snapshots/run_log nie jest jeszcze zbudowana
+-- (poza zakresem "silnik scoringu + hard gates + raport" z sekcji 15).
+-- margin_of_safety_bear/bull_pct: rozszerzenie względem pierwotnego
+-- projektu schematu — zatwierdzony design (2026-09-25) wymaga widoczności
+-- wszystkich trzech scenariuszy w raporcie, nie tylko BASE.
+CREATE TABLE IF NOT EXISTS analyses (
+    analysis_id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    cik                       TEXT NOT NULL REFERENCES companies(cik),
+    run_date                  TEXT NOT NULL,
+    price_at_analysis         REAL,
+    scoring_model_version     TEXT NOT NULL REFERENCES scoring_model_versions(version),
+    business_quality_score    REAL,
+    moat_score                REAL,
+    financial_quality_score   REAL,
+    management_score          REAL,
+    safety_score              REAL,
+    valuation_score           REAL,
+    fear_score                REAL,
+    dividend_score            REAL,
+    total_score               REAL,
+    hard_flags                TEXT,     -- JSON
+    hard_gates_passed         INTEGER,
+    valuation_range_low       REAL,     -- BEAR intrinsic value/akcję
+    valuation_range_base      REAL,     -- BASE intrinsic value/akcję
+    valuation_range_high      REAL,     -- BULL intrinsic value/akcję
+    margin_of_safety_pct      REAL,     -- BASE — używany przez hard gate
+    margin_of_safety_bear_pct REAL,
+    margin_of_safety_bull_pct REAL,
+    fear_classification       TEXT,
+    fear_confidence           TEXT,
+    llm_model_id              TEXT,
+    llm_schema_version        TEXT,
+    llm_raw_output            TEXT,     -- JSON
+    created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_analyses_cik_run_date ON analyses(cik, run_date);
+
+-- Faza 4 — źródła przypięte do konkretnej analizy (domyka lukę z Fazy 2:
+-- VerifiedSource nie miał gdzie trafić, bo analysis_id nie istniał).
+-- WYŁĄCZNIE realnie pobrane i zweryfikowane (BLOCKER 3, sekcja 9) —
+-- ta tabela nigdy nie jest zapisywana na podstawie twierdzenia LLM.
+CREATE TABLE IF NOT EXISTS analysis_sources (
+    source_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    analysis_id       INTEGER NOT NULL REFERENCES analyses(analysis_id),
+    source_type       TEXT NOT NULL
+                      CHECK (source_type IN ('SEC_FILING','IR_DOC','PRESS_RELEASE','EARNINGS_CALL','OTHER')),
+    title             TEXT,
+    issuer            TEXT,
+    doc_date          TEXT,
+    url               TEXT,
+    accession_number  TEXT,
+    section           TEXT,
+    page              INTEGER,
+    content_hash      TEXT,
+    verified          INTEGER NOT NULL,
+    reason            TEXT,
+    question          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_sources_analysis_id ON analysis_sources(analysis_id);
 """
 
 
@@ -303,6 +380,7 @@ def get_fundamentals_periods(conn: sqlite3.Connection, cik: str) -> list[Fundame
         "revenue", "net_income", "ebitda", "operating_cash_flow",
         "capital_expenditure", "total_debt", "cash_and_equivalents",
         "total_current_assets", "total_current_liabilities",
+        "dividends_paid", "share_buybacks", "diluted_shares_outstanding",
     )
     periods = []
     for fp in order:
@@ -338,3 +416,65 @@ def upsert_derived_metric(
         """,
         (cik, as_of_date, metric_name, value, calc_version, inputs_hash),
     )
+
+
+def upsert_scoring_model_version(
+    conn: sqlite3.Connection,
+    *,
+    version: str,
+    description: str | None,
+    weights_json: str,
+    gates_json: str,
+) -> None:
+    """Zamraża snapshot wag/bramek pod daną wersją (sekcja 11 design
+    review) — `analyses.scoring_model_version` wskazuje na ten wiersz,
+    nie na "aktualny" config, więc zmiana configu nigdy nie zmienia
+    znaczenia już policzonych wyników."""
+    conn.execute(
+        """
+        INSERT INTO scoring_model_versions (version, description, weights_json, gates_json)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(version) DO UPDATE SET
+            description = excluded.description,
+            weights_json = excluded.weights_json,
+            gates_json = excluded.gates_json
+        """,
+        (version, description, weights_json, gates_json),
+    )
+
+
+def insert_analysis(conn: sqlite3.Connection, **fields) -> int:
+    """INSERT-only (nigdy UPDATE) — ponowna ocena spółki to zawsze nowy
+    wiersz, zgodnie z zasadą immutability z sekcji 11. `fields` to
+    dowolny podzbiór kolumn tabeli `analyses` (cik/run_date/
+    scoring_model_version wymagane przez NOT NULL w schemacie)."""
+    columns = list(fields.keys())
+    placeholders = ", ".join("?" for _ in columns)
+    cur = conn.execute(
+        f"INSERT INTO analyses ({', '.join(columns)}) VALUES ({placeholders})",
+        [fields[c] for c in columns],
+    )
+    return cur.lastrowid
+
+
+def insert_analysis_sources(conn: sqlite3.Connection, analysis_id: int, sources: list) -> int:
+    """sources: lista `sources.VerifiedSource`. Jedyny sposób, w jaki
+    wiersze tu powstają — nigdy na podstawie twierdzenia LLM (BLOCKER 3).
+    Zwraca liczbę wstawionych wierszy."""
+    n = 0
+    for s in sources:
+        conn.execute(
+            """
+            INSERT INTO analysis_sources
+                (analysis_id, source_type, title, issuer, doc_date, url,
+                 accession_number, section, page, content_hash, verified, reason, question)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                analysis_id, s.source_type, s.title, s.issuer, s.doc_date, s.url,
+                s.accession_number, s.section, None, s.content_hash, int(s.verified),
+                s.reason, None,
+            ),
+        )
+        n += 1
+    return n
