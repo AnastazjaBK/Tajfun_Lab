@@ -1,0 +1,36 @@
+name: Phase 5.2 Proof Run (fja05680/sp500 analysis)
+
+# Reczne uruchomienie z przegladarki, jak poprzednie fazy. Dowodzi, ze
+# analiza jakosci danych `fja05680/sp500` (OPEN BLOCKER 2, sekcja 13
+# design review; plan Fazy 5.2, v1.21) dziala na realnym pobraniu pliku
+# CSV oraz na realnym mapowaniu SEC ticker->CIK — DIAGNOSTYCZNE, nie
+# zapisuje do `universe_membership`.
+#
+# Wymaga sekretu SEC_EDGAR_USER_AGENT (juz istnieje, uzywany od Fazy 2).
+# Zadnego nowego sekretu, zadnego kosztu — fja05680/sp500 jest darmowe
+# (GitHub raw, bez klucza), SEC EDGAR jest darmowe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cutoff:
+        description: "Poczatek okna analizy (YYYY-MM-DD, domyslnie D14)"
+        required: false
+        default: "2012-01-01"
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: analyze-sp500-history (fja05680/sp500 + SEC ticker->CIK)
+        run: python -m buffett_scanner.cli analyze-sp500-history --cutoff ${{ inputs.cutoff }}
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
