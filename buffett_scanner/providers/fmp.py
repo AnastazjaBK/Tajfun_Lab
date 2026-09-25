@@ -1,24 +1,25 @@
 """Cienki klient FMP (Financial Modeling Prep) — Faza 0.
 
-ZAŁOŻENIA DO ZWERYFIKOWANIA NA ŻYWO (ważne, przeczytaj przed użyciem):
-Ścieżki endpointów i kształt JSON poniżej opierają się na ogólnej,
-długo udokumentowanej strukturze API v3 FMP (`/api/v3/...`), NIE na
-bezpośrednim odczycie aktualnej dokumentacji — dostęp WebFetch do
-site.financialmodelingprep.com był zablokowany w sesji, w której
-projektowano tę architekturę (patrz docs/buffett-scanner-design-review.md,
-sekcja Sources / FINAL PRE-IMPLEMENTATION STATUS). Zanim zaufasz
-wynikom ingestii:
+HISTORIA ZAŁOŻEŃ (ważne, przeczytaj przed dalszą zmianą tego pliku):
+Pierwsza wersja tego klienta używała starszej rodziny endpointów
+`/api/v3/...` — dla klucza właścicielki (plan Free, potwierdzony jako
+działający przez wsparcie FMP na endpointcie `/stable/earnings-calendar`)
+te stare endpointy konsekwentnie zwracały 403, podczas gdy `/stable/...`
+działa. Dlatego cały klient przepisany na rodzinę `/stable/...`.
 
-    python -m buffett_scanner.providers.fmp_smoketest
+Mimo to dokładne nazwy pól w odpowiedziach (`historical-price-eod/full`,
+`sp500-constituent`) NIE zostały potwierdzone bezpośrednim odczytem
+dokumentacji — WebFetch do site.financialmodelingprep.com był
+zablokowany w sesji projektowej. Parsowanie poniżej jest więc celowo
+DEFENSYWNE (akceptuje kilka prawdopodobnych kształtów odpowiedzi) i
+loguje surowy kształt w fmp_smoketest.py, żeby dało się to szybko
+poprawić, jeśli któreś założenie się nie zgadza — bez zgadywania na
+ślepo po raz kolejny.
 
-(albo `pytest -m integration`, patrz tests/test_fmp_client.py) —
-uruchamia pojedyncze, tanie wywołania z Twoim prawdziwym kluczem i
-pokazuje surową odpowiedź, żebyś (lub kolejna tura tej pracy) mogła
-potwierdzić realny kształt danych. Jeśli któryś endpoint się nie
-zgadza, ten plik jest jedynym miejscem, które trzeba poprawić — reszta
-pipeline'u (db.py, scanner.py) nie zależy od szczegółów FMP.
-
-Nigdy nie loguje ani nie wypisuje wartości klucza API.
+Treść błędów FMP (np. "Invalid API KEY. Feel free to create...") jest
+generycznym komunikatem, nie zawiera danych konta ani klucza — dlatego
+FMPError bezpiecznie pokazuje jej fragment, nawet w publicznym logu
+GitHub Actions.
 """
 
 from __future__ import annotations
@@ -27,8 +28,9 @@ import time
 
 import httpx
 
-BASE_URL = "https://financialmodelingprep.com/api/v3"
+BASE_URL = "https://financialmodelingprep.com/stable"
 DEFAULT_TIMEOUT = 15.0
+MAX_ERROR_BODY_CHARS = 300
 
 
 class FMPError(RuntimeError):
@@ -70,9 +72,10 @@ class FMPClient:
         finally:
             self._last_call_ts = time.monotonic()
         if resp.status_code != 200:
+            body_preview = resp.text[:MAX_ERROR_BODY_CHARS]
             raise FMPError(
-                f"FMP zwrócił status {resp.status_code} dla {path} "
-                f"(treść nieujawniona tutaj celowo — może zawierać dane konta)"
+                f"FMP zwrócił status {resp.status_code} dla {path}. "
+                f"Treść odpowiedzi (skrócona): {body_preview}"
             )
         try:
             return resp.json()
@@ -82,40 +85,56 @@ class FMPClient:
     def get_sp500_constituents(self) -> list[dict]:
         """Aktualny skład S&P 500 (Decyzja D4 — endpoint dostawcy).
 
-        Założony kształt: lista obiektów z polami symbol/name/sector/
-        subSector/cik. DO ZWERYFIKOWANIA — patrz docstring modułu.
+        Oczekiwany kształt: lista obiektów z polami symbol/name/sector/
+        cik (nazwy dokładnych pól niepotwierdzone — patrz docstring modułu).
         """
-        data = self._get("sp500_constituent")
+        data = self._get("sp500-constituent")
         if not isinstance(data, list):
-            raise FMPError("Nieoczekiwany kształt odpowiedzi sp500_constituent (oczekiwano listy).")
+            raise FMPError(
+                f"Nieoczekiwany kształt odpowiedzi sp500-constituent "
+                f"(oczekiwano listy, dostałam {type(data).__name__})."
+            )
         return data
 
     def get_company_profile(self, symbol: str) -> dict:
         """Profil spółki (m.in. CIK, sector, industry) dla pojedynczego tickera.
 
-        Założony kształt: lista z jednym obiektem. DO ZWERYFIKOWANIA.
+        FMP stable może zwrócić pojedynczy obiekt albo listę z jednym
+        elementem — obsługujemy oba warianty defensywnie.
         """
-        data = self._get(f"profile/{symbol}")
-        if not isinstance(data, list) or not data:
-            raise FMPError(f"Brak profilu dla {symbol} (pusta odpowiedź FMP).")
-        return data[0]
+        data = self._get("profile", symbol=symbol)
+        if isinstance(data, list):
+            if not data:
+                raise FMPError(f"Brak profilu dla {symbol} (pusta lista odpowiedzi FMP).")
+            return data[0]
+        if isinstance(data, dict):
+            if not data:
+                raise FMPError(f"Brak profilu dla {symbol} (pusty obiekt odpowiedzi FMP).")
+            return data
+        raise FMPError(
+            f"Nieoczekiwany kształt odpowiedzi profile dla {symbol} "
+            f"(dostałam {type(data).__name__})."
+        )
 
     def get_historical_prices(self, symbol: str, *, from_date: str, to_date: str) -> list[dict]:
         """Dzienne OHLCV dla tickera w zadanym zakresie dat (ISO YYYY-MM-DD).
 
-        Założony kształt: {"symbol": ..., "historical": [{"date","open",
-        "high","low","close","adjClose","volume",...}, ...]} — malejąco
-        po dacie. DO ZWERYFIKOWANIA.
+        FMP stable prawdopodobnie zwraca płaską listę (bez opakowania w
+        {"historical": [...]} jak stare v3) — obsługujemy oba warianty.
         """
         data = self._get(
-            f"historical-price-full/{symbol}", **{"from": from_date, "to": to_date}
+            "historical-price-eod/full", symbol=symbol,
+            **{"from": from_date, "to": to_date},
         )
-        if not isinstance(data, dict) or "historical" not in data:
+        if isinstance(data, dict) and "historical" in data:
+            rows = data["historical"]
+        elif isinstance(data, list):
+            rows = data
+        else:
             raise FMPError(
-                f"Nieoczekiwany kształt odpowiedzi historical-price-full dla {symbol}."
+                f"Nieoczekiwany kształt odpowiedzi historical-price-eod dla {symbol} "
+                f"(dostałam {type(data).__name__})."
             )
-        rows = data["historical"]
-        # normalizacja do rosnącego porządku + nazw pól zgodnych z db.insert_price_rows
         normalized = [
             {
                 "date": r["date"],

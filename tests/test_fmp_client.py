@@ -25,6 +25,10 @@ class _FakeResponse:
     def json(self):
         return self._payload
 
+    @property
+    def text(self):
+        return str(self._payload)
+
 
 def test_fmp_client_rejects_empty_api_key():
     with pytest.raises(FMPError):
@@ -72,6 +76,33 @@ def test_get_company_profile_raises_on_empty_result(monkeypatch):
         client.get_company_profile("NOPE")
 
 
+def test_get_company_profile_accepts_bare_dict_shape(monkeypatch):
+    """FMP stable może zwrócić pojedynczy obiekt zamiast listy z jednym
+    elementem — kod musi obsłużyć oba warianty (patrz docstring fmp.py)."""
+    client = FMPClient("dummy-key")
+    fake_payload = {"symbol": "AAPL", "cik": "0000320193", "companyName": "Apple Inc."}
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponse(200, fake_payload)
+    )
+    profile = client.get_company_profile("AAPL")
+    assert profile["cik"] == "0000320193"
+
+
+def test_get_historical_prices_accepts_flat_list_shape(monkeypatch):
+    """FMP stable prawdopodobnie zwraca płaską listę zamiast starego
+    opakowania {"historical": [...]} z v3 — kod musi obsłużyć oba warianty."""
+    client = FMPClient("dummy-key")
+    fake_payload = [
+        {"date": "2026-01-03", "open": 3, "high": 3, "low": 3, "close": 3, "adjClose": 3, "volume": 300},
+        {"date": "2026-01-02", "open": 2, "high": 2, "low": 2, "close": 2, "adjClose": 2, "volume": 200},
+    ]
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponse(200, fake_payload)
+    )
+    rows = client.get_historical_prices("AAPL", from_date="2026-01-01", to_date="2026-01-03")
+    assert [r["date"] for r in rows] == ["2026-01-02", "2026-01-03"]
+
+
 def test_get_historical_prices_normalizes_field_names_and_sorts_ascending(monkeypatch):
     client = FMPClient("dummy-key")
     fake_payload = {
@@ -89,14 +120,25 @@ def test_get_historical_prices_normalizes_field_names_and_sorts_ascending(monkey
     assert rows[0]["adj_close"] == 2  # adjClose -> adj_close
 
 
-def test_non_200_status_raises_without_leaking_body(monkeypatch):
+def test_non_200_status_includes_truncated_error_body(monkeypatch):
+    """FMP zwraca generyczne komunikaty błędów (np. "Invalid API KEY..."),
+    bez danych konta — bezpiecznie je pokazać, nawet w publicznym logu
+    GitHub Actions, żeby diagnoza nie wymagała zgadywania (patrz historia
+    w docstring fmp.py)."""
     client = FMPClient("dummy-key")
+
+    class _FakeTextResponse(_FakeResponse):
+        @property
+        def text(self):
+            return '{"Error Message":"Invalid API KEY."}'
+
     monkeypatch.setattr(
-        client._client, "get", lambda url, params=None: _FakeResponse(403, {"error": "sekret konta"})
+        client._client, "get",
+        lambda url, params=None: _FakeTextResponse(403, {"Error Message": "Invalid API KEY."}),
     )
     with pytest.raises(FMPError) as exc_info:
         client.get_sp500_constituents()
-    assert "sekret konta" not in str(exc_info.value)
+    assert "Invalid API KEY" in str(exc_info.value)
 
 
 @pytest.mark.integration
