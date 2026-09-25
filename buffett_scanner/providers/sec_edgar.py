@@ -23,6 +23,7 @@ import httpx
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik10}.json"
 COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
 ARCHIVES_BASE_URL = "https://www.sec.gov/Archives/edgar/data"
+COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 DEFAULT_TIMEOUT = 15.0
 
 
@@ -150,3 +151,35 @@ class SecEdgarClient:
             return resp.json()
         except ValueError as exc:
             raise SecEdgarError(f"SEC EDGAR zwrócił niepoprawny JSON dla company facts CIK={cik}") from exc
+
+    def get_company_tickers(self) -> dict[str, str]:
+        """Aktualne (DZISIEJSZE, nie point-in-time) mapowanie ticker->CIK
+        z `company_tickers.json` — podstawa pierwszego przebiegu
+        diagnostycznego rozwiązywania tożsamości w Fazie 5.2
+        (`universe_history.resolve_tickers_to_cik`). Zwraca `{ticker:
+        cik_jako_string}`, cik BEZ wiodących zer (jak w reszcie
+        projektu). Surowy JSON to `{"0": {"cik_str": ..., "ticker":
+        ..., "title": ...}, "1": {...}, ...}` — wiersz bez `cik_str`
+        lub `ticker` jest pomijany, nigdy nie fabrykujemy brakującego
+        pola. NIE jest to mapowanie historyczne — ticker mógł w
+        przeszłości należeć do innej spółki (recykling tickerów),
+        więc rozwiązanie przez tę metodę to pierwszy przebieg
+        diagnostyczny, nie finalna walidacja tożsamości point-in-time."""
+        resp = self._get(COMPANY_TICKERS_URL)
+        if resp.status_code != 200:
+            raise SecEdgarError(
+                f"SEC EDGAR zwrócił status {resp.status_code} dla company_tickers.json."
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise SecEdgarError("SEC EDGAR zwrócił niepoprawny JSON dla company_tickers.json") from exc
+
+        mapping: dict[str, str] = {}
+        for entry in data.values():
+            ticker = entry.get("ticker")
+            cik = entry.get("cik_str")
+            if not ticker or cik is None:
+                continue
+            mapping[ticker] = str(cik)
+        return mapping

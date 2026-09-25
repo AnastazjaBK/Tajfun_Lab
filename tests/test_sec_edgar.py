@@ -132,3 +132,38 @@ def test_get_company_facts_raises_on_non_200(monkeypatch):
     monkeypatch.setattr(client._client, "get", lambda url: _FakeResponse(404))
     with pytest.raises(SecEdgarError):
         client.get_company_facts("0000320193")
+
+
+def test_get_company_tickers_parses_mapping_and_strips_leading_zeros(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        "1": {"cik_str": 789019, "ticker": "MSFT", "title": "Microsoft Corp"},
+    }
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    mapping = client.get_company_tickers()
+    assert mapping == {"AAPL": "320193", "MSFT": "789019"}
+
+
+def test_get_company_tickers_skips_entries_missing_ticker_or_cik(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {
+        "0": {"cik_str": 320193, "ticker": "AAPL"},
+        "1": {"cik_str": None, "ticker": "BROKEN"},
+        "2": {"ticker": "NOCIK"},
+        "3": {"cik_str": 1},
+    }
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    mapping = client.get_company_tickers()
+    assert mapping == {"AAPL": "320193"}
+
+
+def test_get_company_tickers_raises_on_non_200(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    monkeypatch.setattr(client._client, "get", lambda url: _FakeResponse(404))
+    with pytest.raises(SecEdgarError):
+        client.get_company_tickers()

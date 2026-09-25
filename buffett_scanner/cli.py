@@ -10,6 +10,7 @@
     python -m buffett_scanner.cli analyze AAPL MSFT ...
     python -m buffett_scanner.cli score AAPL MSFT ... [--markdown-out DIR]
     python -m buffett_scanner.cli pit-prototype AAPL MSFT ... [--as-of YYYY-MM-DD]
+    python -m buffett_scanner.cli analyze-sp500-history [--cutoff YYYY-MM-DD]
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -44,10 +45,18 @@ from buffett_scanner.prompt import build_analysis_prompt
 from buffett_scanner.providers.claude import ClaudeClient, ClaudeError
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
+from buffett_scanner.providers.sp500_history import Sp500HistoryError, fetch_components_csv
 from buffett_scanner.report import render_markdown_report
 from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
 from buffett_scanner.scoring import compute_score
 from buffett_scanner.sources import VerifiedSource, build_sec_source_packet
+from buffett_scanner.universe_history import (
+    build_ticker_intervals,
+    distinct_tickers,
+    parse_components_csv,
+    resolve_tickers_to_cik,
+    window_from_cutoff,
+)
 
 DEFAULT_DB_PATH = "buffett_scanner.db"
 PREFILTER_CALC_VERSION = "0.1.0-phase1"
@@ -532,6 +541,58 @@ def cmd_pit_prototype(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze_sp500_history(args: argparse.Namespace) -> int:
+    """Faza 5, punkt 5.2 (OPEN BLOCKER 2): analiza jakości źródła
+    `fja05680/sp500`, ograniczona do okna `--cutoff` (domyślnie 2012-01-01,
+    Decyzja D14). WYŁĄCZNIE DIAGNOSTYCZNE — nie zapisuje do
+    `universe_membership`, to osobna decyzja właściciela (plan Fazy 5.2,
+    v1.21). Raportuje: pokrycie/odstępy w danych źródłowych, liczbę
+    przedziałów członkostwa, i rozwiązanie ticker->CIK względem
+    dzisiejszego mapowania SEC — z jawnym `CIK_UNRESOLVED` zamiast
+    zgadywania (zaakceptowane przez właściciela)."""
+    config = load_config()
+    user_agent = config.sources.sec_edgar.resolve_user_agent()
+    cutoff = args.cutoff
+
+    try:
+        csv_text = fetch_components_csv()
+    except Sp500HistoryError as exc:
+        print(f"BŁĄD pobierania fja05680/sp500: {exc}")
+        return 1
+
+    rows = parse_components_csv(csv_text)
+    print(f"fja05680/sp500: {len(rows)} wierszy źródłowych, zakres {rows[0].date}..{rows[-1].date}")
+
+    window = window_from_cutoff(rows, cutoff)
+    if not window:
+        print(f"BŁĄD: źródło nie ma żadnego wiersza <= {cutoff} — nie da się ustalić baseline'u okna.")
+        return 1
+    print(f"Okno [{cutoff}, {rows[-1].date}]: baseline={window[0].date}, {len(window)} wierszy w oknie")
+
+    tickers = distinct_tickers(window)
+    intervals = build_ticker_intervals(window, cutoff_date=cutoff)
+    still_open = [iv for iv in intervals if iv.end_date is None]
+    reentries = len(intervals) - len(tickers)
+    print(f"Dystynktywnych tickerów w oknie: {len(tickers)}")
+    print(f"Przedziałów członkostwa: {len(intervals)} (w tym {reentries} przedziałów z ponownym wejściem)")
+    print(f"Wciąż otwartych na koniec źródła ({rows[-1].date}): {len(still_open)}")
+
+    try:
+        with SecEdgarClient(user_agent) as client:
+            sec_map = client.get_company_tickers()
+    except SecEdgarError as exc:
+        print(f"BŁĄD pobierania mapowania SEC ticker->CIK: {exc}")
+        return 1
+
+    result = resolve_tickers_to_cik(tickers, sec_map)
+    print(f"\nRozwiązanie ticker->CIK (mapowanie SEC AKTUALNE NA DZIŚ, nie point-in-time):")
+    print(f"  RESOLVED: {len(result.resolved)}/{len(tickers)}")
+    print(f"  CIK_UNRESOLVED: {len(result.unresolved)}/{len(tickers)}")
+    if result.unresolved:
+        print(f"  Nierozwiązane tickery: {', '.join(result.unresolved)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -577,6 +638,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_pit.add_argument("tickers", nargs="+")
     p_pit.add_argument("--as-of", default=None, help="Data zapytania PIT (YYYY-MM-DD), domyślnie dziś.")
     p_pit.set_defaults(func=cmd_pit_prototype)
+
+    p_sp500_hist = sub.add_parser("analyze-sp500-history")
+    p_sp500_hist.add_argument(
+        "--cutoff", default="2012-01-01", help="Początek okna analizy (YYYY-MM-DD, domyślnie D14: 2012-01-01)."
+    )
+    p_sp500_hist.set_defaults(func=cmd_analyze_sp500_history)
 
     return parser
 
