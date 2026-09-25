@@ -21,6 +21,7 @@ import time
 import httpx
 
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik10}.json"
+COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
 ARCHIVES_BASE_URL = "https://www.sec.gov/Archives/edgar/data"
 DEFAULT_TIMEOUT = 15.0
 
@@ -131,3 +132,21 @@ class SecEdgarClient:
             "content_hash": hashlib.sha256(content).hexdigest(),
             "content_length": len(content),
         }
+
+    def get_company_facts(self, cik: str) -> dict:
+        """Pełny zestaw faktów XBRL spółki (company-facts API). Każdy
+        fakt ma pole `filed` (data faktycznego złożenia) — podstawa
+        warstwy point-in-time (BLOCKER 1, sekcja 13 design review,
+        Faza 5.1): pozwala odtworzyć "jaka była ostatnia wartość X
+        *filed* na dzień <= D" zamiast dzisiejszego, skorygowanego
+        widoku, jaki dają komercyjni dostawcy danych (FMP itp.)."""
+        url = COMPANY_FACTS_URL.format(cik10=_pad_cik(cik))
+        resp = self._get(url)
+        if resp.status_code != 200:
+            raise SecEdgarError(
+                f"SEC EDGAR zwrócił status {resp.status_code} dla company facts CIK={cik}."
+            )
+        try:
+            return resp.json()
+        except ValueError as exc:
+            raise SecEdgarError(f"SEC EDGAR zwrócił niepoprawny JSON dla company facts CIK={cik}") from exc

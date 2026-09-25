@@ -1,4 +1,4 @@
-"""CLI — Faza 0 + Faza 1 + Faza 2 + Faza 3 + Faza 4.
+"""CLI — Faza 0 + Faza 1 + Faza 2 + Faza 3 + Faza 4 + Faza 5.
 
     python -m buffett_scanner.cli init-db
     python -m buffett_scanner.cli ingest-universe
@@ -9,6 +9,7 @@
     python -m buffett_scanner.cli build-source-packet AAPL MSFT ...
     python -m buffett_scanner.cli analyze AAPL MSFT ...
     python -m buffett_scanner.cli score AAPL MSFT ... [--markdown-out DIR]
+    python -m buffett_scanner.cli pit-prototype AAPL MSFT ... [--as-of YYYY-MM-DD]
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -38,10 +39,11 @@ from buffett_scanner.db import (
     upsert_ticker_history,
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
+from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
 from buffett_scanner.prompt import build_analysis_prompt
 from buffett_scanner.providers.claude import ClaudeClient, ClaudeError
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
-from buffett_scanner.providers.sec_edgar import SecEdgarClient
+from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
 from buffett_scanner.report import render_markdown_report
 from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
 from buffett_scanner.scoring import compute_score
@@ -477,6 +479,59 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pit_prototype(args: argparse.Namespace) -> int:
+    """Faza 5, punkt 5.1 (OPEN BLOCKER 1): prototyp warstwy point-in-time
+    na SEC XBRL company-facts. Pobiera historię faktów XBRL dla
+    net_income/revenue, wykonuje przykładowe zapytanie PIT ("jaka była
+    ostatnia wartość X filed na dzień <= D") i porównuje najnowszą
+    wartość PIT z danymi "as reported" z FMP (Faza 1, fundamentals_raw)
+    jako sanity-check. NIE oczekujemy dokładnej równości (różne modele
+    danych/okresy sprawozdawcze) — tylko tego samego rzędu wielkości."""
+    config = load_config()
+    user_agent = config.sources.sec_edgar.resolve_user_agent()
+    conn = init_db(args.db)
+    as_of_date = args.as_of or dt.date.today().isoformat()
+
+    with SecEdgarClient(user_agent) as client:
+        for ticker in args.tickers:
+            cik = _resolve_cik(conn, ticker)
+            if cik is None:
+                print(f"{ticker}: brak w bazie (uruchom najpierw ingest-prices).")
+                continue
+            try:
+                company_facts = client.get_company_facts(cik)
+            except SecEdgarError as exc:
+                print(f"BŁĄD pobierania company facts dla {ticker}: {exc}")
+                continue
+
+            print(f"\n{ticker} ({cik}) — prototyp PIT (SEC XBRL), as_of={as_of_date}")
+            for concept in ("net_income", "revenue"):
+                found = find_first_matching_tag(company_facts, concept)
+                if found is None:
+                    print(f"  {concept}: brak żadnego z kandydujących tagów XBRL")
+                    continue
+                tag, history = found
+                latest = value_as_of(history, as_of_date)
+                print(f"  {concept} (tag XBRL={tag}, {len(history)} faktów w historii):")
+                if latest:
+                    print(f"    PIT jako-znane-na-{as_of_date}: {latest.val} "
+                          f"(end={latest.end}, filed={latest.filed}, form={latest.form})")
+                else:
+                    print(f"    brak wartości PIT na {as_of_date} (nic jeszcze niezłożone)")
+
+                row = conn.execute(
+                    "SELECT value, period_end_date FROM fundamentals_raw "
+                    "WHERE cik = ? AND line_item = ? ORDER BY period_end_date DESC LIMIT 1",
+                    (cik, concept),
+                ).fetchone()
+                if row:
+                    print(f"    FMP as-reported (Faza 1, dzisiejszy widok): {row['value']} "
+                          f"(period_end_date={row['period_end_date']})")
+                else:
+                    print("    (brak danych FMP do porównania — uruchom najpierw ingest-fundamentals)")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -517,6 +572,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_score.add_argument("tickers", nargs="+")
     p_score.add_argument("--markdown-out", default=None, help="Katalog na raporty .md")
     p_score.set_defaults(func=cmd_score)
+
+    p_pit = sub.add_parser("pit-prototype")
+    p_pit.add_argument("tickers", nargs="+")
+    p_pit.add_argument("--as-of", default=None, help="Data zapytania PIT (YYYY-MM-DD), domyślnie dziś.")
+    p_pit.set_defaults(func=cmd_pit_prototype)
 
     return parser
 

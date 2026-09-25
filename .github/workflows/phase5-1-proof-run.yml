@@ -1,0 +1,50 @@
+name: Phase 5.1 Proof Run (Point-in-Time prototype)
+
+# Ręczne uruchomienie z przeglądarki, jak poprzednie fazy. Dowodzi, że
+# warstwa point-in-time na SEC XBRL company-facts (sekcja 15, punkt
+# 5.1; OPEN BLOCKER 1, sekcja 13) realnie działa: pobiera historię
+# faktów XBRL (net_income/revenue) z prawdziwym polem `filed`, wykonuje
+# przykładowe zapytanie PIT i porównuje z danymi "as reported" z FMP
+# (Faza 1) jako sanity-check rzędu wielkości.
+#
+# Nie wymaga żadnego nowego sekretu — te same co Fazy 2-4
+# (FMP_API_KEY, SEC_EDGAR_USER_AGENT). Darmowe (SEC EDGAR + FMP profile/
+# historical/fundamentals na planie Free).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Tickery do przetestowania, oddzielone spacją"
+        required: false
+        default: "AAPL MSFT KO"
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: init-db
+        run: python -m buffett_scanner.cli init-db
+
+      - name: ingest-prices (rejestruje CIK)
+        run: python -m buffett_scanner.cli ingest-prices ${{ inputs.tickers }} --days 400
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: ingest-fundamentals (dane FMP "as reported" do porownania)
+        run: python -m buffett_scanner.cli ingest-fundamentals ${{ inputs.tickers }}
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: pit-prototype (SEC XBRL company-facts + zapytanie PIT)
+        run: python -m buffett_scanner.cli pit-prototype ${{ inputs.tickers }}
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}

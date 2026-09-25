@@ -112,3 +112,23 @@ def test_fetch_and_hash_document_raises_on_non_200_never_fabricates_hash(monkeyp
     monkeypatch.setattr(client._client, "get", lambda url: _FakeResponse(404))
     with pytest.raises(SecEdgarError):
         client.fetch_and_hash_document("https://www.sec.gov/nope.htm")
+
+
+def test_get_company_facts_parses_json(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {
+        "cik": 320193, "entityName": "Apple Inc.",
+        "facts": {"us-gaap": {"NetIncomeLoss": {"units": {"USD": []}}}},
+    }
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    result = client.get_company_facts("0000320193")
+    assert result == fake_payload
+
+
+def test_get_company_facts_raises_on_non_200(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    monkeypatch.setattr(client._client, "get", lambda url: _FakeResponse(404))
+    with pytest.raises(SecEdgarError):
+        client.get_company_facts("0000320193")
