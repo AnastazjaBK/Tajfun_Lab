@@ -28,26 +28,26 @@ FMPError bezpiecznie pokazuje jej fragment, nawet w publicznym logu
 GitHub Actions.
 
 FAZA 1 — endpointy fundamentalne (income-statement, balance-sheet-statement,
-cash-flow-statement): ścieżki i nazwy pól NIE zostały jeszcze potwierdzone
-przez rzeczywiste wywołanie (WebFetch do dokumentacji FMP zablokowany
-przez proxy sieciowe sesji przez cały czas trwania tego projektu). Kod
-poniżej jest napisany defensywnie na bazie publicznie znanej konwencji
-nazewnictwa `/stable/`, dokładnie tym samym trybem co profile/historical
-w Fazie 0 — do zweryfikowania empirycznie przez `fmp_smoketest.py` na
-prawdziwym koncie, nie do potraktowania jako fakt, dopóki nie przyjdzie
-potwierdzenie.
+cash-flow-statement): **empirycznie potwierdzone w całości** (workflow
+„Phase 1 Proof Run", 2026-09-25, plan Free, AAPL/MSFT/KO):
 
-**EMPIRYCZNIE POTWIERDZONE (workflow „Phase 1 Proof Run", 2026-09-25,
-plan Free):** ścieżka `income-statement` jest poprawnie zaadresowana
-(FMP nie zwrócił 404) — zwróciła **402** wyłącznie z powodu parametru
-`limit`: „The values for 'limit' must be between 0 and 5 based on your
-current subscription." Plan Free pozwala maksymalnie na 5 okresów na
-zapytanie. To NIE oznacza, że endpoint wymaga planu płatnego (w
-przeciwieństwie do `sp500-constituent` w Fazie 0, który dawał jawne
-„Restricted Endpoint") — wymaga tylko poprawnego parametru. Kod
-poprawiony: domyślny `limit` to teraz `STATEMENT_LIMIT_FREE_PLAN = 5`.
-Kształt samej odpowiedzi (nazwy pól w JSON) wciąż niepotwierdzony —
-czeka na kolejne uruchomienie.
+- Wszystkie trzy ścieżki (`income-statement`, `balance-sheet-statement`,
+  `cash-flow-statement`) są poprawnie zaadresowane i dostępne na planie
+  Free. Pierwsza próba dała 402 wyłącznie z powodu parametru `limit`:
+  „The values for 'limit' must be between 0 and 5 based on your current
+  subscription" — plan Free pozwala maks. 5 okresów, nie 10 (domyślna
+  wartość zgadywana pierwotnie). To NIE oznacza planu płatnego (w
+  przeciwieństwie do `sp500-constituent` w Fazie 0, który dawał jawne
+  „Restricted Endpoint") — tylko błędny parametr. Naprawione:
+  `STATEMENT_LIMIT_FREE_PLAN = 5` jako nowy domyślny `limit`.
+- Wszystkie 9 kanonicznych nazw pól w `normalize_fundamentals_rows`
+  (`revenue`, `netIncome`, `ebitda`, `totalDebt`, `cashAndCashEquivalents`,
+  `totalCurrentAssets`, `totalCurrentLiabilities`, `operatingCashFlow`,
+  `capitalExpenditure`) POTWIERDZONE — `ingest-fundamentals` zapisał
+  45/45 możliwych wierszy na spółkę (5 okresów × 9 pól, zero pominiętych).
+  Gdyby któraś nazwa pola się nie zgadzała, część wierszy zostałaby po
+  cichu pominięta (patrz `normalize_fundamentals_rows`) i suma byłaby
+  niższa niż 45 — nie było.
 """
 
 from __future__ import annotations
@@ -197,28 +197,28 @@ class FMPClient:
     def get_income_statement(
         self, symbol: str, *, period: str = "annual", limit: int = STATEMENT_LIMIT_FREE_PLAN
     ) -> list[dict]:
-        """Surowe wiersze rachunku wyników. Ścieżka i nazwy pól w
-        odpowiedzi wciąż NIEPOTWIERDZONE (patrz docstring modułu) —
-        `limit` natomiast JEST potwierdzony (patrz STATEMENT_LIMIT_FREE_PLAN)."""
+        """Surowe wiersze rachunku wyników. Ścieżka, `limit` i nazwy pól
+        POTWIERDZONE empirycznie (patrz docstring modułu)."""
         return self._get_statement("income-statement", symbol, period=period, limit=limit)
 
     def get_balance_sheet_statement(
         self, symbol: str, *, period: str = "annual", limit: int = STATEMENT_LIMIT_FREE_PLAN
     ) -> list[dict]:
-        """Surowe wiersze bilansu (kształt NIEPOTWIERDZONY — jak wyżej)."""
+        """Surowe wiersze bilansu (POTWIERDZONE — jak wyżej)."""
         return self._get_statement("balance-sheet-statement", symbol, period=period, limit=limit)
 
     def get_cash_flow_statement(
         self, symbol: str, *, period: str = "annual", limit: int = STATEMENT_LIMIT_FREE_PLAN
     ) -> list[dict]:
-        """Surowe wiersze cash flow (kształt NIEPOTWIERDZONY — jak wyżej)."""
+        """Surowe wiersze cash flow (POTWIERDZONE — jak wyżej)."""
         return self._get_statement("cash-flow-statement", symbol, period=period, limit=limit)
 
 
 def _statement_period_key(row: dict) -> str:
     """Wyprowadza stabilny klucz okresu fiskalnego z wiersza sprawozdania.
-    Preferuje (fiscalYear|calendarYear)+period; fallback na `date`, bo
-    dokładne nazwy pól nie są potwierdzone (patrz docstring modułu)."""
+    Preferuje (fiscalYear|calendarYear)+period; fallback na `date`.
+    Gałąź fiscalYear+period POTWIERDZONA empirycznie (np. "2026-FY") —
+    patrz docstring modułu."""
     fiscal_year = row.get("fiscalYear") or row.get("calendarYear")
     period = row.get("period")
     if fiscal_year and period:
