@@ -1,0 +1,53 @@
+name: Phase 3 Proof Run
+
+# Ręczne uruchomienie z przeglądarki, jak "Phase 0/1/2 Proof Run".
+# Dowodzi, że integracja Claude API (sekcja 8/15, punkty 3.1-3.2)
+# realnie działa: łączy deterministyczne wskaźniki (Faza 1) + source
+# packet (Faza 2) w prompt, wywołuje Claude API z wymuszonym schematem
+# JSON (output_format), waliduje odpowiedź regułami sekcji 8
+# (cited_source_ids musi być podzbiorem dostarczonej listy, page tylko
+# dla PDF, score <= max_score). To jest "dry-run na 2-3 tickerach,
+# ręczna ocena jakości" z sekcji 15 — pierwsza faza, która realnie
+# kosztuje (Claude API, w przeciwieństwie do Faz 0-2).
+#
+# Domyślnie tylko 1 ticker, żeby dry-run kosztował grosze, nie dolary
+# — rozszerz --tickers ręcznie przy uruchamianiu, jeśli chcesz więcej.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Tickery do przetestowania, oddzielone spacją (uwaga: każdy kosztuje realne wywołanie Claude API)"
+        required: false
+        default: "AAPL"
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: init-db
+        run: python -m buffett_scanner.cli init-db
+
+      - name: ingest-prices (rejestruje CIK)
+        run: python -m buffett_scanner.cli ingest-prices ${{ inputs.tickers }} --days 400
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: ingest-fundamentals
+        run: python -m buffett_scanner.cli ingest-fundamentals ${{ inputs.tickers }}
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+
+      - name: analyze (wywołuje Claude API — realny koszt)
+        run: python -m buffett_scanner.cli analyze ${{ inputs.tickers }}
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

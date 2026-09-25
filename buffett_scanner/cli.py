@@ -1,4 +1,4 @@
-"""CLI — Faza 0 + Faza 1 + Faza 2.
+"""CLI — Faza 0 + Faza 1 + Faza 2 + Faza 3.
 
     python -m buffett_scanner.cli init-db
     python -m buffett_scanner.cli ingest-universe
@@ -7,6 +7,7 @@
     python -m buffett_scanner.cli ingest-fundamentals AAPL MSFT ...
     python -m buffett_scanner.cli prefilter AAPL MSFT ...
     python -m buffett_scanner.cli build-source-packet AAPL MSFT ...
+    python -m buffett_scanner.cli analyze AAPL MSFT ...
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -18,6 +19,7 @@ import argparse
 import datetime as dt
 import sys
 
+from buffett_scanner.analysis_schema import AnalysisValidationError, validate_analysis_output
 from buffett_scanner.config import load_config
 from buffett_scanner.db import (
     get_fundamentals_periods,
@@ -30,6 +32,8 @@ from buffett_scanner.db import (
     upsert_ticker_history,
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
+from buffett_scanner.prompt import build_analysis_prompt
+from buffett_scanner.providers.claude import ClaudeClient, ClaudeError
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
 from buffett_scanner.providers.sec_edgar import SecEdgarClient
 from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
@@ -266,6 +270,74 @@ def cmd_build_source_packet(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """Faza 3, punkt 3.2: dry-run — łączy wskaźniki (Faza 1) + source
+    packet (Faza 2) w prompt, wywołuje Claude API, waliduje wyjście.
+    Diagnostyczny dry-run: NIE zapisuje jeszcze do `analyses`/
+    `analysis_sources` (te tabele powstaną w Fazie 4 razem z silnikiem
+    scoringu, który faktycznie ich potrzebuje)."""
+    config = load_config()
+    user_agent = config.sources.sec_edgar.resolve_user_agent()
+    claude_key = config.llm.resolve_api_key()
+    conn = init_db(args.db)
+
+    with SecEdgarClient(user_agent) as edgar_client, ClaudeClient(
+        claude_key, model=config.llm.model, max_output_tokens=config.llm.max_output_tokens,
+    ) as claude_client:
+        for ticker in args.tickers:
+            cik = _resolve_cik(conn, ticker)
+            if cik is None:
+                print(f"{ticker}: brak w bazie (uruchom najpierw ingest-prices).")
+                continue
+            periods = get_fundamentals_periods(conn, cik)
+            if not periods:
+                print(f"{ticker}: brak danych fundamentalnych (uruchom najpierw ingest-fundamentals).")
+                continue
+            metrics = compute_metrics(periods)
+            prefilter_result = evaluate_prefilter(metrics, config.prefilter)
+
+            row = conn.execute("SELECT name FROM companies WHERE cik = ?", (cik,)).fetchone()
+            issuer = row["name"] if row else ticker
+            packet = build_sec_source_packet(edgar_client, cik=cik, issuer=issuer)
+            verified_sources = [s for s in packet if s.verified]
+            if not verified_sources:
+                print(f"{ticker}: brak zweryfikowanych źródeł, pomijam analizę LLM.")
+                continue
+
+            prompt, source_id_map = build_analysis_prompt(
+                ticker=ticker, metrics=metrics,
+                prefilter_flags=prefilter_result.flags, sources=verified_sources,
+            )
+            try:
+                result = claude_client.generate_analysis(prompt)
+            except ClaudeError as exc:
+                print(f"BŁĄD LLM dla {ticker}: {exc}")
+                continue
+
+            try:
+                validate_analysis_output(
+                    result, allowed_source_ids=set(source_id_map), pdf_paginated_source_ids=set(),
+                )
+            except AnalysisValidationError as exc:
+                print(f"ODRZUCONO (walidacja deterministyczna) dla {ticker}: {exc}")
+                continue
+
+            print(f"\n{ticker} — analiza OK (schema_version={result.schema_version})")
+            print(f"  business_understandability: {result.business_understandability.score}/"
+                  f"{result.business_understandability.max_score} "
+                  f"({result.business_understandability.confidence})")
+            print(f"  moat: {result.moat.score}/{result.moat.max_score} ({result.moat.confidence})")
+            print(f"  management_capital_allocation: {result.management_capital_allocation.score}/"
+                  f"{result.management_capital_allocation.max_score}")
+            print(f"  fear_analysis: {result.fear_analysis.classification} "
+                  f"({result.fear_analysis.confidence}) — {result.fear_analysis.trigger}")
+            print(f"  dividend_trap_alert: {result.dividend_trap_alert.triggered}")
+            print(f"  biggest_unknown: {result.biggest_unknown}")
+            print(f"  cited_source_ids: {result.cited_source_ids}")
+            print(f"  hard_flag_candidates: {len(result.hard_flag_candidates)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -297,6 +369,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_source_packet.add_argument("--forms", default="10-K,10-Q")
     p_source_packet.add_argument("--limit-per-form", type=int, default=2)
     p_source_packet.set_defaults(func=cmd_build_source_packet)
+
+    p_analyze = sub.add_parser("analyze")
+    p_analyze.add_argument("tickers", nargs="+")
+    p_analyze.set_defaults(func=cmd_analyze)
 
     return parser
 

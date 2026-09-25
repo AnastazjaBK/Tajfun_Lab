@@ -127,11 +127,35 @@ class SourcesConfig(BaseModel):
     ir_allowlist: list[IrAllowlistEntry] = Field(default_factory=list)
 
 
+class LlmConfig(BaseModel):
+    model: str
+    escalation_model: str | None = None
+    max_output_tokens: int
+    schema_version: str
+    reject_on_schema_violation: bool = True
+    allow_citations_outside_source_packet: bool = False
+    api_key_env_var: str
+
+    def resolve_api_key(self) -> str:
+        """Ten sam wzorzec co `DataProviderConfig.resolve_api_key` /
+        `SecEdgarConfig.resolve_user_agent` — sekret czytany ze zmiennej
+        środowiskowej wskazanej w configu, nigdy zapisany w repo."""
+        key = os.environ.get(self.api_key_env_var)
+        if not key:
+            raise RuntimeError(
+                f"Brak zmiennej środowiskowej '{self.api_key_env_var}' z kluczem API "
+                "Claude. Ustaw ją lokalnie (.env, niecommitowany) albo jako sekret "
+                "repozytorium dla GitHub Actions."
+            )
+        return key
+
+
 class AppConfig(BaseModel):
     universe: UniverseConfig
     decline_scanner: DeclineScannerConfig
     prefilter: PrefilterConfig
     sources: SourcesConfig
+    llm: LlmConfig
     data_provider: DataProviderConfig
 
 

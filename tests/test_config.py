@@ -77,3 +77,25 @@ def test_resolve_user_agent_reads_env_var(monkeypatch):
     config = load_config(DEFAULT_CONFIG_PATH)
     monkeypatch.setenv(config.sources.sec_edgar.user_agent_env_var, "Tajfun Lab test@example.com")
     assert config.sources.sec_edgar.resolve_user_agent() == "Tajfun Lab test@example.com"
+
+
+def test_llm_config_loads_expected_defaults():
+    config = load_config(DEFAULT_CONFIG_PATH)
+    assert config.llm.model == "claude-sonnet-5"
+    assert config.llm.schema_version == "1.0"
+    assert config.llm.reject_on_schema_violation is True
+    assert config.llm.allow_citations_outside_source_packet is False
+    assert config.llm.api_key_env_var == "ANTHROPIC_API_KEY"
+
+
+def test_resolve_llm_api_key_missing_env_var_raises_clear_error(monkeypatch):
+    config = load_config(DEFAULT_CONFIG_PATH)
+    monkeypatch.delenv(config.llm.api_key_env_var, raising=False)
+    with pytest.raises(RuntimeError, match="ANTHROPIC_API_KEY"):
+        config.llm.resolve_api_key()
+
+
+def test_resolve_llm_api_key_reads_env_var(monkeypatch):
+    config = load_config(DEFAULT_CONFIG_PATH)
+    monkeypatch.setenv(config.llm.api_key_env_var, "dummy-claude-key")
+    assert config.llm.resolve_api_key() == "dummy-claude-key"

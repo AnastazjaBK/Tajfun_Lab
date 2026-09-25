@@ -70,6 +70,20 @@ sources:
   # góry dla całego uniwersum.
   ir_allowlist: []
 
+llm:
+  model: claude-sonnet-5   # zmiana modelu = zmiana configu, bez zmian w kodzie (Decyzja D6)
+  escalation_model: null   # np. claude-opus-5 — ręczny re-run niejednoznacznych analiz,
+                            # włączany dopiero jeśli testy pokażą realną poprawę jakości;
+                            # NIE domyślny model bez dowodu (D6)
+  max_output_tokens: 4000
+  schema_version: "1.0"
+  reject_on_schema_violation: true
+  allow_citations_outside_source_packet: false   # bariera przeciw halucynacji, BLOCKER 3
+  # Ten sam wzorzec co FMP_API_KEY/SEC_EDGAR_USER_AGENT: sekret przez
+  # zmienną środowiskową, nigdy w configu/repo. Ustaw ANTHROPIC_API_KEY
+  # lokalnie (.env) albo jako sekret repozytorium GitHub Actions.
+  api_key_env_var: ANTHROPIC_API_KEY
+
 data_provider:
   fundamentals_prices: fmp
   plan: free                # aktualny plan właściciela; Starter odłożony (patrz v1.9)
