@@ -585,11 +585,24 @@ def cmd_analyze_sp500_history(args: argparse.Namespace) -> int:
         return 1
 
     result = resolve_tickers_to_cik(tickers, sec_map)
+    direct_count = len(result.resolved) - len(result.resolved_via_format_variant)
     print(f"\nRozwiązanie ticker->CIK (mapowanie SEC AKTUALNE NA DZIŚ, nie point-in-time):")
-    print(f"  RESOLVED: {len(result.resolved)}/{len(tickers)}")
+    print(f"  RESOLVED: {len(result.resolved)}/{len(tickers)} "
+          f"({direct_count} bezpośrednio, {len(result.resolved_via_format_variant)} przez wariant formatu)")
+    if result.resolved_via_format_variant:
+        pairs = ", ".join(f"{t}->{v}" for t, v in sorted(result.resolved_via_format_variant.items()))
+        print(f"    Rozwiązane przez wariant formatu (kropka/myślnik): {pairs}")
     print(f"  CIK_UNRESOLVED: {len(result.unresolved)}/{len(tickers)}")
-    if result.unresolved:
-        print(f"  Nierozwiązane tickery: {', '.join(result.unresolved)}")
+
+    still_open_tickers = {iv.ticker for iv in still_open}
+    unresolved_still_open = [t for t in result.unresolved if t in still_open_tickers]
+    unresolved_historical_only = [t for t in result.unresolved if t not in still_open_tickers]
+    print(f"    z tego wciąż aktywne dziś (w {len(still_open)} otwartych): {len(unresolved_still_open)}")
+    print(f"    z tego tylko historyczne (opuściły okno przed końcem źródła): {len(unresolved_historical_only)}")
+    if unresolved_still_open:
+        print(f"  Nierozwiązane, a wciąż aktywne (priorytet do naprawy): {', '.join(sorted(unresolved_still_open))}")
+    if unresolved_historical_only:
+        print(f"  Nierozwiązane, tylko historyczne: {', '.join(sorted(unresolved_historical_only))}")
     return 0
 
 

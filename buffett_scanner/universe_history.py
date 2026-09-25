@@ -121,25 +121,59 @@ def build_ticker_intervals(window_rows: list[ComponentsRow], cutoff_date: str) -
 
 @dataclass(frozen=True)
 class ResolutionResult:
-    resolved: dict[str, str]  # ticker -> cik
+    resolved: dict[str, str]  # ticker (oryginalna pisownia źródła) -> cik
+    resolved_via_format_variant: dict[str, str]  # ticker -> wariant zapisu, który faktycznie dopasował (przejrzystość)
     unresolved: tuple[str, ...]  # posortowane tickery bez pewnego mapowania
+
+
+def _ticker_format_variants(ticker: str) -> list[str]:
+    """Warianty zapisu tickera klasy akcji — SEC i fja05680 mogą różnie
+    zapisywać ten sam ticker (np. `BRK.B` vs `BRK-B`, Berkshire Hathaway
+    Class B). To NIE jest zgadywanie tożsamości spółki, tylko próba
+    innego formatu TEGO SAMEGO ciągu znaków — jeśli żaden wariant nie
+    trafi w mapowanie, ticker zostaje `CIK_UNRESOLVED` jak dotychczas."""
+    variants = []
+    if "." in ticker:
+        variants.append(ticker.replace(".", "-"))
+    if "-" in ticker:
+        variants.append(ticker.replace("-", "."))
+    return variants
 
 
 def resolve_tickers_to_cik(tickers: set[str], sec_ticker_map: dict[str, str]) -> ResolutionResult:
     """Rozwiązuje tickery na CIK wyłącznie przez potwierdzone mapowanie
     SEC (`sec_ticker_map`, np. z `company_tickers.json`, aktualne NA
-    DZIŚ — nie punkt-w-czasie). Ticker nieobecny w mapowaniu ->
-    `CIK_UNRESOLVED`, NIGDY nie zgadywany ani przypisywany domyślnie.
-    Uwaga (do jawnego raportowania, nie ukrywania): nawet "resolved"
-    niesie rezydualne ryzyko recyklingu tickera, bo `sec_ticker_map`
-    jest dzisiejszym stanem, nie historycznym — to pierwszy przebieg
-    diagnostyczny, nie finalna walidacja tożsamości."""
+    DZIŚ — nie punkt-w-czasie). Próbuje najpierw dokładnego dopasowania,
+    potem wariantów formatu zapisu (kropka/myślnik — patrz
+    `_ticker_format_variants`), zawsze jawnie raportując, który wariant
+    faktycznie zadziałał. Ticker nieobecny w mapowaniu pod żadnym
+    wariantem -> `CIK_UNRESOLVED`, NIGDY nie zgadywany ani przypisywany
+    domyślnie. Uwaga (do jawnego raportowania, nie ukrywania): nawet
+    "resolved" niesie rezydualne ryzyko recyklingu tickera, bo
+    `sec_ticker_map` jest dzisiejszym stanem, nie historycznym — to
+    pierwszy przebieg diagnostyczny, nie finalna walidacja tożsamości.
+    Ticker, który realnie zmienił nazwę (np. FB -> META), NIE zostanie
+    rozwiązany tą metodą — to inny, trudniejszy problem (wymaga
+    historycznego crosswalka, nie samej normalizacji formatu)."""
     resolved: dict[str, str] = {}
+    resolved_via_variant: dict[str, str] = {}
     unresolved: list[str] = []
     for ticker in sorted(tickers):
         cik = sec_ticker_map.get(ticker)
         if cik:
             resolved[ticker] = cik
+            continue
+        matched_variant = None
+        for variant in _ticker_format_variants(ticker):
+            cik = sec_ticker_map.get(variant)
+            if cik:
+                matched_variant = variant
+                break
+        if cik:
+            resolved[ticker] = cik
+            resolved_via_variant[ticker] = matched_variant
         else:
             unresolved.append(ticker)
-    return ResolutionResult(resolved=resolved, unresolved=tuple(unresolved))
+    return ResolutionResult(
+        resolved=resolved, resolved_via_format_variant=resolved_via_variant, unresolved=tuple(unresolved)
+    )

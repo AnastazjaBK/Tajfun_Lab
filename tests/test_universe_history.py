@@ -148,12 +148,47 @@ def test_resolve_tickers_to_cik_splits_resolved_and_unresolved():
     result = resolve_tickers_to_cik({"AAPL", "MSFT", "DELISTEDCO"}, sec_map)
     assert result.resolved == {"AAPL": "0000320193", "MSFT": "0000789019"}
     assert result.unresolved == ("DELISTEDCO",)
+    assert result.resolved_via_format_variant == {}
 
 
 def test_resolve_tickers_to_cik_never_fabricates_a_cik_for_unknown_ticker():
     result = resolve_tickers_to_cik({"NOPE"}, {})
     assert result.resolved == {}
     assert result.unresolved == ("NOPE",)
+
+
+def test_resolve_tickers_to_cik_falls_back_to_dash_variant_of_dotted_ticker():
+    """Realny przypadek z Fazy 5.2: BRK.B (Berkshire Hathaway Class B)
+    nie trafia bezpośrednio, ale mapowanie SEC ma go pod BRK-B."""
+    sec_map = {"BRK-B": "0001067983"}
+    result = resolve_tickers_to_cik({"BRK.B"}, sec_map)
+    assert result.resolved == {"BRK.B": "0001067983"}
+    assert result.resolved_via_format_variant == {"BRK.B": "BRK-B"}
+    assert result.unresolved == ()
+
+
+def test_resolve_tickers_to_cik_falls_back_to_dot_variant_of_dashed_ticker():
+    sec_map = {"FOO.A": "0000000001"}
+    result = resolve_tickers_to_cik({"FOO-A"}, sec_map)
+    assert result.resolved == {"FOO-A": "0000000001"}
+    assert result.resolved_via_format_variant == {"FOO-A": "FOO.A"}
+
+
+def test_resolve_tickers_to_cik_direct_match_takes_priority_over_variant():
+    sec_map = {"BRK.B": "0001111111", "BRK-B": "0002222222"}
+    result = resolve_tickers_to_cik({"BRK.B"}, sec_map)
+    assert result.resolved == {"BRK.B": "0001111111"}
+    assert result.resolved_via_format_variant == {}
+
+
+def test_resolve_tickers_to_cik_ticker_rename_is_not_recovered_by_format_variant():
+    """FB -> META to zmiana nazwy/tickera, nie formatu zapisu — nie
+    powinna być (i nie jest) naprawiana przez normalizację kropka/myślnik,
+    bo to inny problem (wymaga crosswalka historycznego)."""
+    sec_map = {"META": "0001326801"}
+    result = resolve_tickers_to_cik({"FB"}, sec_map)
+    assert result.resolved == {}
+    assert result.unresolved == ("FB",)
 
 
 def test_resolve_tickers_to_cik_unresolved_is_sorted():
