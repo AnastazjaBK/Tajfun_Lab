@@ -76,6 +76,41 @@ def window_from_cutoff(rows: list[ComponentsRow], cutoff_date: str) -> list[Comp
     return rows[baseline_idx:]
 
 
+def tickers_as_of(rows: list[ComponentsRow], as_of_date: str) -> set[str] | None:
+    """Zbiór tickerów wg fja05680 na dany dzień — najnowszy wiersz z
+    datą <= as_of_date (ten sam wzorzec co `value_as_of` z Fazy 5.1).
+    `None`, jeśli źródło nie ma żadnego wiersza sprzed/na tę datę —
+    nigdy nie zgadujemy stanu sprzed pierwszego dostępnego wiersza.
+    Używane do walidacji krzyżowej z niezależnymi źródłami (Faza 5.2,
+    research v1.27 — np. holdingi IVV na tę samą datę)."""
+    candidate: ComponentsRow | None = None
+    for row in rows:
+        if row.date <= as_of_date:
+            candidate = row
+        else:
+            break
+    return set(candidate.tickers) if candidate else None
+
+
+@dataclass(frozen=True)
+class TickerSetComparison:
+    count_a: int
+    count_b: int
+    intersection_count: int
+    only_in_a: tuple[str, ...]
+    only_in_b: tuple[str, ...]
+
+
+def compare_ticker_sets(a: set[str], b: set[str]) -> TickerSetComparison:
+    """Porównanie dwóch zbiorów tickerów (np. IVV vs fja05680 na tę samą
+    datę) — czyste liczenie, żadnej interpretacji przyczyn rozbieżności
+    (to wymaga kontekstu biznesowego, nie samej arytmetyki zbiorów)."""
+    return TickerSetComparison(
+        count_a=len(a), count_b=len(b), intersection_count=len(a & b),
+        only_in_a=tuple(sorted(a - b)), only_in_b=tuple(sorted(b - a)),
+    )
+
+
 def distinct_tickers(window_rows: list[ComponentsRow]) -> set[str]:
     """Zbiór wszystkich tickerów pojawiających się w którymkolwiek
     wierszu okna (baseline + kolejne zmiany)."""

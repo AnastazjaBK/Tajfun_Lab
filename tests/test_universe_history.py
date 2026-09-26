@@ -7,9 +7,11 @@ from __future__ import annotations
 from buffett_scanner.universe_history import (
     ComponentsRow,
     build_ticker_intervals,
+    compare_ticker_sets,
     distinct_tickers,
     parse_components_csv,
     resolve_tickers_to_cik,
+    tickers_as_of,
     window_from_cutoff,
 )
 
@@ -85,6 +87,42 @@ def test_window_from_cutoff_exact_cutoff_date_is_the_baseline():
 def test_distinct_tickers_union_across_all_rows():
     window = [_row("2012-01-01", "A", "B"), _row("2012-06-01", "B", "C")]
     assert distinct_tickers(window) == {"A", "B", "C"}
+
+
+# ---------------------------------------------------------------------------
+# tickers_as_of — dla walidacji krzyżowej z niezależnymi źródłami (IVV)
+# ---------------------------------------------------------------------------
+
+
+def test_tickers_as_of_returns_latest_row_on_or_before_date():
+    rows = [_row("2012-01-01", "A", "B"), _row("2012-06-01", "A", "C")]
+    assert tickers_as_of(rows, "2012-12-31") == {"A", "C"}
+
+
+def test_tickers_as_of_exact_date_is_inclusive():
+    rows = [_row("2012-06-01", "A", "C")]
+    assert tickers_as_of(rows, "2012-06-01") == {"A", "C"}
+
+
+def test_tickers_as_of_none_when_nothing_before_date():
+    rows = [_row("2012-06-01", "A")]
+    assert tickers_as_of(rows, "2012-01-01") is None
+
+
+# ---------------------------------------------------------------------------
+# compare_ticker_sets
+# ---------------------------------------------------------------------------
+
+
+def test_compare_ticker_sets_computes_counts_and_differences():
+    a = {"AAPL", "MSFT", "KO"}
+    b = {"AAPL", "MSFT", "IBM"}
+    result = compare_ticker_sets(a, b)
+    assert result.count_a == 3
+    assert result.count_b == 3
+    assert result.intersection_count == 2
+    assert result.only_in_a == ("KO",)
+    assert result.only_in_b == ("IBM",)
 
 
 # ---------------------------------------------------------------------------
