@@ -1,0 +1,30 @@
+name: Phase 5.2 IVV Proof Run (independent validation source)
+
+# Reczne uruchomienie z przegladarki, jak poprzednie fazy. Sprawdza
+# empirycznie, czy historyczne holdingi ETF iShares Core S&P 500 (IVV)
+# moga sluzyc jako niezalezne (od fja05680/sp500 i Wikipedii) drugie
+# zrodlo do walidacji universe_membership 2012+ (Faza 5.2, research
+# v1.27 design review - FMP okazal sie zablokowany planem, bez
+# potwierdzonego kosztu, wiec wlascicielka zdecydowala szukac
+# darmowej alternatywy zamiast kupowac).
+#
+# WYLACZNIE DIAGNOSTYCZNE - nie zapisuje nic do bazy, nie buduje
+# finalnego adaptera. Zadnego sekretu, zadnego kosztu - ishares.com i
+# fja05680/sp500 (GitHub raw) sa oba darmowe, bez autoryzacji.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - run: python -m buffett_scanner.providers.ivv_holdings_smoketest
