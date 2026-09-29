@@ -167,3 +167,56 @@ def test_get_company_tickers_raises_on_non_200(monkeypatch):
     monkeypatch.setattr(client._client, "get", lambda url: _FakeResponse(404))
     with pytest.raises(SecEdgarError):
         client.get_company_tickers()
+
+
+def test_get_company_tickers_full_includes_title(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        "1": {"cik_str": 789019, "ticker": "MSFT", "title": "MICROSOFT CORP"},
+    }
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    mapping = client.get_company_tickers_full()
+    assert mapping == {
+        "AAPL": {"cik": "320193", "title": "Apple Inc."},
+        "MSFT": {"cik": "789019", "title": "MICROSOFT CORP"},
+    }
+
+
+def test_get_company_tickers_full_defaults_missing_title_to_empty_string(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {"0": {"cik_str": 320193, "ticker": "AAPL"}}
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    mapping = client.get_company_tickers_full()
+    assert mapping == {"AAPL": {"cik": "320193", "title": ""}}
+
+
+def test_get_company_tickers_full_skips_entries_missing_ticker_or_cik(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+        "1": {"cik_str": None, "ticker": "BROKEN", "title": "Broken Co"},
+        "2": {"ticker": "NOCIK", "title": "No Cik Co"},
+    }
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    mapping = client.get_company_tickers_full()
+    assert mapping == {"AAPL": {"cik": "320193", "title": "Apple Inc."}}
+
+
+def test_get_company_tickers_is_cik_only_view_of_full_mapping(monkeypatch):
+    """`get_company_tickers` musi pozostać zgodny wstecznie po
+    refaktoryzacji na `get_company_tickers_full` — sam CIK, bez title."""
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {
+        "0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."},
+    }
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    assert client.get_company_tickers() == {"AAPL": "320193"}

@@ -1,0 +1,34 @@
+name: Phase 5.2 CIK Revalidation (fja05680 canonical vs FMP validator)
+
+# Reczne uruchomienie z przegladarki, jak poprzednie fazy. Domkniecie
+# OPEN BLOCKER 2 (design review v1.34) po zatwierdzeniu wynikow kroku 3:
+# rozwiazanie CIK dla obu zrodel, reguła tolerancji dat, porownanie pol
+# date vs dateAdded, ponowna walidacja na poziomie CIK dla okna 2012+
+# (Decyzja D14 - nie rozszerzamy zakresu przed 2012).
+#
+# WYLACZNIE DIAGNOSTYCZNE - nie zapisuje nic do bazy, nie buduje
+# finalnego universe_membership ani zadnej tabeli/migracji.
+#
+# Wymaga sekretow FMP_API_KEY i SEC_EDGAR_USER_AGENT (oba juz istnieja).
+# fja05680/sp500 jest darmowe, bez klucza.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: CIK revalidation fja05680 vs FMP (domkniecie OPEN BLOCKER 2)
+        run: python -m buffett_scanner.providers.universe_cik_revalidation_smoketest
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}

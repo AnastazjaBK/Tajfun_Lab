@@ -152,19 +152,24 @@ class SecEdgarClient:
         except ValueError as exc:
             raise SecEdgarError(f"SEC EDGAR zwrócił niepoprawny JSON dla company facts CIK={cik}") from exc
 
-    def get_company_tickers(self) -> dict[str, str]:
-        """Aktualne (DZISIEJSZE, nie point-in-time) mapowanie ticker->CIK
-        z `company_tickers.json` — podstawa pierwszego przebiegu
-        diagnostycznego rozwiązywania tożsamości w Fazie 5.2
-        (`universe_history.resolve_tickers_to_cik`). Zwraca `{ticker:
-        cik_jako_string}`, cik BEZ wiodących zer (jak w reszcie
-        projektu). Surowy JSON to `{"0": {"cik_str": ..., "ticker":
-        ..., "title": ...}, "1": {...}, ...}` — wiersz bez `cik_str`
-        lub `ticker` jest pomijany, nigdy nie fabrykujemy brakującego
-        pola. NIE jest to mapowanie historyczne — ticker mógł w
-        przeszłości należeć do innej spółki (recykling tickerów),
-        więc rozwiązanie przez tę metodę to pierwszy przebieg
-        diagnostyczny, nie finalna walidacja tożsamości point-in-time."""
+    def get_company_tickers_full(self) -> dict[str, dict[str, str]]:
+        """Aktualne (DZISIEJSZE, nie point-in-time) mapowanie ticker ->
+        {cik, title} z `company_tickers.json`. Rozszerzenie
+        `get_company_tickers()` o `title` (oficjalna, zarejestrowana w
+        SEC nazwa spółki) — potrzebne w Fazie 5.2 do wykrywania
+        recyklingu tickerów przy rozwiązywaniu zdarzeń FMP (porównanie
+        nazwy spółki z FMP `addedSecurity`/`removedSecurity` względem
+        tego tytułu jako dodatkowy sprawdzian wiarygodności, niezależny
+        od samego ciągu znaków tickera). Surowy JSON to `{"0":
+        {"cik_str": ..., "ticker": ..., "title": ...}, "1": {...}, ...}`
+        — wiersz bez `cik_str` lub `ticker` jest pomijany, nigdy nie
+        fabrykujemy brakującego pola. Brak `title` w wierszu -> `title`
+        pustym stringiem (nie blokuje rozwiązania CIK, tylko wyklucza
+        ten wpis z kontroli nazwy). NIE jest to mapowanie historyczne —
+        ticker mógł w przeszłości należeć do innej spółki (recykling
+        tickerów), więc rozwiązanie przez tę metodę to pierwszy
+        przebieg diagnostyczny, nie finalna walidacja tożsamości
+        point-in-time."""
         resp = self._get(COMPANY_TICKERS_URL)
         if resp.status_code != 200:
             raise SecEdgarError(
@@ -175,11 +180,20 @@ class SecEdgarClient:
         except ValueError as exc:
             raise SecEdgarError("SEC EDGAR zwrócił niepoprawny JSON dla company_tickers.json") from exc
 
-        mapping: dict[str, str] = {}
+        mapping: dict[str, dict[str, str]] = {}
         for entry in data.values():
             ticker = entry.get("ticker")
             cik = entry.get("cik_str")
             if not ticker or cik is None:
                 continue
-            mapping[ticker] = str(cik)
+            mapping[ticker] = {"cik": str(cik), "title": entry.get("title") or ""}
         return mapping
+
+    def get_company_tickers(self) -> dict[str, str]:
+        """Aktualne (DZISIEJSZE, nie point-in-time) mapowanie ticker->CIK
+        — podzbiór `get_company_tickers_full()` bez `title`, zachowany
+        dla wstecznej zgodności z istniejącymi wywołaniami
+        (`universe_history.resolve_tickers_to_cik`). Zwraca `{ticker:
+        cik_jako_string}`, cik BEZ wiodących zer (jak w reszcie
+        projektu)."""
+        return {ticker: info["cik"] for ticker, info in self.get_company_tickers_full().items()}

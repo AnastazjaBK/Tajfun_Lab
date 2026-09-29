@@ -161,7 +161,7 @@ class ResolutionResult:
     unresolved: tuple[str, ...]  # posortowane tickery bez pewnego mapowania
 
 
-def _ticker_format_variants(ticker: str) -> list[str]:
+def ticker_format_variants(ticker: str) -> list[str]:
     """Warianty zapisu tickera klasy akcji — SEC i fja05680 mogą różnie
     zapisywać ten sam ticker (np. `BRK.B` vs `BRK-B`, Berkshire Hathaway
     Class B). To NIE jest zgadywanie tożsamości spółki, tylko próba
@@ -180,7 +180,7 @@ def resolve_tickers_to_cik(tickers: set[str], sec_ticker_map: dict[str, str]) ->
     SEC (`sec_ticker_map`, np. z `company_tickers.json`, aktualne NA
     DZIŚ — nie punkt-w-czasie). Próbuje najpierw dokładnego dopasowania,
     potem wariantów formatu zapisu (kropka/myślnik — patrz
-    `_ticker_format_variants`), zawsze jawnie raportując, który wariant
+    `ticker_format_variants`), zawsze jawnie raportując, który wariant
     faktycznie zadziałał. Ticker nieobecny w mapowaniu pod żadnym
     wariantem -> `CIK_UNRESOLVED`, NIGDY nie zgadywany ani przypisywany
     domyślnie. Uwaga (do jawnego raportowania, nie ukrywania): nawet
@@ -199,7 +199,7 @@ def resolve_tickers_to_cik(tickers: set[str], sec_ticker_map: dict[str, str]) ->
             resolved[ticker] = cik
             continue
         matched_variant = None
-        for variant in _ticker_format_variants(ticker):
+        for variant in ticker_format_variants(ticker):
             cik = sec_ticker_map.get(variant)
             if cik:
                 matched_variant = variant
