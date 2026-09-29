@@ -84,18 +84,51 @@ def main() -> int:
             print(f"  {candidate_path}: {outcome}")
         if path is None:
             print("ŻADEN kandydat nie zadziałał na obecnym planie/kluczu.")
+        elif not rows:
+            print(f"\nZadziałała ścieżka: {path}, ale odpowiedź jest pustą listą — brak danych do analizy.")
         else:
             print(f"\nZadziałała ścieżka: {path}")
             print(f"Liczba wierszy: {len(rows)}")
-            if rows:
-                print(f"Pierwszy wiersz (kształt pól): {rows[0]}")
-                dates = sorted(r.get("date") for r in rows if r.get("date"))
-                if dates:
-                    print(f"Zakres dat w odpowiedzi: {dates[0]} .. {dates[-1]}")
-                    reaches_2012 = dates[0] <= "2012-01-01"
-                    print(f"Sięga do 2012-01-01 lub wcześniej: {reaches_2012}")
-                else:
-                    print("BRAK pola 'date' w żadnym wierszu — sprawdź surowy kształt wyżej.")
+            print(f"Pierwszy wiersz (kształt pól): {rows[0]}")
+            print(f"Ostatni wiersz (kształt pól): {rows[-1]}")
+
+            all_keys: set[str] = set()
+            for r in rows:
+                all_keys.update(r.keys())
+            print(f"Wszystkie klucze widziane w CAŁYM zbiorze (nie tylko 1. wiersz): {sorted(all_keys)}")
+
+            dates = sorted(r.get("date") for r in rows if r.get("date"))
+            if dates:
+                print(f"Zakres dat w polu 'date': {dates[0]} .. {dates[-1]}")
+                print(f"Sięga do 2012-01-01 lub wcześniej: {dates[0] <= '2012-01-01'}")
+            else:
+                print("BRAK pola 'date' w żadnym wierszu.")
+
+            no_date = sum(1 for r in rows if not r.get("date"))
+            print(f"Wierszy BEZ pola 'date' (anomalia): {no_date}")
+
+            for ticker_field in ("symbol", "removedTicker"):
+                values = [r.get(ticker_field) for r in rows if r.get(ticker_field)]
+                distinct = set(values)
+                print(f"Pole '{ticker_field}': {len(values)} niepustych wartości, {len(distinct)} unikalnych")
+
+            symbols = {r.get("symbol") for r in rows if r.get("symbol")}
+            removed = {r.get("removedTicker") for r in rows if r.get("removedTicker")}
+            print(f"Suma unikalnych tickerów (symbol ∪ removedTicker): {len(symbols | removed)}")
+
+            no_ticker_at_all = sum(
+                1 for r in rows if not r.get("symbol") and not r.get("removedTicker")
+            )
+            print(f"Wierszy bez ŻADNEGO tickera (ani symbol, ani removedTicker) — anomalia: {no_ticker_at_all}")
+
+            seen = {}
+            dup_count = 0
+            for r in rows:
+                key = (r.get("date"), r.get("symbol"), r.get("removedTicker"))
+                if key in seen:
+                    dup_count += 1
+                seen[key] = seen.get(key, 0) + 1
+            print(f"Dokładne duplikaty (date, symbol, removedTicker) — anomalia: {dup_count}")
 
     return 0
 
