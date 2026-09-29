@@ -1,0 +1,32 @@
+name: Phase 5.2 FMP vs fja05680 Comparison
+
+# Reczne uruchomienie z przegladarki, jak poprzednie fazy. Krok 3
+# Fazy 5.2 (OPEN BLOCKER 2, design review v1.31): walidacja krzyzowa
+# FMP historical-sp500-constituent (teraz dostepny na planie Premium)
+# vs fja05680/sp500 dla okna 2012+.
+#
+# WYLACZNIE DIAGNOSTYCZNE - nie zapisuje nic do bazy, nie buduje
+# finalnego universe_membership.
+#
+# Wymaga sekretu FMP_API_KEY (juz istnieje, plan Premium aktywowany
+# przez wlascicielke). fja05680/sp500 jest darmowe, bez klucza.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: fmp-vs-fja05680 comparison (Faza 5.2 krok 3)
+        run: python -m buffett_scanner.providers.fmp_sp500_comparison_smoketest
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
