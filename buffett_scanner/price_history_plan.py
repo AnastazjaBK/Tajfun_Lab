@@ -1,12 +1,15 @@
 """Plan pobrania historycznych cen (Faza 5.3, Price Data Proof Run) —
 czysta logika, zero I/O. FMP `historical-price-eod/full` jest keyowany
-po tickerze, nie po CIK, więc backfill musi iterować po PRZEDZIAŁACH
-TICKERA (`universe_history.TickerInterval`, poziom przed scaleniem do
-CIK w `universe_membership_build`), nie po CIK wprost — inaczej
-zapytanie pod dzisiejszym tickerem spółki, która zmieniła nazwę (np.
-META), mogłoby nie zwrócić historii sprzed zmiany zapisanej pod starym
-symbolem (FB). Jeden `PriceFetchTask` = jedno zapytanie do FMP dla
-jednego tickera w jego własnym oknie aktywności."""
+po tickerze, nie po CIK. Model v1.37 (po empirycznym znalezisku): dla
+KAŻDEGO CIK pytamy o KAŻDY jego historyczny ticker w PEŁNYM oknie
+aktywności tego CIK (nie tylko w oknie tego konkretnego tickera) —
+FMP bywa niekonsekwentne w tym, pod którym symbolem trzyma historię
+spółki po zmianie tickera (czasem cała historia jest wyłącznie pod
+najnowszym symbolem, np. META; czasem każdy symbol poprawnie zwraca
+tylko swój własny okres, np. ANTM/ELV) — więc pytamy o oba, żeby nie
+zgadywać, i scalamy wynik po (cik, date) przez
+`merge_ticker_price_rows`, z jawnym wykrywaniem konfliktów zamiast
+cichego wyboru jednej wartości."""
 
 from __future__ import annotations
 
@@ -102,21 +105,43 @@ class PriceMergeResult:
     conflicts: list[PriceRowConflict]
 
 
-def _rows_price_equal(a: dict, b: dict, *, tolerance: float = 0.01) -> bool:
+def _rows_price_equal(
+    a: dict, b: dict, *, relative_tolerance: float = 0.001, absolute_floor: float = 0.01
+) -> bool:
     """Dwa wiersze cenowe są 'zgodne', jeśli open/high/low/close/
-    adj_close różnią się o mniej niż `tolerance` (tolerancja na szum
-    zaokrągleń dostawcy, nie na realne rozbieżności danych). Pole
-    obecne w jednym wierszu a brakujące w drugim -> NIEZGODNE (nie
-    zgadujemy, że brak wartości znaczy to samo co jej obecność)."""
+    adj_close różnią się o mniej niż WZGLĘDNA tolerancja (domyślnie
+    0,1% wartości), z bezwzględnym minimum `absolute_floor` (domyślnie
+    1 cent) dla bardzo tanich instrumentów. Poprawka v1.37b (po
+    realnym uruchomieniu 2026-09-30): stała tolerancja bezwzględna
+    (0.01) była błędnie skalibrowana — zbyt luźna dla groszowych
+    spółek, zbyt ostra dla spółek wycenianych w setkach/tysiącach
+    dolarów (gdzie 1 cent to szum zaokrąglenia dostawcy, nie realna
+    rozbieżność). Pole obecne w jednym wierszu a brakujące w drugim ->
+    NIEZGODNE (nie zgadujemy, że brak wartości znaczy to samo co jej
+    obecność)."""
     for field in ("open", "high", "low", "close", "adj_close"):
         va, vb = a.get(field), b.get(field)
         if va is None or vb is None:
             if va != vb:
                 return False
             continue
-        if abs(va - vb) > tolerance:
+        allowed = max(absolute_floor, relative_tolerance * max(abs(va), abs(vb)))
+        if abs(va - vb) > allowed:
             return False
     return True
+
+
+def diff_price_fields(a: dict, b: dict) -> dict[str, tuple[float | None, float | None]]:
+    """Zwraca WSZYSTKIE pola open/high/low/close/adj_close, które różnią
+    się między dwoma wierszami (nawet w granicach tolerancji) — do
+    diagnostyki konfliktów w raportach Proof Run, żeby nie ukrywać, w
+    którym KONKRETNIE polu leży rozbieżność (samo `close` bywa zgodne,
+    podczas gdy `open`/`high`/`low`/`adj_close` się różnią)."""
+    return {
+        field: (a.get(field), b.get(field))
+        for field in ("open", "high", "low", "close", "adj_close")
+        if a.get(field) != b.get(field)
+    }
 
 
 def merge_ticker_price_rows(cik: str, rows_by_ticker: dict[str, list[dict]]) -> PriceMergeResult:

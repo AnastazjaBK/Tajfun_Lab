@@ -7,6 +7,7 @@ from buffett_scanner.price_history_plan import (
     PriceFetchTask,
     build_price_fetch_plan,
     detect_large_day_over_day_moves,
+    diff_price_fields,
     merge_ticker_price_rows,
 )
 from buffett_scanner.universe_history import TickerInterval
@@ -201,8 +202,48 @@ def test_merge_non_overlapping_dates_from_different_tickers_both_kept():
 def test_merge_small_difference_within_tolerance_is_not_a_conflict():
     rows_by_ticker = {
         "FB": [_price_row("2020-01-01", 200.00)],
-        "META": [_price_row("2020-01-01", 200.005)],  # różnica 0.005 < domyślna tolerancja 0.01
+        "META": [_price_row("2020-01-01", 200.005)],  # różnica 0.005 < podłoga bezwzględna 0.01
     }
     result = merge_ticker_price_rows("0001326801", rows_by_ticker)
     assert len(result.merged) == 1
     assert result.conflicts == []
+
+
+def test_merge_relative_tolerance_absorbs_rounding_noise_on_expensive_stock():
+    """Realny przypadek z Proof Run (2026-09-30, ANTM/ELV ~$180-260):
+    różnica 0.05 na akcji wycenianej ~$726 to 0,007% — szum zaokrąglenia
+    dostawcy, nie realna rozbieżność. Stara stała tolerancja 0.01
+    błędnie oznaczyłaby to jako konflikt; względna tolerancja (0,1%)
+    poprawnie to akceptuje."""
+    rows_by_ticker = {
+        "FB": [_price_row("2025-06-26", 726.09)],
+        "META": [_price_row("2025-06-26", 726.14)],  # różnica 0.05
+    }
+    result = merge_ticker_price_rows("0001326801", rows_by_ticker)
+    assert len(result.merged) == 1
+    assert result.conflicts == []
+
+
+def test_merge_relative_tolerance_still_catches_conflict_on_cheap_stock():
+    """Podłoga bezwzględna (0.01) chroni tanie akcje: przy cenie ~$2,00
+    różnica 0.02 to 1% — realna rozbieżność, nie szum — wciąż
+    wykrywana mimo tolerancji względnej."""
+    rows_by_ticker = {
+        "FB": [_price_row("2020-01-01", 2.00)],
+        "META": [_price_row("2020-01-01", 2.02)],
+    }
+    result = merge_ticker_price_rows("0001326801", rows_by_ticker)
+    assert result.merged == []
+    assert len(result.conflicts) == 1
+
+
+def test_diff_price_fields_reports_only_mismatching_fields():
+    """Diagnostyka konfliktu: `close` może być zgodne, podczas gdy
+    `open`/`high`/`low`/`adj_close` się różnią — raport musi to pokazać,
+    nie tylko `close` (defekt raportowania znaleziony w realnym Proof
+    Run: konflikt ANTM/ELV z identycznym `close` był nie do
+    zdiagnozowania bez tej funkcji)."""
+    row_a = {"date": "2017-10-13", "open": 180.0, "high": 184.0, "low": 179.0, "close": 183.83, "adj_close": 183.83}
+    row_b = {"date": "2017-10-13", "open": 181.5, "high": 184.0, "low": 179.0, "close": 183.83, "adj_close": 183.83}
+    diff = diff_price_fields(row_a, row_b)
+    assert diff == {"open": (180.0, 181.5)}

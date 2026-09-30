@@ -21,10 +21,19 @@ sekrety). Sprawdza empirycznie (zlecone przez właścicielkę, 2026-09-30):
    FB/META (potwierdzony rename), ANTM/ELV (drugi potwierdzony rename,
    Anthem->Elevance Health 2022), AAPL (kontrola bez zmiany tickera),
    BBBY (kontrola: ochrona przed recyklingiem tickera po opuszczeniu
-   indeksu w 2017).
+   indeksu w 2017). Przy KAŻDYM konflikcie: pełna lista różniących się
+   pól (v1.37b — drugie uruchomienie pokazało konflikt z identycznym
+   `close`, ale różnym innym polem, niewidoczny w poprzednim raporcie)
+   oraz bezpośrednie sprawdzenie DZISIEJSZEGO profilu (cik, nazwa) obu
+   skonfliktowanych tickerów — do potwierdzenia recyklingu bez
+   zgadywania. Tolerancja porównania zmieniona z bezwzględnej na
+   względną (0,1% + podłoga 1 cent) po realnym znalezisku fałszywie
+   ostrej tolerancji przy drogich akcjach.
 4. Zachowanie limitów żądań przy serii kolejnych zapytań.
 5. Pełny inwentarz zadań backfillu dla realnego uniwersum 2012+, wg
-   NOWEGO modelu.
+   NOWEGO modelu — z pełną listą WSZYSTKICH CIK posiadających >1
+   ticker w oknie (nie tylko liczbą), żeby żaden przypadek rename/
+   recyklingu nie pozostał niezidentyfikowany przed backfillem.
 
 Jeśli którykolwiek z punktów ujawni problem grożący look-ahead bias,
 survivorship bias, błędnej tożsamości spółki albo błędnym zwrotom —
@@ -40,6 +49,7 @@ from buffett_scanner.config import load_config
 from buffett_scanner.price_history_plan import (
     build_price_fetch_plan,
     detect_large_day_over_day_moves,
+    diff_price_fields,
     merge_ticker_price_rows,
 )
 from buffett_scanner.providers.fmp import FMPClient, FMPError
@@ -175,7 +185,23 @@ def _run_ticker_model_case(client: FMPClient, label: str, cik: str, intervals: l
 
     print(f"  Conflicts (data niezgodna między tickerami — NIE zapisana): {len(merge_result.conflicts)}")
     for c in merge_result.conflicts[:5]:
-        print(f"    {c.date}: {c.ticker_a}={c.row_a.get('close')} vs {c.ticker_b}={c.row_b.get('close')}")
+        fields = diff_price_fields(c.row_a, c.row_b)
+        print(f"    {c.date}: {c.ticker_a} vs {c.ticker_b} — różniące się pola: {fields}")
+    if merge_result.conflicts:
+        first_conflict_date = merge_result.conflicts[0].date
+        last_conflict_date = merge_result.conflicts[-1].date
+        print(f"    zakres dat konfliktów: {first_conflict_date}..{last_conflict_date} "
+              f"(pierwszy dzień konfliktu = KANDYDAT na moment recyklingu/rozjazdu danych)")
+        # Sprawdzenie tożsamości NIE zgadywane — bezpośrednie zapytanie o
+        # dzisiejszy profil (m.in. CIK) obu skonfliktowanych tickerów.
+        conflicted_tickers = sorted({c.ticker_a for c in merge_result.conflicts} | {c.ticker_b for c in merge_result.conflicts})
+        for ticker in conflicted_tickers:
+            try:
+                profile = client.get_company_profile(ticker)
+                print(f"    profil DZIŚ dla {ticker}: cik={profile.get('cik')} "
+                      f"companyName={profile.get('companyName')!r}")
+            except FMPError as exc:
+                print(f"    profil DZIŚ dla {ticker}: BŁĄD: {exc}")
 
     if unresolved:
         print(f"  UWAGA: unresolved tickery w tym przypadku testowym: {unresolved}")
@@ -266,12 +292,14 @@ def main() -> int:
     tickers_per_cik = {}
     for t in tasks:
         tickers_per_cik.setdefault(t.cik, set()).add(t.ticker)
-    multi_ticker_ciks = sum(1 for tickers in tickers_per_cik.values() if len(tickers) > 1)
+    multi_ticker_groups = {cik: sorted(tickers) for cik, tickers in tickers_per_cik.items() if len(tickers) > 1}
 
     print(f"Przedziałów tickera w oknie {cutoff}+: {len(fja_intervals)}")
     print(f"Zadań pobrania cen (nowy model, ticker x pełne okno CIK): {len(tasks)} "
           f"dla {len(unique_ciks)} unikalnych CIK")
-    print(f"CIK z >1 tickerem w oknie (kandydaci na rename/recykling): {multi_ticker_ciks}")
+    print(f"CIK z >1 tickerem w oknie (kandydaci na rename/recykling): {len(multi_ticker_groups)}")
+    for cik, tickers in sorted(multi_ticker_groups.items()):
+        print(f"  {cik}: {tickers}")
     print(f"Tickery bez CIK (nie generują zadania): {len(unresolved)}")
     print(f"Przy throttlingu 0.05s/request: ok. {len(tasks) * 0.05 / 60:.1f} minut samego throttlingu "
           f"(bez czasu odpowiedzi sieci) dla {len(tasks)} requestów.")
