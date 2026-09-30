@@ -177,6 +177,18 @@ def main() -> int:
     # takich długoletnich, niezmienionych tickerów — poprawione po
     # pierwszym realnym uruchomieniu.
     fmp_names_by_ticker = collect_fmp_ticker_names(fmp_events_all)
+    # Poprawka po drugim realnym uruchomieniu (v1.34): tickery obecne w
+    # DZISIEJSZYM potwierdzonym składzie (current_members), które NIGDY
+    # nie miały żadnego zdarzenia ADD/REMOVE w CAŁYM logu FMP (stabilne
+    # od przed 1957, więc collect_fmp_ticker_names nigdy nie przechwyciło
+    # dla nich nazwy), w ogóle nie trafiały do resolve_fmp_tickers — nie
+    # licząc się ani jako resolved, ani jako unresolved, tylko cicho
+    # znikając z obu list. Dopisujemy je z pustą nazwą (resolve_fmp_tickers
+    # poprawnie pomija kontrolę nazwy, gdy fmp_name jest puste — patrz
+    # jego docstring), żeby dostały szansę na rozwiązanie CIK przez sam
+    # ticker, zamiast być pomijane bez śladu w Kroku 7.
+    for t in current_members:
+        fmp_names_by_ticker.setdefault(t, "")
     fmp_resolution = resolve_fmp_tickers(fmp_names_by_ticker, sec_ticker_map, sec_titles)
 
     # Nato Decyzja D14 wymaga, żeby RAPORTOWANE liczby (coverage) dotyczyły
