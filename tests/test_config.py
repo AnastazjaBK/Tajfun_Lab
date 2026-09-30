@@ -111,6 +111,16 @@ def test_backtest_config_loads_window_and_limited_but_honest_status():
     assert config.backtest.window_start == "2012-01-01"
     assert config.backtest.window_end is None
     assert config.backtest.status == "LIMITED_BUT_HONEST"
+    assert config.backtest.rebalance_frequency == "MONTHLY"
+
+
+def test_backtest_config_rejects_unknown_rebalance_frequency():
+    from pydantic import ValidationError as PydValidationError
+
+    from buffett_scanner.config import BacktestConfig
+
+    with pytest.raises(PydValidationError):
+        BacktestConfig(window_start="2012-01-01", rebalance_frequency="WEEKLY")
 
 
 def test_backtest_config_requires_window_start():

@@ -38,11 +38,20 @@ class BacktestConfig(BaseModel):
     jakości danych XBRL sprzed dojrzałości obowiązkowego taggingu
     (OPEN BLOCKER 1). `window_end=None` = do dziś. `status` jest jawną
     adnotacją ograniczenia zakresu, obowiązkową w KAŻDYM raporcie z
-    backtestu (sekcja 13) — nie tylko w configu."""
+    backtestu (sekcja 13) — nie tylko w configu.
+
+    `rebalance_frequency`: częstotliwość OBSERWACJI/SCANNINGU w
+    walk-forward, nie rzeczywistego rebalancingu portfela (decyzja
+    właścicielki, 2026-09-30) — MONTHLY domyślnie, bo system jest
+    event/decline-driven i QUARTERLY mogłoby pomijać krótkie okna
+    gwałtownych spadków i odbić. Parametr configu celowo, żeby później
+    dało się wykonać sensitivity check MONTHLY vs QUARTERLY bez
+    przebudowy harnessu."""
 
     window_start: str
     window_end: str | None = None
     status: str = "LIMITED_BUT_HONEST"
+    rebalance_frequency: Literal["MONTHLY", "QUARTERLY"] = "MONTHLY"
 
 
 class PrefilterRule(BaseModel):
