@@ -1,0 +1,40 @@
+name: Phase 5.3 Ticker Adjacency Proof Run
+
+# Reczne uruchomienie z przegladarki. Proof Run zatwierdzony przez
+# wlasciciela 2026-09-30: czy zero-gap adjacency (jeden ticker konczy
+# sie dokladnie tam, gdzie zaczyna inny) jest wystarczajaco silnym i
+# jednoznacznym sygnalem do odzyskiwania historycznego CIK dla obecnych
+# CIK_UNRESOLVED tickerow (np. ANTM->ELV, FB->META). Celowo TANI:
+# wylacznie SEC (company_tickers.json + formerNames) + fja05680, BEZ
+# FMP. Dwie niezalezne czesci: (A) czysto strukturalna klasyfikacja,
+# (B) niezalezna weryfikacja przez SEC formerNames (zmiana nazwy
+# prawnej spolki w poblizu daty zero-gap) - bo sam fakt adjacency NIE
+# jest dowodem tozsamosci spolki (moze to byc TICKER RENAME SAME
+# COMPANY albo INDEX REPLACEMENT DIFFERENT COMPANY).
+#
+# WYLACZNIE DIAGNOSTYCZNE - nie zapisuje nic do bazy, nie zmienia
+# universe_membership, NIE implementuje INFERRED_VIA_ADJACENT_TICKER
+# produkcyjnie. To pomiar, nie decyzja.
+#
+# Wymaga sekretu SEC_EDGAR_USER_AGENT (juz istnieje). NIE wymaga
+# FMP_API_KEY.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Zero-gap adjacency Proof Run (Faza 5.3, PRZED implementacja produkcyjna)
+        run: python -m buffett_scanner.providers.ticker_adjacency_proof_run
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}

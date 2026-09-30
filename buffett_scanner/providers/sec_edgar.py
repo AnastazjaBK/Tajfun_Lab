@@ -189,6 +189,40 @@ class SecEdgarClient:
             mapping[ticker] = {"cik": str(cik), "title": entry.get("title") or ""}
         return mapping
 
+    def get_former_names(self, cik: str) -> list[dict]:
+        """Lista dawnych nazw prawnych spółki z EDGAR Submissions API
+        (pole `formerNames`, ten sam payload co `get_filings` — patrz
+        tam po `filings.recent`, tu po `formerNames`). Każdy wpis:
+        {name, from_date, to_date} (`from`/`to` z surowego JSON,
+        ISO YYYY-MM-DD wg dokumentacji SEC). Wiersz bez `name` jest
+        pomijany, nigdy nie fabrykujemy brakującej nazwy. Pole może być
+        nieobecne lub puste dla spółki, która nigdy nie zmieniła nazwy
+        -> wtedy pusta lista, nie błąd (istnienie pola u innych spółek,
+        np. Elevance Health/dawniej Anthem, zweryfikowane empirycznie w
+        Fazie 5.3, Proof Run zero-gap adjacency). Używane WYŁĄCZNIE jako
+        niezależny (nie-FMP, nie-cenowy) sygnał korroborujący realną
+        zmianę tożsamości prawnej spółki przy analizie zero-gap
+        adjacency tickerów — NIGDY jako samodzielny dowód."""
+        url = SUBMISSIONS_URL.format(cik10=_pad_cik(cik))
+        resp = self._get(url)
+        if resp.status_code != 200:
+            raise SecEdgarError(
+                f"SEC EDGAR zwrócił status {resp.status_code} dla submissions CIK={cik}."
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise SecEdgarError(f"SEC EDGAR zwrócił niepoprawny JSON dla CIK={cik}") from exc
+
+        raw = data.get("formerNames") or []
+        result = []
+        for entry in raw:
+            name = entry.get("name")
+            if not name:
+                continue
+            result.append({"name": name, "from_date": entry.get("from"), "to_date": entry.get("to")})
+        return result
+
     def get_company_tickers(self) -> dict[str, str]:
         """Aktualne (DZISIEJSZE, nie point-in-time) mapowanie ticker->CIK
         — podzbiór `get_company_tickers_full()` bez `title`, zachowany

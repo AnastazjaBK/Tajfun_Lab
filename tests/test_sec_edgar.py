@@ -209,6 +209,44 @@ def test_get_company_tickers_full_skips_entries_missing_ticker_or_cik(monkeypatc
     assert mapping == {"AAPL": {"cik": "320193", "title": "Apple Inc."}}
 
 
+def test_get_former_names_parses_name_from_to(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {
+        "formerNames": [
+            {"name": "ANTHEM INC", "from": "2001-01-02", "to": "2022-06-27"},
+        ]
+    }
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    result = client.get_former_names("0001156039")
+    assert result == [{"name": "ANTHEM INC", "from_date": "2001-01-02", "to_date": "2022-06-27"}]
+
+
+def test_get_former_names_missing_field_returns_empty_list_not_error(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload={"cik": 320193})
+    )
+    assert client.get_former_names("0000320193") == []
+
+
+def test_get_former_names_skips_entries_missing_name_without_fabricating(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {"formerNames": [{"from": "2001-01-02", "to": "2022-06-27"}]}
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    assert client.get_former_names("0001156039") == []
+
+
+def test_get_former_names_raises_on_non_200(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    monkeypatch.setattr(client._client, "get", lambda url: _FakeResponse(404))
+    with pytest.raises(SecEdgarError):
+        client.get_former_names("0001156039")
+
+
 def test_get_company_tickers_is_cik_only_view_of_full_mapping(monkeypatch):
     """`get_company_tickers` musi pozostać zgodny wstecznie po
     refaktoryzacji na `get_company_tickers_full` — sam CIK, bez title."""
