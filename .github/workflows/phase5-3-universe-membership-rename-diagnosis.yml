@@ -1,0 +1,36 @@
+name: Phase 5.3 Universe Membership Rename Diagnosis
+
+# Reczne uruchomienie z przegladarki. Diagnostyka po znalezisku z Price
+# Data Proof Run (2026-09-30): sprawdza (1) czy pole `reason` w logu
+# zdarzen FMP historical-sp500-constituent jawnie opisuje zmiane
+# tickera (potencjalne zrodlo potwierdzonego mapowania stary->nowy
+# ticker bez zgadywania), (2) czy finalny universe_membership
+# (zbudowany dokladnie tak samo jak cli.py build-universe-membership)
+# ma luke dla spolek, ktore zmienily ticker (np. Anthem->Elevance
+# Health, Facebook->Meta) - bo stary ticker moze nie rozwiazywac sie
+# do tego samego CIK co nowy w dzisiejszej mapie SEC.
+#
+# WYLACZNIE DIAGNOSTYCZNE.
+#
+# Wymaga sekretow FMP_API_KEY i SEC_EDGAR_USER_AGENT (oba juz istnieja).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnosis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Diagnoza rename (Faza 5.3, po znalezisku Price Data Proof Run)
+        run: python -m buffett_scanner.providers.universe_membership_rename_diagnosis
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
