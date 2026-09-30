@@ -6,15 +6,19 @@ from buffett_scanner.db import (
     create_user,
     get_fundamentals_periods,
     get_price_series,
+    get_universe_membership_as_of,
     init_db,
     insert_analysis,
     insert_analysis_sources,
     insert_fundamentals_rows,
     insert_price_rows,
+    insert_unresolved_ticker,
+    insert_universe_membership_conflict,
     upsert_company,
     upsert_derived_metric,
     upsert_scoring_model_version,
     upsert_ticker_history,
+    upsert_universe_membership,
 )
 from buffett_scanner.sources import VerifiedSource
 
@@ -279,3 +283,121 @@ def test_insert_analysis_sources_stores_verified_and_unverified(conn):
     assert rows[0]["content_hash"] == "abc123"
     assert rows[1]["verified"] == 0
     assert rows[1]["reason"] == "Błąd sieci"
+
+
+# ---------------------------------------------------------------------------
+# Faza 5.2 — universe_membership (domknięcie OPEN BLOCKER 2, v1.35)
+# ---------------------------------------------------------------------------
+
+
+def test_init_db_creates_universe_membership_tables(conn):
+    tables = {
+        row["name"]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'"
+        ).fetchall()
+    }
+    assert {
+        "universe_membership", "universe_membership_conflicts", "universe_membership_unresolved_tickers",
+    } <= tables
+
+
+def test_upsert_universe_membership_inserts_and_updates_on_conflict(conn):
+    upsert_company(conn, cik="0001326801", name="Meta Platforms Inc.")
+    upsert_universe_membership(
+        conn, cik="0001326801", index_name="SP500", start_date="2012-01-01",
+        end_date=None, source="fja05680", source_snapshot_ref="ref1",
+        cik_resolution_method="DIRECT",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM universe_membership WHERE cik = ?", ("0001326801",)
+    ).fetchone()
+    assert row["end_date"] is None
+    assert row["entry_validation_status"] == "NOT_VALIDATED"  # domyślne
+
+    # Ponowny build tego samego przedziału (np. po zmianie tolerancji)
+    # aktualizuje metadane walidacji, nie duplikuje wiersza.
+    upsert_universe_membership(
+        conn, cik="0001326801", index_name="SP500", start_date="2012-01-01",
+        end_date="2023-01-01", source="fja05680", source_snapshot_ref="ref2",
+        cik_resolution_method="DIRECT", entry_validation_status="MATCHED",
+    )
+    conn.commit()
+    rows = conn.execute("SELECT * FROM universe_membership WHERE cik = ?", ("0001326801",)).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["end_date"] == "2023-01-01"
+    assert rows[0]["entry_validation_status"] == "MATCHED"
+
+
+def test_universe_membership_rejects_invalid_cik_resolution_method(conn):
+    upsert_company(conn, cik="0001", name="Test Co")
+    with pytest.raises(sqlite3.IntegrityError):
+        upsert_universe_membership(
+            conn, cik="0001", index_name="SP500", start_date="2012-01-01",
+            end_date=None, source="fja05680", source_snapshot_ref="ref1",
+            cik_resolution_method="GUESSED",  # nigdy nie zgadujemy -> tylko DIRECT/FORMAT_VARIANT
+        )
+
+
+def test_insert_universe_membership_conflict_is_append_only(conn):
+    id1 = insert_universe_membership_conflict(
+        conn, cik="0001", index_name="SP500", event_date="2013-01-05", action="REMOVE",
+        conflict_type="ONLY_CANONICAL", tolerance_days=6, date_field="dateAdded",
+        validation_rule_version="cik_tolerance_match_v1", validation_run_id="run1",
+    )
+    id2 = insert_universe_membership_conflict(
+        conn, cik="0001", index_name="SP500", event_date="2013-01-05", action="REMOVE",
+        conflict_type="ONLY_CANONICAL", tolerance_days=6, date_field="dateAdded",
+        validation_rule_version="cik_tolerance_match_v1", validation_run_id="run2",
+    )
+    conn.commit()
+    assert id1 != id2
+    rows = conn.execute("SELECT * FROM universe_membership_conflicts WHERE cik = '0001'").fetchall()
+    assert len(rows) == 2  # ponowne uruchomienie walidacji = nowe wiersze, nigdy UPDATE
+
+
+def test_insert_unresolved_ticker_is_explicit_never_silent(conn):
+    insert_unresolved_ticker(
+        conn, source="fja05680", ticker="AABA", index_name="SP500",
+        source_snapshot_ref="ref1", run_id="run1",
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM universe_membership_unresolved_tickers WHERE ticker = 'AABA'"
+    ).fetchone()
+    assert row is not None
+    assert row["source"] == "fja05680"
+
+
+def test_insert_unresolved_ticker_ignores_exact_duplicate(conn):
+    insert_unresolved_ticker(
+        conn, source="fja05680", ticker="AABA", index_name="SP500",
+        source_snapshot_ref="ref1", run_id="run1",
+    )
+    insert_unresolved_ticker(
+        conn, source="fja05680", ticker="AABA", index_name="SP500",
+        source_snapshot_ref="ref1", run_id="run1",
+    )
+    conn.commit()
+    rows = conn.execute(
+        "SELECT * FROM universe_membership_unresolved_tickers WHERE ticker = 'AABA'"
+    ).fetchall()
+    assert len(rows) == 1
+
+
+def test_get_universe_membership_as_of_end_date_is_exclusive(conn):
+    upsert_company(conn, cik="A", name="A Corp")
+    upsert_company(conn, cik="B", name="B Corp")
+    upsert_universe_membership(
+        conn, cik="A", index_name="SP500", start_date="2012-01-01", end_date="2015-01-01",
+        source="fja05680", source_snapshot_ref="ref1", cik_resolution_method="DIRECT",
+    )
+    upsert_universe_membership(
+        conn, cik="B", index_name="SP500", start_date="2012-06-01", end_date=None,
+        source="fja05680", source_snapshot_ref="ref1", cik_resolution_method="DIRECT",
+    )
+    conn.commit()
+    assert get_universe_membership_as_of(conn, "SP500", "2013-01-01") == ["A", "B"]
+    assert get_universe_membership_as_of(conn, "SP500", "2015-01-01") == ["B"]  # A kończy się TEGO dnia
+    assert get_universe_membership_as_of(conn, "SP500", "2011-01-01") == []

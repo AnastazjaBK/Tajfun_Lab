@@ -11,6 +11,7 @@
     python -m buffett_scanner.cli score AAPL MSFT ... [--markdown-out DIR]
     python -m buffett_scanner.cli pit-prototype AAPL MSFT ... [--as-of YYYY-MM-DD]
     python -m buffett_scanner.cli analyze-sp500-history [--cutoff YYYY-MM-DD]
+    python -m buffett_scanner.cli build-universe-membership [--cutoff YYYY-MM-DD]
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -20,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -29,15 +31,28 @@ from buffett_scanner.config import load_config
 from buffett_scanner.db import (
     get_fundamentals_periods,
     get_price_series,
+    get_universe_membership_as_of,
     init_db,
     insert_analysis,
     insert_analysis_sources,
     insert_fundamentals_rows,
     insert_price_rows,
+    insert_unresolved_ticker,
+    insert_universe_membership_conflict,
     upsert_company,
     upsert_derived_metric,
     upsert_scoring_model_version,
     upsert_ticker_history,
+    upsert_universe_membership,
+)
+from buffett_scanner.fmp_sp500_events import (
+    ChangeEvent,
+    collect_fmp_ticker_names,
+    fmp_change_events,
+    fmp_change_events_by_date_added,
+    parse_fmp_events,
+    reconstruct_membership_backward,
+    resolve_fmp_tickers,
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
@@ -50,16 +65,34 @@ from buffett_scanner.report import render_markdown_report
 from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
 from buffett_scanner.scoring import compute_score
 from buffett_scanner.sources import VerifiedSource, build_sec_source_packet
+from buffett_scanner.universe_cik_reconciliation import (
+    MATCH_ALGORITHM_VERSION,
+    change_events_to_cik_events,
+    match_cik_events_with_tolerance,
+    pick_plateau_tolerance,
+    tolerance_impact_curve,
+)
 from buffett_scanner.universe_history import (
     build_ticker_intervals,
+    compare_ticker_sets,
     distinct_tickers,
     parse_components_csv,
     resolve_tickers_to_cik,
+    tickers_as_of,
     window_from_cutoff,
+)
+from buffett_scanner.universe_membership_build import (
+    attach_validation_status,
+    build_cik_membership_intervals,
+    build_conflicts,
+    membership_as_of,
+    merge_adjacent_same_cik_intervals,
 )
 
 DEFAULT_DB_PATH = "buffett_scanner.db"
 PREFILTER_CALC_VERSION = "0.1.0-phase1"
+UNIVERSE_MEMBERSHIP_INDEX_NAME = "SP500"
+UNIVERSE_MEMBERSHIP_TOLERANCE_RANGE = range(0, 11)  # 0..10 dni — patrz v1.34
 
 
 def cmd_init_db(args: argparse.Namespace) -> int:
@@ -606,6 +639,240 @@ def cmd_analyze_sp500_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pick_validation_field(curve_date: list[dict], curve_date_added: list[dict]) -> str:
+    """Wybiera pole daty FMP ('date' albo 'dateAdded') na podstawie
+    empirycznej dominacji krzywej tolerancji (>= liczba dopasowań PRZY
+    KAŻDEJ testowanej tolerancji) — nigdy nie zgadywane z góry. Przy
+    braku jednoznacznej dominacji (krzywe się przecinają) domyślnie
+    'dateAdded' — dwa niezależne realne uruchomienia (v1.34, 2026-09-30)
+    pokazały jego stabilną przewagę przy niskiej tolerancji; to jawnie
+    oznaczony domyślny wybór, nie ślepe założenie."""
+    a_dominates = all(a["matched_count"] >= b["matched_count"] for a, b in zip(curve_date, curve_date_added))
+    b_dominates = all(b["matched_count"] >= a["matched_count"] for a, b in zip(curve_date, curve_date_added))
+    if a_dominates and not b_dominates:
+        return "date"
+    return "dateAdded"
+
+
+def cmd_build_universe_membership(args: argparse.Namespace) -> int:
+    """Faza 5.2, domknięcie OPEN BLOCKER 2 (v1.35, projekt zatwierdzony
+    2026-09-30) — finalny build `universe_membership`. fja05680 jest
+    JEDYNYM źródłem membership; FMP jest niezależnym walidatorem, nigdy
+    nie nadpisuje cik/start_date/end_date. Wymaga FMP_API_KEY i
+    SEC_EDGAR_USER_AGENT. Zapisuje do `universe_membership`,
+    `universe_membership_conflicts`, `universe_membership_unresolved_
+    tickers` — nigdy nie zgaduje CIK, nigdy nie ukrywa rozbieżności."""
+    config = load_config()
+    try:
+        api_key = config.data_provider.resolve_api_key()
+        user_agent = config.sources.sec_edgar.resolve_user_agent()
+    except RuntimeError as exc:
+        print(f"BŁĄD: {exc}", file=sys.stderr)
+        return 1
+
+    cutoff = args.cutoff
+    index_name = UNIVERSE_MEMBERSHIP_INDEX_NAME
+    run_id = dt.datetime.utcnow().strftime("build-%Y-%m-%dT%H%M%SZ")
+    conn = init_db(args.db)
+
+    print("== Krok 1: SEC company_tickers_full ==")
+    with SecEdgarClient(user_agent) as sec_client:
+        try:
+            sec_full = sec_client.get_company_tickers_full()
+        except SecEdgarError as exc:
+            print(f"BŁĄD pobierania SEC company_tickers.json: {exc}", file=sys.stderr)
+            return 1
+    sec_ticker_map = {t: info["cik"] for t, info in sec_full.items()}
+    sec_titles = {t: info["title"] for t, info in sec_full.items()}
+    print(f"SEC: {len(sec_full)} tickerów.")
+
+    print("\n== Krok 2: fja05680/sp500 (KANONICZNE) ==")
+    try:
+        fja_csv = fetch_components_csv()
+    except Sp500HistoryError as exc:
+        print(f"BŁĄD pobierania fja05680/sp500: {exc}", file=sys.stderr)
+        return 1
+    fja_snapshot_ref = f"fja05680:{hashlib.sha256(fja_csv.encode()).hexdigest()[:16]}"
+    fja_rows = parse_components_csv(fja_csv)
+    fja_window = window_from_cutoff(fja_rows, cutoff)
+    if not fja_window:
+        print(f"BŁĄD: fja05680 nie ma żadnego wiersza <= {cutoff}.", file=sys.stderr)
+        return 1
+    fja_intervals = build_ticker_intervals(fja_window, cutoff_date=cutoff)
+    fja_all_tickers = distinct_tickers(fja_window)
+    fja_resolution = resolve_tickers_to_cik(fja_all_tickers, sec_ticker_map)
+    print(
+        f"fja05680: {len(fja_all_tickers)} tickerów w oknie {cutoff}+, "
+        f"rozwiązanych={len(fja_resolution.resolved)}, UNRESOLVED={len(fja_resolution.unresolved)}"
+    )
+
+    print("\n== Krok 3: FMP (WALIDATOR) ==")
+    with FMPClient(api_key) as fmp_client:
+        try:
+            current_rows = fmp_client.get_sp500_constituents()
+        except FMPError as exc:
+            print(f"BŁĄD pobierania bieżącego składu FMP: {exc}", file=sys.stderr)
+            return 1
+        current_members = {r["symbol"] for r in current_rows if r.get("symbol")}
+        path, raw_rows, attempts = fmp_client.get_historical_sp500_constituents()
+        if path is None or not raw_rows:
+            print("BŁĄD: historical-sp500-constituent niedostępny lub pusty.", file=sys.stderr)
+            return 1
+    fmp_snapshot_ref = f"FMP:historical-sp500-constituent:{hashlib.sha256(str(raw_rows).encode()).hexdigest()[:16]}"
+
+    fmp_events_all = parse_fmp_events(raw_rows)
+    fmp_names_by_ticker = collect_fmp_ticker_names(fmp_events_all)
+    for t in current_members:
+        fmp_names_by_ticker.setdefault(t, "")
+    fmp_resolution = resolve_fmp_tickers(fmp_names_by_ticker, sec_ticker_map, sec_titles)
+    print(
+        f"FMP: {len(fmp_names_by_ticker)} tickerów w pełnym logu, "
+        f"rozwiązanych={len(fmp_resolution.resolved)}, UNRESOLVED={len(fmp_resolution.unresolved)}"
+    )
+
+    print(f"\n== Krok 4: zdarzenia CIK-poziomu w oknie {cutoff}+ i wybór pola daty FMP ==")
+    fja_events_set: set[ChangeEvent] = set()
+    for iv in fja_intervals:
+        if iv.start_date > cutoff:
+            fja_events_set.add(ChangeEvent(date=iv.start_date, ticker=iv.ticker, action="ADD"))
+        if iv.end_date is not None:
+            fja_events_set.add(ChangeEvent(date=iv.end_date, ticker=iv.ticker, action="REMOVE"))
+    fja_events_window = frozenset(fja_events_set)
+    fja_cik_conv = change_events_to_cik_events(fja_events_window, fja_resolution.resolved)
+
+    fmp_events_window_date = fmp_change_events(fmp_events_all, cutoff_date=cutoff)
+    fmp_events_window_date_added, _ = fmp_change_events_by_date_added(fmp_events_all, cutoff_date=cutoff)
+    fmp_cik_conv_date = change_events_to_cik_events(fmp_events_window_date, fmp_resolution.resolved)
+    fmp_cik_conv_date_added = change_events_to_cik_events(fmp_events_window_date_added, fmp_resolution.resolved)
+
+    curve_date = tolerance_impact_curve(
+        fja_cik_conv.events, fmp_cik_conv_date.events, tolerance_range_days=UNIVERSE_MEMBERSHIP_TOLERANCE_RANGE,
+    )
+    curve_date_added = tolerance_impact_curve(
+        fja_cik_conv.events, fmp_cik_conv_date_added.events, tolerance_range_days=UNIVERSE_MEMBERSHIP_TOLERANCE_RANGE,
+    )
+    chosen_field = _pick_validation_field(curve_date, curve_date_added)
+    chosen_curve = curve_date if chosen_field == "date" else curve_date_added
+    chosen_conv = fmp_cik_conv_date if chosen_field == "date" else fmp_cik_conv_date_added
+    chosen_tolerance = pick_plateau_tolerance(chosen_curve)
+    print(
+        f"Wybrane empirycznie: pole={chosen_field!r}, tolerancja (plateau)={chosen_tolerance}d, "
+        f"reguła={MATCH_ALGORITHM_VERSION}"
+    )
+
+    match_result = match_cik_events_with_tolerance(
+        fja_cik_conv.events, chosen_conv.events, tolerance_days=chosen_tolerance,
+    )
+    print(
+        f"Dopasowane={len(match_result.matched)} tylko_kanoniczne={len(match_result.only_canonical)} "
+        f"tylko_walidator={len(match_result.only_validator)}"
+    )
+
+    print("\n== Krok 5: budowa przedziałów CIK-poziomu + scalanie zmian tickera bez opuszczenia indeksu ==")
+    membership_intervals, unresolved_fja = build_cik_membership_intervals(
+        fja_intervals, fja_resolution.resolved, fja_resolution.resolved_via_format_variant,
+        index_name=index_name, source="fja05680", source_snapshot_ref=fja_snapshot_ref,
+    )
+    pre_merge_count = len(membership_intervals)
+    membership_intervals = merge_adjacent_same_cik_intervals(membership_intervals)
+    membership_intervals = attach_validation_status(
+        membership_intervals, match_result, date_field=chosen_field,
+        validation_rule_version=MATCH_ALGORITHM_VERSION, validation_run_id=run_id,
+    )
+    conflicts = build_conflicts(
+        match_result, index_name=index_name, date_field=chosen_field,
+        validation_rule_version=MATCH_ALGORITHM_VERSION, validation_run_id=run_id,
+    )
+    unique_ciks = {iv.cik for iv in membership_intervals}
+    merged_away = pre_merge_count - len(membership_intervals)
+    print(
+        f"Przedziałów członkostwa: {len(membership_intervals)} "
+        f"(przed scaleniem: {pre_merge_count}, scalono {merged_away} par zmiany tickera bez opuszczenia indeksu)"
+    )
+    print(f"Unikalnych CIK: {len(unique_ciks)}")
+    print(f"Unresolved (fja05680, nie generują wiersza): {len(unresolved_fja)}")
+    print(
+        f"Konflikty (audyt, nie modyfikują membership): {len(conflicts)} "
+        f"({sum(1 for c in conflicts if c.conflict_type == 'ONLY_CANONICAL')} ONLY_CANONICAL, "
+        f"{sum(1 for c in conflicts if c.conflict_type == 'ONLY_VALIDATOR')} ONLY_VALIDATOR)"
+    )
+
+    # FMP-side unresolved w oknie istotnym dla D14 (patrz poprawka zakresu
+    # v1.34) — tylko do logu unresolved_tickers, nigdy nie wpływa na membership.
+    fmp_relevant_tickers = set(
+        collect_fmp_ticker_names([e for e in fmp_events_all if e.date >= cutoff])
+    ) | current_members
+    fmp_unresolved_in_window = sorted(t for t in fmp_resolution.unresolved if t in fmp_relevant_tickers)
+
+    print(f"\n== Krok 6: zapis do bazy ({args.db}) ==")
+    cik_to_name: dict[str, str] = {}
+    for ticker in sorted(fja_resolution.resolved):
+        cik = fja_resolution.resolved[ticker]
+        if cik in cik_to_name:
+            continue
+        lookup_ticker = fja_resolution.resolved_via_format_variant.get(ticker, ticker)
+        title = sec_titles.get(lookup_ticker) or sec_titles.get(ticker) or ""
+        cik_to_name[cik] = title or f"CIK {cik}"
+
+    for iv in membership_intervals:
+        upsert_company(conn, cik=iv.cik, name=cik_to_name.get(iv.cik, f"CIK {iv.cik}"))
+        upsert_universe_membership(
+            conn, cik=iv.cik, index_name=iv.index_name, start_date=iv.start_date,
+            end_date=iv.end_date, source=iv.source, source_snapshot_ref=iv.source_snapshot_ref,
+            cik_resolution_method=iv.cik_resolution_method,
+            entry_validation_status=iv.entry_validation_status,
+            entry_validation_day_diff=iv.entry_validation_day_diff,
+            exit_validation_status=iv.exit_validation_status,
+            exit_validation_day_diff=iv.exit_validation_day_diff,
+            validation_tolerance_days=iv.validation_tolerance_days,
+            validation_date_field=iv.validation_date_field,
+            validation_rule_version=iv.validation_rule_version,
+            validation_run_id=iv.validation_run_id,
+        )
+    for c in conflicts:
+        insert_universe_membership_conflict(
+            conn, cik=c.cik, index_name=c.index_name, event_date=c.event_date, action=c.action,
+            conflict_type=c.conflict_type, tolerance_days=c.tolerance_days, date_field=c.date_field,
+            validation_rule_version=c.validation_rule_version, validation_run_id=c.validation_run_id,
+        )
+    for t in unresolved_fja:
+        insert_unresolved_ticker(
+            conn, source="fja05680", ticker=t, index_name=index_name,
+            source_snapshot_ref=fja_snapshot_ref, run_id=run_id,
+        )
+    for t in fmp_unresolved_in_window:
+        insert_unresolved_ticker(
+            conn, source="FMP", ticker=t, index_name=index_name,
+            source_snapshot_ref=fmp_snapshot_ref, run_id=run_id,
+        )
+    conn.commit()
+    print(
+        f"Zapisano {len(membership_intervals)} przedziałów, {len(conflicts)} konfliktów, "
+        f"{len(unresolved_fja) + len(fmp_unresolved_in_window)} unresolved tickerów (run_id={run_id})."
+    )
+
+    print(f"\n== Krok 7: rekonstrukcja na reprezentatywnych datach ({cutoff}..dziś) ==")
+    sample_dates = ["2012-01-31", "2018-12-31", dt.date.today().isoformat()]
+    for date in sample_dates:
+        in_memory = membership_as_of(membership_intervals, date)
+        from_db = set(get_universe_membership_as_of(conn, index_name, date))
+        if in_memory != from_db:
+            print(f"BŁĄD: rozjazd między budową w pamięci a zapisem w bazie dla {date}.", file=sys.stderr)
+            return 1
+
+        fmp_snapshot = reconstruct_membership_backward(fmp_events_all, current_members, date)
+        fmp_cik_snapshot = {fmp_resolution.resolved[t] for t in fmp_snapshot if t in fmp_resolution.resolved}
+        snap_cmp = compare_ticker_sets(from_db, fmp_cik_snapshot)
+        print(
+            f"  {date}: universe_membership={snap_cmp.count_a} CIK, "
+            f"FMP (niezależna rekonstrukcja)={snap_cmp.count_b} CIK, "
+            f"wspólne={snap_cmp.intersection_count}, "
+            f"tylko_universe_membership={len(snap_cmp.only_in_a)}, tylko_FMP={len(snap_cmp.only_in_b)}"
+        )
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -657,6 +924,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--cutoff", default="2012-01-01", help="Początek okna analizy (YYYY-MM-DD, domyślnie D14: 2012-01-01)."
     )
     p_sp500_hist.set_defaults(func=cmd_analyze_sp500_history)
+
+    p_build_membership = sub.add_parser("build-universe-membership")
+    p_build_membership.add_argument(
+        "--cutoff", default="2012-01-01", help="Początek okna budowy (YYYY-MM-DD, domyślnie D14: 2012-01-01)."
+    )
+    p_build_membership.set_defaults(func=cmd_build_universe_membership)
 
     return parser
 

@@ -27,6 +27,16 @@ from dataclasses import dataclass
 
 from buffett_scanner.fmp_sp500_events import ChangeEvent
 
+# Wersja LOGIKI dopasowania (nie parametrów — te, tolerance_days i
+# date_field, są przechowywane osobno per wiersz walidacji). Bump tego
+# stringa przy KAŻDEJ zmianie samego algorytmu w
+# `match_cik_events_with_tolerance` (np. zmiana strategii greedy,
+# reguły remisu, definicji koszyka) — inaczej stare i nowe wyniki
+# walidacji byłyby nierozróżnialne w bazie, mimo że policzone inną
+# logiką. Zgłoszone jawnie przez właścicielkę jako wymóg przed
+# implementacją `universe_membership` (v1.35).
+MATCH_ALGORITHM_VERSION = "cik_tolerance_match_v1"
+
 
 @dataclass(frozen=True)
 class CikEvent:

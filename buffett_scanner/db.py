@@ -193,6 +193,81 @@ CREATE TABLE IF NOT EXISTS analysis_sources (
     question          TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_analysis_sources_analysis_id ON analysis_sources(analysis_id);
+
+-- Faza 5.2 — domknięcie OPEN BLOCKER 2 (v1.35, projekt zatwierdzony
+-- 2026-09-30). fja05680 jest JEDYNYM źródłem tej tabeli (kolumna
+-- `source`, na razie zawsze 'fja05680') — FMP jest niezależnym
+-- walidatorem, nigdy nie nadpisuje cik/start_date/end_date, tylko
+-- opisuje zgodność przez kolumny entry_validation_*/exit_validation_*.
+-- end_date WYŁĄCZNY (pierwszy dzień potwierdzonej nieobecności) —
+-- ten sam wzorzec co `value_as_of`/`tickers_as_of` (sekcja 13/5.1/5.2).
+CREATE TABLE IF NOT EXISTS universe_membership (
+    id                          INTEGER PRIMARY KEY AUTOINCREMENT,
+    cik                         TEXT NOT NULL REFERENCES companies(cik),
+    index_name                  TEXT NOT NULL,
+    start_date                  TEXT NOT NULL,
+    end_date                    TEXT,
+    source                      TEXT NOT NULL DEFAULT 'fja05680',
+    source_snapshot_ref         TEXT NOT NULL,
+    cik_resolution_method       TEXT NOT NULL
+                                CHECK (cik_resolution_method IN ('DIRECT','FORMAT_VARIANT')),
+    entry_validation_status     TEXT NOT NULL DEFAULT 'NOT_VALIDATED'
+                                CHECK (entry_validation_status IN ('MATCHED','ONLY_CANONICAL','NOT_VALIDATED')),
+    entry_validation_day_diff   INTEGER,
+    exit_validation_status      TEXT
+                                CHECK (exit_validation_status IS NULL
+                                       OR exit_validation_status IN ('MATCHED','ONLY_CANONICAL','NOT_VALIDATED')),
+    exit_validation_day_diff    INTEGER,
+    validation_tolerance_days   INTEGER,
+    validation_date_field       TEXT CHECK (validation_date_field IS NULL OR validation_date_field IN ('date','dateAdded')),
+    -- Wersja LOGIKI dopasowania (np. 'cik_tolerance_match_v1'), ODRĘBNA
+    -- od parametrów (validation_tolerance_days/validation_date_field) —
+    -- pozwala historycznie odróżnić wynik policzony starym algorytmem od
+    -- nowego, nawet przy tych samych parametrach (wymóg właścicielki,
+    -- 2026-09-30, przed implementacją tej tabeli).
+    validation_rule_version     TEXT,
+    validation_run_id           TEXT,
+    created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (cik, index_name, start_date)
+);
+CREATE INDEX IF NOT EXISTS idx_universe_membership_index_dates
+    ON universe_membership(index_name, start_date, end_date);
+
+-- Audytowalny log rozbieżności fja05680 (kanoniczne) vs FMP (walidator)
+-- po CIK i tolerancji dat — WYŁĄCZNIE do ręcznego przeglądu, nigdy nie
+-- modyfikuje universe_membership. Obejmuje też ONLY_VALIDATOR, dla
+-- którego nie istnieje żaden wiersz w universe_membership (fja05680 go
+-- nie potwierdził), więc ten log jest jedynym miejscem, gdzie taki
+-- przypadek jest widoczny.
+CREATE TABLE IF NOT EXISTS universe_membership_conflicts (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    cik                      TEXT NOT NULL,
+    index_name               TEXT NOT NULL,
+    event_date               TEXT NOT NULL,
+    action                   TEXT NOT NULL CHECK (action IN ('ADD','REMOVE')),
+    conflict_type            TEXT NOT NULL CHECK (conflict_type IN ('ONLY_CANONICAL','ONLY_VALIDATOR')),
+    tolerance_days           INTEGER NOT NULL,
+    date_field                TEXT NOT NULL CHECK (date_field IN ('date','dateAdded')),
+    validation_rule_version  TEXT NOT NULL,
+    validation_run_id        TEXT NOT NULL,
+    review_note              TEXT,   -- ręczna adnotacja po przeglądzie, nigdy automatyczna
+    created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_universe_membership_conflicts_cik ON universe_membership_conflicts(cik);
+
+-- Tickery z kanonicznego źródła, które NIE dostały CIK (CIK_UNRESOLVED)
+-- — nie generują wiersza w universe_membership, ale zostają jawnie
+-- widoczne tutaj, nigdy nie znikają bez śladu.
+CREATE TABLE IF NOT EXISTS universe_membership_unresolved_tickers (
+    id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+    source                TEXT NOT NULL,
+    ticker                TEXT NOT NULL,
+    index_name            TEXT NOT NULL,
+    source_snapshot_ref   TEXT NOT NULL,
+    run_id                TEXT NOT NULL,
+    created_at            TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (source, ticker, index_name, run_id)
+);
 """
 
 
@@ -455,6 +530,71 @@ def insert_analysis(conn: sqlite3.Connection, **fields) -> int:
         [fields[c] for c in columns],
     )
     return cur.lastrowid
+
+
+def upsert_universe_membership(conn: sqlite3.Connection, *, cik: str, index_name: str, start_date: str, **fields) -> None:
+    """Wiersz `universe_membership` — `cik`/`index_name`/`start_date`
+    identyfikują przedział (UNIQUE), reszta pól (end_date, source,
+    source_snapshot_ref, cik_resolution_method, entry_validation_*,
+    exit_validation_*, validation_*) w `fields`. Upsert: ponowny build
+    tego samego przedziału (np. po zmianie tolerancji) aktualizuje
+    metadane walidacji, nie duplikuje wiersza."""
+    columns = ["cik", "index_name", "start_date", *fields.keys()]
+    values = [cik, index_name, start_date, *fields.values()]
+    placeholders = ", ".join("?" for _ in columns)
+    update_clause = ", ".join(f"{c} = excluded.{c}" for c in fields.keys())
+    conn.execute(
+        f"""
+        INSERT INTO universe_membership ({', '.join(columns)})
+        VALUES ({placeholders})
+        ON CONFLICT(cik, index_name, start_date) DO UPDATE SET {update_clause}
+        """,
+        values,
+    )
+
+
+def insert_universe_membership_conflict(conn: sqlite3.Connection, **fields) -> int:
+    """INSERT-only (append) — audytowalny log, jeden wiersz per
+    rozbieżność per uruchomienie walidacji (`run_id`). `fields`:
+    cik, index_name, event_date, action, conflict_type, tolerance_days,
+    date_field, validation_rule_version, validation_run_id."""
+    columns = list(fields.keys())
+    placeholders = ", ".join("?" for _ in columns)
+    cur = conn.execute(
+        f"INSERT INTO universe_membership_conflicts ({', '.join(columns)}) VALUES ({placeholders})",
+        [fields[c] for c in columns],
+    )
+    return cur.lastrowid
+
+
+def insert_unresolved_ticker(conn: sqlite3.Connection, **fields) -> None:
+    """INSERT OR IGNORE — ticker z kanonicznego źródła bez CIK
+    (CIK_UNRESOLVED), zapisany jawnie zamiast cicho pominięty. `fields`:
+    source, ticker, index_name, source_snapshot_ref, run_id."""
+    columns = list(fields.keys())
+    placeholders = ", ".join("?" for _ in columns)
+    conn.execute(
+        f"INSERT OR IGNORE INTO universe_membership_unresolved_tickers ({', '.join(columns)}) VALUES ({placeholders})",
+        [fields[c] for c in columns],
+    )
+
+
+def get_universe_membership_as_of(conn: sqlite3.Connection, index_name: str, as_of_date: str) -> list[str]:
+    """CIK-i aktywne w indeksie na `as_of_date` — `start_date <= D <
+    end_date` (end_date wyłączny, ten sam wzorzec co `value_as_of`/
+    `tickers_as_of`/`membership_as_of`). Punkt-w-czasie rekonstrukcja
+    membership — sedno domknięcia OPEN BLOCKER 2."""
+    rows = conn.execute(
+        """
+        SELECT cik FROM universe_membership
+        WHERE index_name = ?
+          AND start_date <= ?
+          AND (end_date IS NULL OR end_date > ?)
+        ORDER BY cik
+        """,
+        (index_name, as_of_date, as_of_date),
+    ).fetchall()
+    return [r["cik"] for r in rows]
 
 
 def insert_analysis_sources(conn: sqlite3.Connection, analysis_id: int, sources: list) -> int:
