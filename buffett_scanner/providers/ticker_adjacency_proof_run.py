@@ -55,6 +55,19 @@ from buffett_scanner.universe_ticker_adjacency import (
 
 FORMER_NAME_TOLERANCE_DAYS = 3
 
+# Kontrolne CIK-i do surowej diagnostyki formerNames (dodane po tym, jak
+# realny Proof Run 2026-09-30 dał 0/107 korroboracji — łącznie ze znanym,
+# potwierdzonym wcześniej w tej sesji rename ANTM/ELV). Cel: ustalić, czy
+# pole `formerNames` w ogóle zawiera dane dla tych spółek, i jeśli tak, w
+# jakiej odległości od daty zero-gap leżą — zanim cokolwiek wywnioskujemy
+# o przydatności tego sygnału jako niezależnej weryfikacji.
+CONTROL_CIKS = [
+    ("ANTM -> ELV (znany prawdziwy rename, zero-gap 2022-06-28)", "1156039"),
+    ("FB -> META (znany prawdziwy rename, zero-gap 2022-06-09)", "1326801"),
+    ("EA -> FERG (podejrzany fałszywy pozytyw, zero-gap 2026-08-05)", "2011641"),
+    ("BK -> BNY (podejrzany fałszywy pozytyw, zero-gap 2026-05-21)", "1390777"),
+]
+
 
 def main() -> int:
     config = load_config()
@@ -179,6 +192,23 @@ def main() -> int:
             "INFERRED_VIA_ADJACENT_TICKER produkcyjnie — to wymaga decyzji właściciela "
             "po przejrzeniu tych wyników."
         )
+
+        print(
+            "\n== Krok 5: surowa diagnostyka formerNames dla kontrolnych CIK "
+            "(po znalezisku 0/107 korroboracji w poprzednim Proof Run) =="
+        )
+        for label, cik in CONTROL_CIKS:
+            print(f"  -- {label}, CIK={cik} --")
+            try:
+                raw = sec_client.get_former_names(cik)
+            except SecEdgarError as exc:
+                print(f"    BŁĄD get_former_names({cik}): {exc}")
+                continue
+            if not raw:
+                print("    formerNames: PUSTA LISTA (pole nieobecne albo bez wpisów dla tego CIK).")
+                continue
+            for entry in raw:
+                print(f"    name={entry['name']!r} from={entry['from_date']} to={entry['to_date']}")
 
     return 0
 
