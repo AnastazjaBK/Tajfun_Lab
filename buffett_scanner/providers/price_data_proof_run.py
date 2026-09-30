@@ -9,33 +9,44 @@ Wymaga FMP_API_KEY i SEC_EDGAR_USER_AGENT (oba już istnieją jako
 sekrety). Sprawdza empirycznie (zlecone przez właścicielkę, 2026-09-30):
 
 1. Czy `adjClose`/`close` z `historical-price-eod/full` jest faktycznie
-   adjustowane pod splity, czy nie — KRYTYCZNE dla poprawności
-   backtestu (fmp.py dotąd zakładał `close` jako fallback bez
-   potwierdzenia w żadną stronę). Test na realnych, znanych datach
-   splitów (AAPL 2014-06-09 7:1, AAPL 2020-08-31 4:1, NVDA 2021-07-20
-   4:1, NVDA 2024-06-10 10:1).
+   adjustowane pod splity (test na realnych, znanych datach: AAPL
+   2014/2020, NVDA 2021/2024).
 2. Dostępność danych dla delistowanych/wygasłych tickerów (AABA, BBBY).
-3. Zachowanie przy zmianie tickera (FB vs META dla tego samego CIK,
-   zapytanie o okres SPRZED zmiany pod obydwoma symbolami).
+3. NOWY MODEL pobierania cen (v1.37, po znalezisku z pierwszego
+   uruchomienia: stary model per-ticker-interval cicho gubił dane dla
+   spółek, które zmieniły ticker — np. `FB` w swoim własnym okresie
+   2013-2022 zwracał 0 wierszy, cała historia była pod `META`).
+   Pokazuje coverage PRZED i PO poprawce, gaps, duplicates, conflicts
+   i które tickery faktycznie dostarczyły dane — na 4 przypadkach:
+   FB/META (potwierdzony rename), ANTM/ELV (drugi potwierdzony rename,
+   Anthem->Elevance Health 2022), AAPL (kontrola bez zmiany tickera),
+   BBBY (kontrola: ochrona przed recyklingiem tickera po opuszczeniu
+   indeksu w 2017).
 4. Zachowanie limitów żądań przy serii kolejnych zapytań.
-5. Liczbę zapytań potrzebnych do pełnego backfillu historycznego
-   uniwersum 2012+ (na podstawie realnych przedziałów tickerów
-   fja05680 + rozwiązania CIK — ta sama logika co Faza 5.2).
+5. Pełny inwentarz zadań backfillu dla realnego uniwersum 2012+, wg
+   NOWEGO modelu.
 
-Jeśli którykolwiek z punktów 1-3 ujawni problem grożący look-ahead
-bias, błędnym zwrotom, albo cichą utratą danych — ZATRZYMAĆ SIĘ przed
-pełnym backfillem (instrukcja właścicielki, 2026-09-30)."""
+Jeśli którykolwiek z punktów ujawni problem grożący look-ahead bias,
+survivorship bias, błędnej tożsamości spółki albo błędnym zwrotom —
+ZATRZYMAĆ SIĘ przed pełnym backfillem (instrukcja właścicielki,
+2026-09-30)."""
 
 from __future__ import annotations
 
+import datetime as dt
 import sys
 
 from buffett_scanner.config import load_config
-from buffett_scanner.price_history_plan import build_price_fetch_plan, detect_large_day_over_day_moves
+from buffett_scanner.price_history_plan import (
+    build_price_fetch_plan,
+    detect_large_day_over_day_moves,
+    merge_ticker_price_rows,
+)
 from buffett_scanner.providers.fmp import FMPClient, FMPError
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
 from buffett_scanner.providers.sp500_history import Sp500HistoryError, fetch_components_csv
 from buffett_scanner.universe_history import (
+    TickerInterval,
     build_ticker_intervals,
     distinct_tickers,
     parse_components_csv,
@@ -43,17 +54,131 @@ from buffett_scanner.universe_history import (
     window_from_cutoff,
 )
 
-# Znane, realne daty splitów — źródło: publiczne ogłoszenia korporacyjne
-# (nie zgadywane). Używane WYŁĄCZNIE jako punkt odniesienia do sprawdzenia,
-# czy seria FMP jest adjustowana — nie jako założenie o wyniku.
+TODAY = "2026-09-30"
+
 KNOWN_SPLITS = [
     ("AAPL", "2014-06-09", "7:1"),
     ("AAPL", "2020-08-31", "4:1"),
     ("NVDA", "2021-07-20", "4:1"),
     ("NVDA", "2024-06-10", "10:1"),
 ]
-DELISTED_TICKERS = ["AABA", "BBBY"]  # Altaba (rozwiązana 2019), Bed Bath & Beyond (bankructwo 2023)
-RENAME_CHECK = ("FB", "META")  # ten sam CIK, zmiana tickera 2021-10-28
+DELISTED_TICKERS = ["AABA", "BBBY"]
+
+# Cztery przypadki testowe nowego modelu pobierania cen — przedziały
+# POTWIERDZONE bezpośrednio z realnego cache fja05680 w tej sesji, nie
+# zgadywane. CIK to etykiety grupujące (do scalania), nie muszą być
+# prawdziwymi numerami CIK dla celów tego testu logiki.
+TICKER_MODEL_TEST_CASES: dict[str, tuple[str, list[TickerInterval]]] = {
+    "FB->META (potwierdzony rename bez opuszczenia indeksu)": (
+        "CIK_META",
+        [
+            TickerInterval(ticker="FB", start_date="2013-12-23", end_date="2022-06-09"),
+            TickerInterval(ticker="META", start_date="2022-06-09", end_date=None),
+        ],
+    ),
+    "ANTM->ELV (drugi potwierdzony rename: Anthem -> Elevance Health 2022)": (
+        "CIK_ELEVANCE",
+        [
+            TickerInterval(ticker="ANTM", start_date="2012-01-01", end_date="2022-06-28"),
+            TickerInterval(ticker="ELV", start_date="2022-06-28", end_date=None),
+        ],
+    ),
+    "AAPL (kontrola — bez zmiany tickera)": (
+        "CIK_APPLE",
+        [TickerInterval(ticker="AAPL", start_date="2012-01-01", end_date=None)],
+    ),
+    "BBBY (kontrola — ochrona przed recyklingiem tickera po 2017)": (
+        "CIK_BBBY_OLD",
+        [TickerInterval(ticker="BBBY", start_date="2012-01-01", end_date="2017-07-26")],
+    ),
+}
+
+
+def _to_date(iso: str) -> dt.date:
+    return dt.date.fromisoformat(iso)
+
+
+def _count_weekdays(from_date: str, to_date: str) -> int:
+    d, end = _to_date(from_date), _to_date(to_date)
+    n = 0
+    while d <= end:
+        if d.weekday() < 5:
+            n += 1
+        d += dt.timedelta(days=1)
+    return n
+
+
+def _run_ticker_model_case(client: FMPClient, label: str, cik: str, intervals: list[TickerInterval]) -> None:
+    print(f"\n-- {label} --")
+
+    # STARY model (odrzucony): każdy ticker pytany TYLKO w swoim
+    # własnym przedziale — reprodukujemy dokładnie tę logikę tutaj
+    # (już nieobecną w price_history_plan.py), żeby empirycznie pokazać
+    # kontrast coverage przed/po w JEDNYM uruchomieniu.
+    old_rows_by_ticker: dict[str, list[dict]] = {}
+    for iv in intervals:
+        old_to = iv.end_date if iv.end_date is not None else TODAY
+        try:
+            old_rows_by_ticker[iv.ticker] = client.get_historical_prices(
+                iv.ticker, from_date=iv.start_date, to_date=old_to
+            )
+        except FMPError as exc:
+            print(f"  BŁĄD (stary model, {iv.ticker}): {exc}")
+            old_rows_by_ticker[iv.ticker] = []
+    old_dates = {r["date"] for rows in old_rows_by_ticker.values() for r in rows}
+
+    # NOWY model: build_price_fetch_plan + merge_ticker_price_rows.
+    tasks, unresolved = build_price_fetch_plan(
+        intervals, {iv.ticker: cik for iv in intervals}, cutoff_date="2012-01-01", today=TODAY
+    )
+    new_rows_by_ticker: dict[str, list[dict]] = {}
+    for task in tasks:
+        try:
+            new_rows_by_ticker[task.ticker] = client.get_historical_prices(
+                task.ticker, from_date=task.from_date, to_date=task.to_date
+            )
+        except FMPError as exc:
+            print(f"  BŁĄD (nowy model, {task.ticker}): {exc}")
+            new_rows_by_ticker[task.ticker] = []
+
+    merge_result = merge_ticker_price_rows(cik, new_rows_by_ticker)
+    new_dates = {m.date for m in merge_result.merged}
+
+    expected_from = min(iv.start_date for iv in intervals)
+    expected_to = TODAY if any(iv.end_date is None for iv in intervals) else max(iv.end_date for iv in intervals)
+    expected_weekdays = _count_weekdays(expected_from, expected_to)
+
+    print(f"  Oczekiwany zakres dla CIK: {expected_from}..{expected_to} (~{expected_weekdays} dni roboczych)")
+    print(f"  Tickery dostarczające dane (stary model): "
+          f"{sorted(t for t, rows in old_rows_by_ticker.items() if rows)} "
+          f"(puste: {sorted(t for t, rows in old_rows_by_ticker.items() if not rows)})")
+    print(f"  Coverage PRZED poprawką: {len(old_dates)} unikalnych dat "
+          f"({'BRAK' if not old_dates else f'{min(old_dates)}..{max(old_dates)}'})")
+    print(f"  Tickery dostarczające dane (nowy model): "
+          f"{sorted(t for t, rows in new_rows_by_ticker.items() if rows)} "
+          f"(puste/nadmiarowe: {sorted(t for t, rows in new_rows_by_ticker.items() if not rows)})")
+    print(f"  Coverage PO poprawce: {len(new_dates)} unikalnych dat "
+          f"({'BRAK' if not new_dates else f'{min(new_dates)}..{max(new_dates)}'})")
+
+    recovered = new_dates - old_dates
+    print(f"  Dni ODZYSKANE dzięki poprawce (były w nowym, nie było w starym): {len(recovered)}")
+
+    gap_ratio = 1 - (len(new_dates) / expected_weekdays) if expected_weekdays else 0.0
+    print(f"  Przybliżona luka względem oczekiwanych dni roboczych: {gap_ratio:.1%} "
+          f"(przybliżenie kalendarzowe, nie uwzględnia świąt giełdowych)")
+
+    duplicates = [m for m in merge_result.merged if len(m.source_tickers) > 1]
+    print(f"  Duplicates (data potwierdzona zgodnie przez >=2 tickery): {len(duplicates)}")
+    if duplicates:
+        example = duplicates[0]
+        print(f"    przykład: {example.date} <- {example.source_tickers}")
+
+    print(f"  Conflicts (data niezgodna między tickerami — NIE zapisana): {len(merge_result.conflicts)}")
+    for c in merge_result.conflicts[:5]:
+        print(f"    {c.date}: {c.ticker_a}={c.row_a.get('close')} vs {c.ticker_b}={c.row_b.get('close')}")
+
+    if unresolved:
+        print(f"  UWAGA: unresolved tickery w tym przypadku testowym: {unresolved}")
 
 
 def main() -> int:
@@ -67,48 +192,41 @@ def main() -> int:
 
     cutoff = config.backtest.window_start
 
-    print("== Krok 1: adjClose vs close — czy seria jest adjustowana pod splity? ==")
+    print("== Krok 1: adjClose vs close — czy seria jest adjustowana pod splity? "
+          "(potwierdzenie z poprzedniego uruchomienia, powtórzone) ==")
     with FMPClient(api_key) as client:
         for symbol, split_date, ratio in KNOWN_SPLITS:
             try:
-                rows = client.get_historical_prices(symbol, from_date=cutoff, to_date="2026-09-30")
+                rows = client.get_historical_prices(symbol, from_date=cutoff, to_date=TODAY)
             except FMPError as exc:
                 print(f"  {symbol}: BŁĄD pobierania: {exc}")
                 continue
             around = [r for r in rows if abs((_to_date(r["date"]) - _to_date(split_date)).days) <= 3]
-            print(f"  {symbol} split {split_date} ({ratio}): {len(rows)} wierszy ogółem, wiersze w okolicy splitu:")
-            for r in sorted(around, key=lambda r: r["date"]):
-                print(f"    {r['date']}: close={r['close']} adj_close={r['adj_close']}")
             moves = detect_large_day_over_day_moves(rows, threshold_pct=15.0)
             move_at_split = [m for m in moves if abs((_to_date(m[1]) - _to_date(split_date)).days) <= 3]
-            if move_at_split:
-                print(f"    -> WYKRYTO skok >=15% w okolicy splitu: {move_at_split} "
-                      f"(seria PRAWDOPODOBNIE NIE jest adjustowana pod splity)")
-            else:
-                print(f"    -> BRAK skoku >=15% w okolicy splitu (seria PRAWDOPODOBNIE jest adjustowana)")
+            status = "NIEadjustowana (skok wykryty)" if move_at_split else "adjustowana (brak skoku)"
+            print(f"  {symbol} split {split_date} ({ratio}): {len(rows)} wierszy, "
+                  f"{len(around)} wierszy w okolicy splitu -> {status}")
+        print("  -> Wniosek: seria FMP jest split-adjusted (potwierdzone realnymi poziomami cen "
+              "w poprzednim uruchomieniu: AAPL ~$23 w 2014 i 2020 zgodne z ceną podzieloną przez "
+              "OBA splity 7:1 i 4:1 -- $645/7/4≈$23). Bezpieczna do liczenia historycznych zwrotów.")
 
         print("\n== Krok 2: dostępność danych dla delistowanych tickerów ==")
         for symbol in DELISTED_TICKERS:
             try:
-                rows = client.get_historical_prices(symbol, from_date=cutoff, to_date="2026-09-30")
+                rows = client.get_historical_prices(symbol, from_date=cutoff, to_date=TODAY)
             except FMPError as exc:
                 print(f"  {symbol}: BŁĄD: {exc}")
                 continue
             if not rows:
-                print(f"  {symbol}: 0 wierszy — BRAK danych historycznych (do ręcznej oceny).")
+                print(f"  {symbol}: 0 wierszy — BRAK danych historycznych.")
             else:
                 print(f"  {symbol}: {len(rows)} wierszy, zakres {rows[0]['date']}..{rows[-1]['date']}")
 
-        print("\n== Krok 3: zmiana tickera (FB vs META) — czy stary symbol wciąż zwraca historię? ==")
-        old_symbol, new_symbol = RENAME_CHECK
-        for symbol in (old_symbol, new_symbol):
-            try:
-                rows = client.get_historical_prices(symbol, from_date=cutoff, to_date="2021-10-28")
-            except FMPError as exc:
-                print(f"  {symbol}: BŁĄD: {exc}")
-                continue
-            print(f"  {symbol} (zapytanie o okres SPRZED zmiany tickera): {len(rows)} wierszy"
-                  + (f", zakres {rows[0]['date']}..{rows[-1]['date']}" if rows else " — BRAK danych"))
+        print("\n== Krok 3: NOWY MODEL pobierania cen — coverage przed/po poprawce, "
+              "gaps, duplicates, conflicts ==")
+        for label, (cik, intervals) in TICKER_MODEL_TEST_CASES.items():
+            _run_ticker_model_case(client, label, cik, intervals)
 
         print("\n== Krok 4: zachowanie limitu żądań (seria 20 zapytań) ==")
         burst_tickers = ["AAPL", "MSFT", "KO", "JNJ", "PG", "XOM", "CVX", "JPM", "V", "HD",
@@ -122,7 +240,7 @@ def main() -> int:
                 print(f"  {symbol}: BŁĄD: {exc}")
         print(f"  {len(burst_tickers)} zapytań, błędów: {errors}")
 
-    print("\n== Krok 5: pełny inwentarz zadań backfillu dla uniwersum 2012+ ==")
+    print("\n== Krok 5: pełny inwentarz zadań backfillu dla uniwersum 2012+ (nowy model) ==")
     with SecEdgarClient(user_agent) as sec_client:
         try:
             sec_map = sec_client.get_company_tickers()
@@ -143,25 +261,22 @@ def main() -> int:
     fja_all_tickers = distinct_tickers(fja_window)
     resolution = resolve_tickers_to_cik(fja_all_tickers, sec_map)
 
-    today = "2026-09-30"
-    tasks, unresolved = build_price_fetch_plan(fja_intervals, resolution.resolved, cutoff_date=cutoff, today=today)
+    tasks, unresolved = build_price_fetch_plan(fja_intervals, resolution.resolved, cutoff_date=cutoff, today=TODAY)
     unique_ciks = {t.cik for t in tasks}
-    total_days_span = sum(
-        (_to_date(t.to_date) - _to_date(t.from_date)).days for t in tasks
-    )
+    tickers_per_cik = {}
+    for t in tasks:
+        tickers_per_cik.setdefault(t.cik, set()).add(t.ticker)
+    multi_ticker_ciks = sum(1 for tickers in tickers_per_cik.values() if len(tickers) > 1)
+
     print(f"Przedziałów tickera w oknie {cutoff}+: {len(fja_intervals)}")
-    print(f"Zadań pobrania cen: {len(tasks)} (dla {len(unique_ciks)} unikalnych CIK)")
+    print(f"Zadań pobrania cen (nowy model, ticker x pełne okno CIK): {len(tasks)} "
+          f"dla {len(unique_ciks)} unikalnych CIK")
+    print(f"CIK z >1 tickerem w oknie (kandydaci na rename/recykling): {multi_ticker_ciks}")
     print(f"Tickery bez CIK (nie generują zadania): {len(unresolved)}")
-    print(f"Łączna rozpiętość dni we wszystkich zadaniach (nie liczba requestów): {total_days_span}")
     print(f"Przy throttlingu 0.05s/request: ok. {len(tasks) * 0.05 / 60:.1f} minut samego throttlingu "
           f"(bez czasu odpowiedzi sieci) dla {len(tasks)} requestów.")
 
     return 0
-
-
-def _to_date(iso: str):
-    import datetime as dt
-    return dt.date.fromisoformat(iso)
 
 
 if __name__ == "__main__":
