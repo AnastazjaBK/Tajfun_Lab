@@ -62,7 +62,9 @@ from buffett_scanner.universe_history import (
 
 CUTOFF = "2012-01-01"  # Decyzja D14 — nie rozszerzamy zakresu przed 2012
 SAMPLE_DATES = ["2012-01-31", "2018-12-31", "2026-09-01"]
-TOLERANCE_RANGE = range(0, 6)  # 0..5 dni, do empirycznego wyboru progu (plateau)
+TOLERANCE_RANGE = range(0, 11)  # 0..10 dni — poszerzone po pierwszym realnym
+# uruchomieniu (v1.34): przy 0..5 dniach krzywa jeszcze rosła na samym końcu
+# zakresu (5d dawało więcej dopasowań niż 4d) — patrz _plateau_caveat.
 
 
 def _print_curve(label: str, curve: list[dict]) -> None:
@@ -72,6 +74,24 @@ def _print_curve(label: str, curve: list[dict]) -> None:
             f"    tolerancja={p['tolerance_days']}d  dopasowane={p['matched_count']}  "
             f"tylko_kanoniczne={p['only_canonical_count']}  tylko_walidator={p['only_validator_count']}"
         )
+
+
+def _plateau_caveat(curve: list[dict]) -> str:
+    """Jawne ostrzeżenie, gdy krzywa NIE spłaszczyła się jeszcze w
+    testowanym zakresie (ostatni punkt wciąż daje więcej dopasowań niż
+    przedostatni) — `pick_plateau_tolerance` w takim wypadku zwraca
+    ostatnią przetestowaną tolerancję, co NIE jest tym samym co
+    prawdziwe plateau. Puste string, gdy plateau faktycznie osiągnięte."""
+    if len(curve) < 2:
+        return ""
+    if curve[-1]["matched_count"] != curve[-2]["matched_count"]:
+        return (
+            f"  UWAGA: matched_count WCIĄŻ ROŚNIE na końcu testowanego zakresu "
+            f"({curve[-2]['tolerance_days']}d={curve[-2]['matched_count']} -> "
+            f"{curve[-1]['tolerance_days']}d={curve[-1]['matched_count']}) — "
+            f"prawdziwe plateau może wymagać szerszego zakresu niż {TOLERANCE_RANGE}."
+        )
+    return ""
 
 
 def _field_dominance(curve_a: list[dict], curve_b: list[dict]) -> str | None:
@@ -148,26 +168,72 @@ def main() -> int:
             return 1
 
     fmp_events_all = parse_fmp_events(raw_rows)
+    # Rozwiązujemy CIK na PEŁNYM logu (1957-2026), nie tylko na oknie
+    # CUTOFF+: tickery bez ŻADNEGO zdarzenia w oknie (np. AAPL — bez
+    # ADD/REMOVE od dawna, bo nigdy nie opuściło indeksu) muszą i tak
+    # rozwiązać się do CIK, bo są potrzebne w Kroku 7 (current_members,
+    # rekonstrukcja na datach 2012+). Ograniczanie samego ROZWIĄZYWANIA
+    # do okna (pierwsza wersja tego skryptu) psuło pokrycie CIK dla
+    # takich długoletnich, niezmienionych tickerów — poprawione po
+    # pierwszym realnym uruchomieniu.
     fmp_names_by_ticker = collect_fmp_ticker_names(fmp_events_all)
     fmp_resolution = resolve_fmp_tickers(fmp_names_by_ticker, sec_ticker_map, sec_titles)
-    print(
-        f"FMP: {len(fmp_names_by_ticker)} unikalnych tickerów w logu zdarzeń, "
-        f"rozwiązanych={len(fmp_resolution.resolved)} "
-        f"(w tym via wariant formatu={len(fmp_resolution.resolved_via_format_variant)}), "
-        f"UNRESOLVED={len(fmp_resolution.unresolved)}"
-    )
-    if fmp_resolution.unresolved:
-        print(f"  FMP UNRESOLVED (max 30): {', '.join(fmp_resolution.unresolved[:30])}")
-    print(f"  FMP name_mismatch_suspicious (możliwy recykling tickera, max 20):")
-    for ticker, info in list(fmp_resolution.name_mismatch_suspicious.items())[:20]:
-        print(f"    {ticker}: cik={info['cik']} sec_title={info['sec_title']!r} fmp_name={info['fmp_name']!r}")
-    print(f"    (razem: {len(fmp_resolution.name_mismatch_suspicious)})")
 
-    internal_multi_name = find_tickers_with_multiple_names(fmp_events_all)
-    print(f"  FMP wewnętrzna niespójność nazw (ten sam ticker, >=2 niezgodne nazwy w logu FMP, max 20):")
+    # Nato Decyzja D14 wymaga, żeby RAPORTOWANE liczby (coverage) dotyczyły
+    # tickerów faktycznie ISTOTNYCH dla okna 2012+ — nie całego logu FMP z
+    # lat 60. Ticker jest "istotny", jeśli ma zdarzenie w oknie CUTOFF+ LUB
+    # jest w dzisiejszym potwierdzonym składzie (current_members) — to
+    # DRUGIE jest konieczne, bo długoletnie tickery bez zdarzenia w oknie
+    # są mimo to częścią składu 2012+ (patrz wyżej).
+    fmp_events_in_window = [e for e in fmp_events_all if e.date >= CUTOFF]
+    fmp_relevant_tickers = set(collect_fmp_ticker_names(fmp_events_in_window)) | current_members
+    fmp_resolved_in_window = {
+        t: cik for t, cik in fmp_resolution.resolved.items() if t in fmp_relevant_tickers
+    }
+    fmp_unresolved_in_window = sorted(t for t in fmp_resolution.unresolved if t in fmp_relevant_tickers)
+    fmp_name_mismatch_in_window = {
+        t: info for t, info in fmp_resolution.name_mismatch_suspicious.items() if t in fmp_relevant_tickers
+    }
+    print(
+        f"FMP: {len(fmp_relevant_tickers)} tickerów istotnych dla okna {CUTOFF}+ "
+        f"(log pełny 1957-2026 ma {len(fmp_names_by_ticker)} tickerów ogółem — reszta poza "
+        f"D14, rozwiązywana tylko pomocniczo dla Kroku 7), "
+        f"rozwiązanych W OKNIE={len(fmp_resolved_in_window)} "
+        f"UNRESOLVED W OKNIE={len(fmp_unresolved_in_window)}"
+    )
+    if fmp_unresolved_in_window:
+        print(f"  FMP UNRESOLVED w oknie (max 30): {', '.join(fmp_unresolved_in_window[:30])}")
+    print(f"  FMP name_mismatch_suspicious w oknie (możliwy recykling tickera, max 20):")
+    for ticker, info in list(fmp_name_mismatch_in_window.items())[:20]:
+        print(f"    {ticker}: cik={info['cik']} sec_title={info['sec_title']!r} fmp_name={info['fmp_name']!r}")
+    print(f"    (razem w oknie: {len(fmp_name_mismatch_in_window)}, w całym logu: {len(fmp_resolution.name_mismatch_suspicious)})")
+
+    internal_multi_name_all = find_tickers_with_multiple_names(fmp_events_all)
+    internal_multi_name = {
+        t: names for t, names in internal_multi_name_all.items() if t in fmp_relevant_tickers
+    }
+    print(f"  FMP wewnętrzna niespójność nazw w oknie (ten sam ticker, >=2 niezgodne nazwy, max 20):")
     for ticker, names in list(internal_multi_name.items())[:20]:
         print(f"    {ticker}: {sorted(names)}")
-    print(f"    (razem: {len(internal_multi_name)})")
+    print(f"    (razem w oknie: {len(internal_multi_name)}, w całym logu: {len(internal_multi_name_all)})")
+
+    print(
+        f"\n  Krzyżowa kontrola (tanio, z już pobranych danych, bez zgadywania): czy któryś "
+        f"UNRESOLVED ticker (w oknie) jest jednocześnie w DZISIEJSZYM potwierdzonym składzie FMP "
+        f"(current_members, {len(current_members)} tickerów) — jeśli tak, to jest niezgodne "
+        f"z oczekiwaniem, że unresolved = tylko historyczne/wygasłe tickery, i wymaga zbadania "
+        f"jako możliwy błąd rozwiązywania, nie przyjmowania milcząco jako ograniczenie danych:"
+    )
+    fja_unresolved_but_currently_active = sorted(set(fja_resolution.unresolved) & current_members)
+    fmp_unresolved_but_currently_active = sorted(set(fmp_unresolved_in_window) & current_members)
+    print(
+        f"    fja05680 UNRESOLVED ∩ dzisiejszy skład FMP: {len(fja_unresolved_but_currently_active)} "
+        f"-> {fja_unresolved_but_currently_active}"
+    )
+    print(
+        f"    FMP UNRESOLVED (w oknie) ∩ dzisiejszy skład FMP: {len(fmp_unresolved_but_currently_active)} "
+        f"-> {fmp_unresolved_but_currently_active}"
+    )
 
     print(f"\n== Krok 4: zdarzenia CIK-poziomu w oknie {CUTOFF}+ (oba pola daty FMP) ==")
     fja_events_set: set[ChangeEvent] = set()
@@ -212,7 +278,13 @@ def main() -> int:
         fja_cik_conv.events, fmp_cik_conv_date_added.events, tolerance_range_days=TOLERANCE_RANGE
     )
     _print_curve("pole 'date'", curve_date)
+    caveat_date = _plateau_caveat(curve_date)
+    if caveat_date:
+        print(caveat_date)
     _print_curve("pole 'dateAdded'", curve_date_added)
+    caveat_date_added = _plateau_caveat(curve_date_added)
+    if caveat_date_added:
+        print(caveat_date_added)
 
     dominant_field = _field_dominance(curve_date, curve_date_added)
     print(
@@ -228,6 +300,9 @@ def main() -> int:
         chosen_t = pick_plateau_tolerance(curve)
         result = match_cik_events_with_tolerance(fja_cik_conv.events, fmp_conv.events, tolerance_days=chosen_t)
         print(f"\n-- pole={field_name}, tolerancja (plateau)={chosen_t}d --")
+        caveat = _plateau_caveat(curve)
+        if caveat:
+            print(f"  UWAGA: ta tolerancja to KONIEC testowanego zakresu, nie potwierdzone plateau:\n{caveat}")
         print(f"  Dopasowane: {len(result.matched)}")
         print(f"  Tylko fja05680 (kandydaci na lukę walidatora, max 15):")
         for e in result.only_canonical[:15]:
