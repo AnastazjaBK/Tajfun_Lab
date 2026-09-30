@@ -1,0 +1,43 @@
+name: Phase 5.2 Universe Membership Build (final, writes DB)
+
+# Reczne uruchomienie z przegladarki, jak poprzednie fazy. Domkniecie
+# OPEN BLOCKER 2 (design review v1.36): finalny build universe_membership
+# na zatwierdzonym projekcie (fja05680 kanoniczne, FMP walidator, CIK
+# klucz, validation_rule_version). Empiryczny build dla okna 2012+
+# (Decyzja D14). Zapisuje do SQLite w runnerze (efemeryczny plik,
+# artefakt uploadowany do pobrania) — projekt nie ma jeszcze
+# hostowanej bazy Postgres/Supabase (V1).
+#
+# Wymaga sekretow FMP_API_KEY i SEC_EDGAR_USER_AGENT (oba juz istnieja).
+# fja05680/sp500 jest darmowe, bez klucza.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe (pelny zestaw przed buildem)
+        run: python -m pytest -q
+
+      - name: Empiryczny build universe_membership (Faza 5.2, domkniecie OPEN BLOCKER 2)
+        run: python -m buffett_scanner.cli --db universe_membership_build.db build-universe-membership --cutoff 2012-01-01
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+
+      - name: Upload zbudowanej bazy jako artefakt
+        uses: actions/upload-artifact@v4
+        with:
+          name: universe-membership-build-db
+          path: universe_membership_build.db
+          retention-days: 14
