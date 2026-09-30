@@ -312,6 +312,7 @@ def _minimal_full_config():
         ),
         hard_gates=HardGatesConfig(),
         data_provider=base.data_provider,
+        backtest=base.backtest,
     )
 
 

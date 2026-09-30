@@ -99,3 +99,24 @@ def test_resolve_llm_api_key_reads_env_var(monkeypatch):
     config = load_config(DEFAULT_CONFIG_PATH)
     monkeypatch.setenv(config.llm.api_key_env_var, "dummy-claude-key")
     assert config.llm.resolve_api_key() == "dummy-claude-key"
+
+
+def test_backtest_config_loads_window_and_limited_but_honest_status():
+    """Faza 5.3 (sekcja 13, Decyzja D14) — okno 2012+, jawna adnotacja
+    LIMITED_BUT_HONEST. Ten config.yaml zapis istniał już przed
+    wpięciem BacktestConfig do AppConfig (v1.21+) — ten test potwierdza,
+    że load_config faktycznie go teraz waliduje, nie tylko ignoruje
+    jako nieznane pole."""
+    config = load_config(DEFAULT_CONFIG_PATH)
+    assert config.backtest.window_start == "2012-01-01"
+    assert config.backtest.window_end is None
+    assert config.backtest.status == "LIMITED_BUT_HONEST"
+
+
+def test_backtest_config_requires_window_start():
+    from pydantic import ValidationError as PydValidationError
+
+    from buffett_scanner.config import BacktestConfig
+
+    with pytest.raises(PydValidationError):
+        BacktestConfig()

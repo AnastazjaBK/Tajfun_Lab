@@ -32,6 +32,19 @@ class DeclineScannerConfig(BaseModel):
     status: str = "UNCALIBRATED"
 
 
+class BacktestConfig(BaseModel):
+    """Faza 5.3 (sekcja 13, Decyzja D14) — okno backtestu ograniczone do
+    2012+, żeby uniknąć survivorship bias (OPEN BLOCKER 2) i niepewnej
+    jakości danych XBRL sprzed dojrzałości obowiązkowego taggingu
+    (OPEN BLOCKER 1). `window_end=None` = do dziś. `status` jest jawną
+    adnotacją ograniczenia zakresu, obowiązkową w KAŻDYM raporcie z
+    backtestu (sekcja 13) — nie tylko w configu."""
+
+    window_start: str
+    window_end: str | None = None
+    status: str = "LIMITED_BUT_HONEST"
+
+
 class PrefilterRule(BaseModel):
     """Jedna reguła FLAG lub EXCLUDE (§BLOCKER 5 design review).
 
@@ -321,6 +334,7 @@ class AppConfig(BaseModel):
     valuation: ValuationConfig
     hard_gates: HardGatesConfig
     data_provider: DataProviderConfig
+    backtest: BacktestConfig
 
 
 def load_config(path: str | Path = DEFAULT_CONFIG_PATH) -> AppConfig:

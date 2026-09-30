@@ -2,9 +2,9 @@
 #
 # Jedno źródło prawdy dla progów i parametrów pipeline'u (patrz
 # docs/buffett-scanner-design-review.md, sekcja 6). Sekcje potrzebne w
-# Fazach 0-4 są tu wypełnione — pozostałe (watchlist, sector_overrides,
-# holdings, backtest) dojdą w kolejnych fazach, razem z kodem, który je
-# faktycznie używa.
+# Fazach 0-4 i backtest (Faza 5.3) są tu wypełnione — pozostałe
+# (watchlist, sector_overrides, holdings) dojdą w kolejnych fazach,
+# razem z kodem, który je faktycznie używa.
 
 universe:
   name: sp500
@@ -207,3 +207,13 @@ data_provider:
   plan: free                # aktualny plan właściciela; Starter odłożony (patrz v1.9)
   filings: sec_edgar
   api_key_env_var: FMP_API_KEY
+
+backtest:
+  # Faza 5.3 (sekcja 13, Decyzja D14) — okno ograniczone do 2012+, żeby
+  # uniknąć survivorship bias (OPEN BLOCKER 2, rozwiązany empirycznie w
+  # Fazie 5.2) i niepewnej jakości danych XBRL sprzed dojrzałości
+  # obowiązkowego taggingu (OPEN BLOCKER 1). status: LIMITED_BUT_HONEST
+  # to obowiązkowa adnotacja w KAŻDYM raporcie z backtestu, nie tylko tutaj.
+  window_start: "2012-01-01"
+  window_end: null          # do dziś
+  status: LIMITED_BUT_HONEST
