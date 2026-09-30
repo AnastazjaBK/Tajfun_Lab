@@ -1,0 +1,42 @@
+name: Phase 5.3 Ticker Rename Multi-Signal Verification
+
+# Reczne uruchomienie z przegladarki. Zatwierdzone przez wlasciciela
+# 2026-09-30 (podejscie LIMITED_BUT_HONEST) po Proof Run zero-gap
+# adjacency, ktory wykazal: sama strukturalna jednoznacznosc NIE jest
+# wystarczajacym dowodem ciaglosci spolki (np. EA->FERG w tabeli
+# "jednoznacznych" kandydatow to najpewniej przypadkowa podmiana 1-do-1
+# w indeksie, nie rename).
+#
+# Nie implementujemy ogolnej automatycznej reguly. Zamiast tego: jawna,
+# reczna allowlista (ANTM/ELV, FB/META, juz potwierdzone wielokrotnie w
+# tej sesji) + proba ROZSZERZENIA jej o kolejne przypadki przez regule
+# wielosygnalowa (FMP get_company_profile, FMP nazwa z logu zdarzen vs
+# SEC/FMP nazwa sasiada, SEC formerNames) - kazdy kandydat oceniany PER
+# KANDYDAT (nie per ticker), zaden pojedynczy sygnal nie wystarcza,
+# jawna sprzecznosc w FMP profile dyskwalifikuje natychmiast.
+#
+# WYLACZNIE DIAGNOSTYCZNE - nie zapisuje nic do bazy, nie zmienia
+# universe_membership ani resolve_tickers_to_cik.
+#
+# Wymaga sekretow FMP_API_KEY i SEC_EDGAR_USER_AGENT (oba juz istnieja).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Multi-signal weryfikacja rename (Faza 5.3, LIMITED_BUT_HONEST)
+        run: python -m buffett_scanner.providers.ticker_rename_multi_signal_verification
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
