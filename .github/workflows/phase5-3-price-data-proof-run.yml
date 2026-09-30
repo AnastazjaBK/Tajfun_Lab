@@ -1,0 +1,35 @@
+name: Phase 5.3 Price Data Proof Run
+
+# Reczne uruchomienie z przegladarki, jak poprzednie fazy. Faza 5.3
+# (harness backtestu, design review v1.36+): przed pelnym backfillem
+# historycznych cen 2012+ sprawdzamy empirycznie (decyzja wlascicielki,
+# 2026-09-30): czy FMP adjClose/close jest faktycznie adjustowane pod
+# splity (ryzyko cichego zniekształcenia zwrotow w backteście), dostepnosc
+# danych dla delistowanych tickerow, zachowanie przy zmianie tickera,
+# limity zadan, i pelny inwentarz zadan backfillu.
+#
+# WYLACZNIE DIAGNOSTYCZNE - nie zapisuje nic do bazy, nie wykonuje
+# pelnego backfillu.
+#
+# Wymaga sekretow FMP_API_KEY i SEC_EDGAR_USER_AGENT (oba juz istnieja).
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  proof-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Price Data Proof Run (Faza 5.3, przed pelnym backfillem)
+        run: python -m buffett_scanner.providers.price_data_proof_run
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
