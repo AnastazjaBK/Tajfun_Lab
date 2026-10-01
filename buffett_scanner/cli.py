@@ -832,6 +832,19 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
             if cik not in allowlist_ciks and pre_by_cik[cik] > post_by_cik.get(cik, 0)
         )
         print(f"  CIK-i spoza allowlisty, które się scaliły: {other_merged_ciks}")
+    multi_segment_allowlist_ciks = sorted(cik for cik in allowlist_ciks if pre_by_cik.get(cik, 0) > 2)
+    if multi_segment_allowlist_ciks:
+        print(
+            f"  UWAGA: {len(multi_segment_allowlist_ciks)} CIK-(ów) allowlisty ma >2 segmenty "
+            f"(więcej niż sam stary+nowy ticker) — pełny łańcuch tickerów:"
+        )
+        for cik in multi_segment_allowlist_ciks:
+            chain = sorted(
+                (iv.ticker, iv.start_date, iv.end_date)
+                for iv in fja_intervals
+                if allowlist_result.resolved.get(iv.ticker) == cik
+            )
+            print(f"    CIK={cik}: {chain}")
     print(f"Unikalnych CIK: {len(unique_ciks)}")
     print(f"Unresolved (fja05680, nie generują wiersza): {len(unresolved_fja)}")
     print(
