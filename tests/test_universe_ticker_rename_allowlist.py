@@ -76,6 +76,34 @@ def test_apply_curated_allowlist_skips_when_new_ticker_itself_unresolved():
     assert result.still_unresolved == ("ANTM", "ELV")
 
 
+def test_apply_curated_allowlist_handles_reversed_direction_new_ticker_unresolved():
+    """Przypadek FISV->FI (realny błąd znaleziony 2026-10-01, build
+    produkcyjny): to NEW_TICKER (FI) jest nierozwiązany dziś, a
+    OLD_TICKER (FISV) jest kotwicą rozwiązaną dziś — odwrotnie niż w
+    typowym przypadku ANTM/ELV. Funkcja musi wykryć ten kierunek i
+    dodać FI (nie FISV) do resolved."""
+    resolved = {"FISV": "798354"}
+    unresolved = ("FI",)
+    result = apply_curated_allowlist(resolved, unresolved, allowlist=CURATED_ALLOWLIST_SEED)
+    assert result.resolved["FI"] == "798354"
+    assert result.resolved["FISV"] == "798354"
+    assert "FI" in result.resolved_via_curated_allowlist
+    assert "FISV" not in result.resolved_via_curated_allowlist  # FISV nigdy nie był unresolved
+    assert result.still_unresolved == ()
+
+
+def test_apply_curated_allowlist_skips_when_both_tickers_unresolved_no_anchor():
+    """Jeśli ANI old_ticker ANI new_ticker nie jest dziś rozwiązany,
+    nie ma kotwicy do krzyżowej kontroli — rekord pomijany, NIGDY nie
+    zgadujemy, który z dwóch dodać."""
+    resolved = {}
+    unresolved = ("FI", "FISV")
+    result = apply_curated_allowlist(resolved, unresolved, allowlist=CURATED_ALLOWLIST_SEED)
+    assert "FI" not in result.resolved
+    assert "FISV" not in result.resolved
+    assert set(result.still_unresolved) == {"FI", "FISV"}
+
+
 def test_apply_curated_allowlist_provenance_note_contains_key_fields():
     resolved = {"ELV": "1156039"}
     unresolved = ("ANTM",)

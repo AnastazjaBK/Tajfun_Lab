@@ -220,26 +220,36 @@ def apply_curated_allowlist(
     """Rozszerza wynik `universe_history.resolve_tickers_to_cik` o
     kuratorowaną allowlistę rename tickerów (Faza 5.3, LIMITED_BUT_HONEST,
     zatwierdzone przez właścicielkę 2026-10-01, po dwóch realnych Proof
-    Run i naprawie błędu kierunku starego/nowego tickera). Dla każdego
-    rekordu allowlisty: `old_ticker` zostaje dodany do `resolved` TYLKO
-    jeśli (a) jest obecnie `unresolved` (nigdy nie nadpisuje istniejącego
-    rozwiązania DIRECT/FORMAT_VARIANT) ORAZ (b) `new_ticker` rozwiązuje
-    się DZIŚ do DOKŁADNIE tego samego CIK, co deklaruje rekord —
-    krzyżowa kontrola z aktualnym stanem SEC, NIGDY ślepe zaufanie
-    allowlistie. Jeśli którykolwiek warunek zawiedzie (np. dane SEC się
-    zmieniły od zatwierdzenia rekordu), rekord jest POMIJANY i ticker
-    zostaje `CIK_UNRESOLVED` — zgodnie z zasadą „brak rozwiązania jest
-    preferowany względem potencjalnie błędnego przypisania"."""
+    Run i naprawie błędu kierunku starego/nowego tickera).
+
+    WAŻNE (błąd znaleziony i naprawiony 2026-10-01, ten sam rodzaj co w
+    `chronological_order`): `old_ticker` NIE jest zawsze tickerem
+    nierozwiązanym dziś — dla par z kierunkiem `RESOLVED_ENDS_
+    UNRESOLVED_STARTS` (np. FISV->FI) to `new_ticker` jest nierozwiązany
+    dziś, a `old_ticker` jest kotwicą. Dlatego funkcja sprawdza OBA
+    kierunki: albo `old_ticker` jest nierozwiązany i `new_ticker` jest
+    kotwicą (typowy przypadek), albo odwrotnie — `new_ticker` jest
+    nierozwiązany i `old_ticker` jest kotwicą. W obu przypadkach kotwica
+    MUSI rozwiązywać się DZIŚ do DOKŁADNIE tego CIK, co deklaruje rekord
+    — krzyżowa kontrola z aktualnym stanem SEC, NIGDY ślepe zaufanie
+    allowlistie. Jeśli żaden z dwóch wariantów nie jest spełniony (np.
+    dane SEC się zmieniły od zatwierdzenia rekordu, albo oba tickery są
+    dziś nierozwiązane — nie ma czego użyć jako kotwicy), rekord jest
+    POMIJANY i ticker zostaje `CIK_UNRESOLVED` — zgodnie z zasadą „brak
+    rozwiązania jest preferowany względem potencjalnie błędnego
+    przypisania"."""
     new_resolved = dict(resolved)
     notes: dict[str, str] = {}
     unresolved_set = set(unresolved)
     for record in allowlist:
-        if record.old_ticker not in unresolved_set:
+        if record.old_ticker in unresolved_set and resolved.get(record.new_ticker) == record.cik:
+            ticker_to_add = record.old_ticker
+        elif record.new_ticker in unresolved_set and resolved.get(record.old_ticker) == record.cik:
+            ticker_to_add = record.new_ticker
+        else:
             continue
-        if resolved.get(record.new_ticker) != record.cik:
-            continue
-        new_resolved[record.old_ticker] = record.cik
-        notes[record.old_ticker] = _provenance_note(record)
+        new_resolved[ticker_to_add] = record.cik
+        notes[ticker_to_add] = _provenance_note(record)
     remaining_unresolved = tuple(sorted(unresolved_set - notes.keys()))
     return AllowlistApplicationResult(
         resolved=new_resolved, resolved_via_curated_allowlist=notes, still_unresolved=remaining_unresolved,

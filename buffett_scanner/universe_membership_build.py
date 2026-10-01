@@ -125,9 +125,23 @@ def merge_adjacent_same_cik_intervals(intervals: list[MembershipInterval]) -> li
     zatwierdzoną przez właścicielkę). Provenance (source,
     cik_resolution_method) scalonego przedziału pochodzi z PIERWSZEGO
     (dotyczy wejścia w ciągły okres); `exit_validation_*` z DRUGIEGO
-    (dotyczy faktycznego końca, jeśli istnieje). Zakłada brak
-    nakładających się przedziałów dla tego samego CIK (to inny problem,
-    poza zakresem tej funkcji)."""
+    (dotyczy faktycznego końca, jeśli istnieje).
+
+    WYJĄTEK (Faza 5.3, LIMITED_BUT_HONEST, v1.39, znalezione 2026-10-01
+    przy realnym buildzie dla pary FISV->FI): jeśli KTÓRYKOLWIEK z dwóch
+    scalanych przedziałów ma `cik_resolution_method == 'CURATED_ALLOWLIST'`,
+    TEN przedział wygrywa — niezależnie, czy jest pierwszy czy drugi.
+    Bez tego wyjątku para typu FISV(DIRECT, wcześniejszy)->FI(CURATED_
+    ALLOWLIST, późniejszy) scaliłaby się do method='DIRECT', fałszywie
+    ukrywając, że DRUGA połowa ciągłego członkostwa zależała od
+    allowlisty, by w ogóle się pojawić (bez niej FI zostałby CIK_
+    UNRESOLVED, obcinając historię na dacie zmiany tickera). Reguła
+    "z pierwszego" dla zwykłego DIRECT/FORMAT_VARIANT (bez udziału
+    CURATED_ALLOWLIST) pozostaje NIEZMIENIONA — to ustalone zachowanie
+    z Fazy 5.2, zatwierdzone wcześniej.
+
+    Zakłada brak nakładających się przedziałów dla tego samego CIK (to
+    inny problem, poza zakresem tej funkcji)."""
     if not intervals:
         return []
 
@@ -141,6 +155,12 @@ def merge_adjacent_same_cik_intervals(intervals: list[MembershipInterval]) -> li
         current = group_sorted[0]
         for nxt in group_sorted[1:]:
             if current.end_date is not None and current.end_date == nxt.start_date:
+                if current.cik_resolution_method != "CURATED_ALLOWLIST" and nxt.cik_resolution_method == "CURATED_ALLOWLIST":
+                    current = replace(
+                        current,
+                        cik_resolution_method=nxt.cik_resolution_method,
+                        cik_resolution_note=nxt.cik_resolution_note,
+                    )
                 current = replace(
                     current,
                     end_date=nxt.end_date,

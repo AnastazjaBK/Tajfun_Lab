@@ -166,6 +166,39 @@ def test_merge_keeps_curated_allowlist_note_from_first_interval():
     assert merged[0].end_date is None
 
 
+def test_merge_curated_allowlist_wins_even_when_it_is_the_second_interval():
+    """Przypadek FISV->FI (realny błąd znaleziony 2026-10-01 przy
+    produkcyjnym buildzie): FISV (DIRECT, WCZEŚNIEJSZY) jest kotwicą,
+    FI (CURATED_ALLOWLIST, PÓŹNIEJSZY) jest tickerem odzyskanym przez
+    allowlistę. Scalony przedział MUSI pokazać CURATED_ALLOWLIST, mimo
+    że to drugi (nie pierwszy) przedział — inaczej znika informacja, że
+    druga połowa ciągłego członkostwa zależała od allowlisty."""
+    first = _mi("798354", "2012-01-01", "2023-06-07", cik_resolution_method="DIRECT")
+    second = _mi(
+        "798354", "2023-06-07", None,
+        cik_resolution_method="CURATED_ALLOWLIST", cik_resolution_note="old=FISV new=FI",
+    )
+    merged = merge_adjacent_same_cik_intervals([first, second])
+    assert len(merged) == 1
+    assert merged[0].cik_resolution_method == "CURATED_ALLOWLIST"
+    assert merged[0].cik_resolution_note == "old=FISV new=FI"
+    assert merged[0].start_date == "2012-01-01"
+    assert merged[0].end_date is None
+
+
+def test_merge_direct_vs_format_variant_precedence_unchanged_without_curated_allowlist():
+    """Kontrola nieregresji: reguła "z pierwszego" dla zwykłego
+    DIRECT/FORMAT_VARIANT (bez udziału CURATED_ALLOWLIST) pozostaje
+    dokładnie taka, jak zatwierdzona w Fazie 5.2 — duplikuje
+    `test_merge_keeps_provenance_from_first_and_exit_validation_from_second`
+    z odwróconą kolejnością metod, żeby upewnić się, że wyjątek
+    CURATED_ALLOWLIST nie zmienił tej ścieżki."""
+    first = _mi("0001", "2012-01-01", "2015-01-01", cik_resolution_method="FORMAT_VARIANT")
+    second = _mi("0001", "2015-01-01", None, cik_resolution_method="DIRECT")
+    merged = merge_adjacent_same_cik_intervals([first, second])
+    assert merged[0].cik_resolution_method == "FORMAT_VARIANT"  # z pierwszego, bez zmian
+
+
 def test_merge_different_ciks_are_never_joined():
     intervals = [_mi("0001", "2012-01-01", "2015-01-01"), _mi("0002", "2015-01-01", None)]
     merged = merge_adjacent_same_cik_intervals(intervals)
