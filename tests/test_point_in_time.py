@@ -50,6 +50,31 @@ def test_extract_fact_history_parses_and_sorts_by_filed():
     assert history[1].accession_number == "0001-24-000001"
 
 
+def test_extract_fact_history_parses_start_when_present():
+    """Faza 5.3 (2026-10-01): pole `start` dodane po realnym znalezisku
+    (pole `fp` SEC NIE jest wiarygodnym wskaźnikiem czasu trwania —
+    patrz pit_fundamentals.py). Realny wpis AAPL miał dokładnie ten
+    kształt: fp='FY', ale start/end rozstawione o 90 dni."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [
+            {"start": "2014-12-28", "end": "2015-03-28", "val": 13569000000.0,
+             "filed": "2015-10-28", "fy": 2015, "fp": "FY", "form": "10-K", "accn": "0001-15-000001"},
+        ],
+    })
+    history = extract_fact_history(facts, "NetIncomeLoss")
+    assert history[0].start == "2014-12-28"
+
+
+def test_extract_fact_history_start_none_when_absent_never_fabricated():
+    """Koncept typu "instant" (np. Assets) nie ma `start` w ogóle —
+    `None`, nigdy nie zgadywane."""
+    facts = make_company_facts({
+        "Assets": [{"end": "2024-12-31", "val": 1000.0, "filed": "2025-02-01", "fy": 2024, "fp": "FY"}],
+    })
+    history = extract_fact_history(facts, "Assets")
+    assert history[0].start is None
+
+
 def test_extract_fact_history_missing_tag_returns_empty_list_not_error():
     facts = make_company_facts({"NetIncomeLoss": [{"end": "2024-12-31", "val": 1.0, "filed": "2025-01-01"}]})
     assert extract_fact_history(facts, "SomeNonExistentTag") == []

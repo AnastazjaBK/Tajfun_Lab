@@ -47,6 +47,17 @@ class PitFact:
     fiscal_period: str | None
     form: str | None
     accession_number: str | None
+    # Początek okresu dla konceptów "duration" (np. NetIncomeLoss) —
+    # nieobecny dla konceptów "instant" (np. Assets, na dany dzień).
+    # Dodane w Fazie 5.3 po realnym znalezisku (2026-10-01, AAPL): pole
+    # `fp` SEC XBRL NIE jest wiarygodnym wskaźnikiem rzeczywistego czasu
+    # trwania faktu — znaleziony realny wpis miał `fp='FY'`, ale
+    # `start`..`end` to zaledwie 3 miesiące (drugi, późniejszy wpis dla
+    # tej samej daty miał pole `frame='CY2015Q1'`, jawnie potwierdzające
+    # kwartał). Konsumenci wymagający rocznego okresu MUSZĄ liczyć
+    # rzeczywisty czas trwania z `start`/`end`, NIGDY ufać samemu `fp`
+    # — patrz `pit_fundamentals.build_annual_fundamentals_periods_as_of`.
+    start: str | None = None
 
 
 def extract_fact_history(company_facts: dict, tag: str, *, unit: str = "USD") -> list[PitFact]:
@@ -54,7 +65,9 @@ def extract_fact_history(company_facts: dict, tag: str, *, unit: str = "USD") ->
     odpowiedzi company-facts, posortowaną rosnąco po `filed`. Brak tagu
     w danych spółki -> pusta lista, NIGDY wyjątek — różne spółki tagują
     różnymi tagami, to oczekiwane, nie błąd. Wpis bez `filed`/`val`/`end`
-    jest pomijany, nigdy nie fabrykujemy brakującego pola."""
+    jest pomijany, nigdy nie fabrykujemy brakującego pola. `start`
+    pozostaje `None`, jeśli nieobecny w surowym wpisie (konkret typu
+    "instant") — też nigdy nie fabrykowany."""
     try:
         entries = company_facts["facts"]["us-gaap"][tag]["units"][unit]
     except (KeyError, TypeError):
@@ -64,6 +77,7 @@ def extract_fact_history(company_facts: dict, tag: str, *, unit: str = "USD") ->
             end=e["end"], val=e["val"], filed=e["filed"],
             fiscal_year=e.get("fy"), fiscal_period=e.get("fp"),
             form=e.get("form"), accession_number=e.get("accn"),
+            start=e.get("start"),
         )
         for e in entries
         if "filed" in e and "val" in e and "end" in e

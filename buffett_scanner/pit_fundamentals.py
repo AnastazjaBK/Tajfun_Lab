@@ -3,16 +3,27 @@
 sekcja 13). Zero I/O — `company_facts` jest już pobranym JSON-em
 (`SecEdgarClient.get_company_facts`).
 
-CELOWO OGRANICZONE do okresów ROCZNYCH (`fp == "FY"`, czyli 10-K) —
-kwartalne fakty XBRL (`NetIncomeLoss`/`Revenues` z 10-Q) bywają
-wartościami SKUMULOWANYMI OD POCZĄTKU ROKU (YTD), nie czystą wartością
-danego kwartału (zwłaszcza Q2-Q4) — rozróżnienie tego to osobna praca,
-jawnie odłożona w design review (sekcja 13: "rozróżnianie duration
-kontekstu XBRL... potrzebne dopiero przy budowie właściwego silnika
-backtestu"). Użycie wyłącznie rocznych danych unika tej niejednoznaczności
-CAŁKOWICIE, kosztem rzadszej granulacji (1 okres/rok, nie 4) — świadomy,
-udokumentowany wybór zakresu dla Proof Run (Faza 5.3), NIE decyzja o
-zakresie pełnego backfillu, którą trzeba podjąć osobno.
+CELOWO OGRANICZONE do okresów ROCZNYCH — kwartalne fakty XBRL
+(`NetIncomeLoss`/`Revenues` z 10-Q) bywają wartościami SKUMULOWANYMI OD
+POCZĄTKU ROKU (YTD), nie czystą wartością danego kwartału (zwłaszcza
+Q2-Q4) — rozróżnienie tego to osobna praca, jawnie odłożona w design
+review (sekcja 13). Użycie wyłącznie rocznych danych unika tej
+niejednoznaczności CAŁKOWICIE, kosztem rzadszej granulacji (1 okres/rok,
+nie 4) — świadomy, udokumentowany wybór zakresu dla Proof Run (Faza
+5.3), NIE decyzja o zakresie pełnego backfillu, którą trzeba podjąć
+osobno.
+
+KRYTYCZNE, EMPIRYCZNIE POTWIERDZONE (2026-10-01, realny Proof Run,
+AAPL): pole `fp` SEC XBRL ("FY"/"Q1"/...) NIE JEST wiarygodnym
+wskaźnikiem rzeczywistego czasu trwania faktu. Realny wpis znaleziony w
+danych AAPL miał `fp='FY'`, ale `start='2014-12-28'`..`end='2015-03-28'`
+to 90 dni (jeden kwartał) — drugi, późniejszy wpis dla TEJ SAMEJ daty
+`end` miał pole `frame='CY2015Q1'`, jawnie potwierdzające kwartał mimo
+`fp='FY'`. Pierwsza wersja tego modułu filtrowała po `fp == 'FY'` —
+BŁĘDNIE (wpuszczała fakty kwartalne oznaczone `fp='FY'`, co fałszywie
+zniekształcałoby revenue_yoy_growth_pct/no_persistent_losses, mieszając
+kwartalny net_income z rocznymi porównaniami). NAPRAWIONE: filtr liczy
+RZECZYWISTY czas trwania (`end - start` w dniach), nigdy nie ufa `fp`.
 
 Pokrywa WYŁĄCZNIE `net_income`/`revenue` (jedyne skonfigurowane
 `CANDIDATE_TAGS` w `point_in_time.py`, empirycznie potwierdzone w Fazie
@@ -25,31 +36,57 @@ nie przed tym Proof Run."""
 
 from __future__ import annotations
 
+import datetime as dt
+
 from buffett_scanner.fundamentals import FundamentalsPeriod
 from buffett_scanner.point_in_time import PitFact, find_first_matching_tag, value_as_of
 
 ANNUAL_CANONICAL_CONCEPTS = ("net_income", "revenue")
 
+# Pasmo akceptowanej długości okresu "rocznego": 350-380 dni. Obejmuje z
+# zapasem zarówno czyste 365/366-dniowe lata kalendarzowe, jak i
+# 52/53-tygodniowe lata fiskalne (np. Apple: 364 albo 371 dni).
+ANNUAL_DURATION_MIN_DAYS = 350
+ANNUAL_DURATION_MAX_DAYS = 380
+
+
+def _is_annual_duration(fact: PitFact) -> bool:
+    """Jedyne źródło prawdy o tym, czy fakt jest "roczny" — RZECZYWISTA
+    długość `end - start`, NIGDY pole `fp` (patrz docstring modułu).
+    Fakt bez `start` (np. koncept "instant") nie da się zweryfikować ->
+    odrzucony, nigdy nie zgadujemy."""
+    if fact.start is None:
+        return False
+    try:
+        start = dt.date.fromisoformat(fact.start)
+        end = dt.date.fromisoformat(fact.end)
+    except ValueError:
+        return False
+    duration_days = (end - start).days
+    return ANNUAL_DURATION_MIN_DAYS <= duration_days <= ANNUAL_DURATION_MAX_DAYS
+
 
 def build_annual_fundamentals_periods_as_of(
     company_facts: dict, as_of_date: str
 ) -> list[FundamentalsPeriod]:
-    """Dla każdego rocznego okresu fiskalnego (`end`, `fp == 'FY'`)
-    obecnego w historii faktów SEC, bierze wartość ZNANĄ na `as_of_date`
-    (`value_as_of` na faktach ograniczonych do tego konkretnego `end`) —
-    czyli ewentualną restatement, jeśli złożono ją on/before `as_of_date`,
-    nigdy przyszłą. `filed_date` okresu to NAJPÓŹNIEJSZA z dat `filed`
-    użytych pól (konserwatywnie: okres jest "w pełni znany" dopiero, gdy
-    WSZYSTKIE jego użyte pola są znane). Rok bez ŻADNEJ wartości dla
-    żadnego z `ANNUAL_CANONICAL_CONCEPTS` jest pomijany, nie generuje
-    pustego wiersza. Posortowane rosnąco po `period_end_date`."""
+    """Dla każdego rocznego okresu fiskalnego (`end`, zweryfikowanego
+    PRZEZ RZECZYWISTY CZAS TRWANIA — `_is_annual_duration`, nigdy przez
+    `fp`) obecnego w historii faktów SEC, bierze wartość ZNANĄ na
+    `as_of_date` (`value_as_of` na faktach ograniczonych do tego
+    konkretnego `end`) — czyli ewentualną restatement, jeśli złożono ją
+    on/before `as_of_date`, nigdy przyszłą. `filed_date` okresu to
+    NAJPÓŹNIEJSZA z dat `filed` użytych pól (konserwatywnie: okres jest
+    "w pełni znany" dopiero, gdy WSZYSTKIE jego użyte pola są znane).
+    Rok bez ŻADNEJ wartości dla żadnego z `ANNUAL_CANONICAL_CONCEPTS`
+    jest pomijany, nie generuje pustego wiersza. Posortowane rosnąco po
+    `period_end_date`."""
     concept_histories: dict[str, list[PitFact]] = {}
     for concept in ANNUAL_CANONICAL_CONCEPTS:
         found = find_first_matching_tag(company_facts, concept)
         if found is None:
             continue
         _, history = found
-        concept_histories[concept] = [f for f in history if f.fiscal_period == "FY"]
+        concept_histories[concept] = [f for f in history if _is_annual_duration(f)]
 
     period_ends = sorted({f.end for history in concept_histories.values() for f in history})
     periods: list[FundamentalsPeriod] = []
