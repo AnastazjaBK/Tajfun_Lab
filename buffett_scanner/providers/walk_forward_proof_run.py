@@ -44,6 +44,7 @@ from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
 from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_as_of
 from buffett_scanner.providers.fmp import FMPClient, FMPError
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
+from buffett_scanner.point_in_time import CANDIDATE_TAGS
 from buffett_scanner.scanner import PriceBar
 
 SAMPLE_TICKERS = ("AAPL", "MSFT", "KO")
@@ -104,6 +105,38 @@ def main() -> int:
                 return 1
             cik_by_ticker[ticker] = cik
             print(f"  {ticker} -> CIK {cik}")
+
+        print(
+            "\n== Krok 2a: SUROWA diagnostyka SEC XBRL (dodane po realnym run 2026-10-01: "
+            "periods=42-54 zamiast oczekiwanych ~10, PRZED zaufaniem wynikom) =="
+        )
+        diag_facts = sec_client.get_company_facts(cik_by_ticker["AAPL"])
+        for concept in ("net_income", "revenue"):
+            found = None
+            for tag in CANDIDATE_TAGS.get(concept, []):
+                try:
+                    entries = diag_facts["facts"]["us-gaap"][tag]["units"]["USD"]
+                except (KeyError, TypeError):
+                    continue
+                found = (tag, entries)
+                break
+            if found is None:
+                print(f"  AAPL {concept}: ŻADEN kandydacki tag nie znaleziony.")
+                continue
+            tag, entries = found
+            fy_entries = [e for e in entries if e.get("fp") == "FY"]
+            distinct_ends = sorted({e.get("end") for e in fy_entries})
+            print(f"  AAPL {concept} (tag={tag}): {len(entries)} wpisów razem, {len(fy_entries)} z fp=='FY', "
+                  f"{len(distinct_ends)} odrębnych 'end'.")
+            print(f"    Wszystkie klucze obecne w pierwszym wpisie fp=='FY': {sorted(fy_entries[0].keys()) if fy_entries else '(brak)'}")
+            # Dla jednej konkretnej daty 'end' pokaż WSZYSTKIE surowe wpisy (pełne pola) —
+            # jeśli jest ich wiele dla tego samego end, to klucz do zagadki.
+            if distinct_ends:
+                sample_end = distinct_ends[len(distinct_ends) // 2]
+                same_end_entries = [e for e in fy_entries if e.get("end") == sample_end]
+                print(f"    Przykład: wszystkie wpisy fp=='FY' dla end={sample_end!r} ({len(same_end_entries)} szt.):")
+                for e in same_end_entries:
+                    print(f"      {e}")
 
         print("\n== Krok 2: pobranie company_facts (SEC) i historii cen (FMP) dla próbki ==")
         company_facts_by_ticker: dict[str, dict] = {}
