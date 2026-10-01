@@ -33,7 +33,8 @@ class MembershipInterval:
     end_date: str | None
     source: str
     source_snapshot_ref: str
-    cik_resolution_method: str  # "DIRECT" | "FORMAT_VARIANT"
+    cik_resolution_method: str  # "DIRECT" | "FORMAT_VARIANT" | "CURATED_ALLOWLIST"
+    cik_resolution_note: str | None = None  # provenance pełnej allowlisty (Faza 5.3), tylko dla CURATED_ALLOWLIST
     entry_validation_status: str = NOT_VALIDATED
     entry_validation_day_diff: int | None = None
     exit_validation_status: str | None = None
@@ -65,6 +66,7 @@ def build_cik_membership_intervals(
     index_name: str,
     source: str,
     source_snapshot_ref: str,
+    resolved_via_curated_allowlist: dict[str, str] | None = None,
 ) -> tuple[list[MembershipInterval], tuple[str, ...]]:
     """Konwertuje przedziały ticker-poziomu (`universe_history.
     build_ticker_intervals`) na przedziały CIK-poziomu, używając
@@ -73,7 +75,17 @@ def build_cik_membership_intervals(
     do drugiego elementu zwracanej krotki (`unresolved_tickers`,
     posortowane, bez duplikatów) — nigdy nie znika bez śladu (dyscyplina
     CIK_UNRESOLVED). NIE scala jeszcze przedziałów tego samego CIK —
-    patrz `merge_adjacent_same_cik_intervals`, osobny, jawny krok."""
+    patrz `merge_adjacent_same_cik_intervals`, osobny, jawny krok.
+
+    `resolved_via_curated_allowlist` (Faza 5.3, LIMITED_BUT_HONEST,
+    zatwierdzone przez właścicielkę 2026-10-01): ticker -> nota
+    provenance (z `universe_ticker_rename_allowlist.
+    apply_curated_allowlist`). Ticker w tym mapowaniu dostaje
+    `cik_resolution_method="CURATED_ALLOWLIST"` (priorytet nad
+    FORMAT_VARIANT/DIRECT — allowlista jest zawsze jawnym, ręcznie
+    zatwierdzonym wyjątkiem) i `cik_resolution_note` z pełną
+    ścieżką dowodową, zamiast zwykłego DIRECT/FORMAT_VARIANT."""
+    curated_notes = resolved_via_curated_allowlist or {}
     intervals: list[MembershipInterval] = []
     unresolved: set[str] = set()
     for iv in ticker_intervals:
@@ -81,7 +93,12 @@ def build_cik_membership_intervals(
         if cik is None:
             unresolved.add(iv.ticker)
             continue
-        method = "FORMAT_VARIANT" if iv.ticker in resolved_via_format_variant else "DIRECT"
+        if iv.ticker in curated_notes:
+            method = "CURATED_ALLOWLIST"
+        elif iv.ticker in resolved_via_format_variant:
+            method = "FORMAT_VARIANT"
+        else:
+            method = "DIRECT"
         intervals.append(
             MembershipInterval(
                 cik=cik,
@@ -91,6 +108,7 @@ def build_cik_membership_intervals(
                 source=source,
                 source_snapshot_ref=source_snapshot_ref,
                 cik_resolution_method=method,
+                cik_resolution_note=curated_notes.get(iv.ticker),
             )
         )
     return intervals, tuple(sorted(unresolved))

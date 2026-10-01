@@ -210,7 +210,12 @@ CREATE TABLE IF NOT EXISTS universe_membership (
     source                      TEXT NOT NULL DEFAULT 'fja05680',
     source_snapshot_ref         TEXT NOT NULL,
     cik_resolution_method       TEXT NOT NULL
-                                CHECK (cik_resolution_method IN ('DIRECT','FORMAT_VARIANT')),
+                                CHECK (cik_resolution_method IN ('DIRECT','FORMAT_VARIANT','CURATED_ALLOWLIST')),
+    -- Faza 5.3 (LIMITED_BUT_HONEST, v1.39, zatwierdzone 2026-10-01):
+    -- pełna nota provenance (old/new ticker, run_id, rule_version,
+    -- evidence) dla wierszy cik_resolution_method='CURATED_ALLOWLIST'.
+    -- NULL dla DIRECT/FORMAT_VARIANT. Patrz universe_ticker_rename_allowlist.py.
+    cik_resolution_note         TEXT,
     entry_validation_status     TEXT NOT NULL DEFAULT 'NOT_VALIDATED'
                                 CHECK (entry_validation_status IN ('MATCHED','ONLY_CANONICAL','NOT_VALIDATED')),
     entry_validation_day_diff   INTEGER,

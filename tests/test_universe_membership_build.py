@@ -57,6 +57,42 @@ def test_build_cik_membership_intervals_never_fabricates_cik_for_unresolved_tick
     assert unresolved == ("NOPE",)
 
 
+def test_build_cik_membership_intervals_tags_curated_allowlist_with_note():
+    """Faza 5.3 (LIMITED_BUT_HONEST, v1.39): ticker obecny w
+    `resolved_via_curated_allowlist` dostaje method='CURATED_ALLOWLIST'
+    i pełną notę, zamiast DIRECT — nawet jeśli nie jest w ogóle w
+    `resolved_via_format_variant`."""
+    ticker_intervals = [
+        TickerInterval(ticker="ANTM", start_date="2012-01-01", end_date="2022-06-28"),
+        TickerInterval(ticker="ELV", start_date="2022-06-28", end_date=None),
+    ]
+    resolved = {"ANTM": "1156039", "ELV": "1156039"}
+    curated_notes = {"ANTM": "MULTI_SIGNAL_VERIFIED_V1 old=ANTM new=ELV"}
+    intervals, unresolved = build_cik_membership_intervals(
+        ticker_intervals, resolved, {}, index_name="SP500", source="fja05680",
+        source_snapshot_ref="ref1", resolved_via_curated_allowlist=curated_notes,
+    )
+    by_start = {iv.start_date: iv for iv in intervals}
+    assert by_start["2012-01-01"].cik_resolution_method == "CURATED_ALLOWLIST"
+    assert by_start["2012-01-01"].cik_resolution_note == "MULTI_SIGNAL_VERIFIED_V1 old=ANTM new=ELV"
+    assert by_start["2022-06-28"].cik_resolution_method == "DIRECT"
+    assert by_start["2022-06-28"].cik_resolution_note is None
+    assert unresolved == ()
+
+
+def test_build_cik_membership_intervals_curated_allowlist_takes_priority_over_format_variant():
+    """Teoretyczny (nierealny w praktyce) przypadek: ticker jest
+    jednocześnie w obu mapowaniach — allowlista wygrywa, bo jest zawsze
+    jawnym, ręcznie zatwierdzonym wyjątkiem."""
+    ticker_intervals = [TickerInterval(ticker="XYZ", start_date="2012-01-01", end_date=None)]
+    resolved = {"XYZ": "0001"}
+    intervals, _ = build_cik_membership_intervals(
+        ticker_intervals, resolved, {"XYZ": "X-Y-Z"}, index_name="SP500", source="fja05680",
+        source_snapshot_ref="ref1", resolved_via_curated_allowlist={"XYZ": "nota"},
+    )
+    assert intervals[0].cik_resolution_method == "CURATED_ALLOWLIST"
+
+
 def test_build_cik_membership_intervals_unresolved_is_sorted_and_deduped():
     ticker_intervals = [
         TickerInterval(ticker="ZZZ", start_date="2012-01-01", end_date="2013-01-01"),
@@ -111,6 +147,23 @@ def test_merge_keeps_provenance_from_first_and_exit_validation_from_second():
     assert merged[0].exit_validation_status == "MATCHED"  # z drugiego (wyjście)
     assert merged[0].exit_validation_day_diff == 1
     assert merged[0].end_date == "2023-01-01"
+
+
+def test_merge_keeps_curated_allowlist_note_from_first_interval():
+    """Faza 5.3 (LIMITED_BUT_HONEST, v1.39): scalony przedział ANTM+ELV
+    musi zachować cik_resolution_method='CURATED_ALLOWLIST' i notę z
+    PIERWSZEGO (ANTM, wejście w ciągły okres) — to właśnie wejście
+    zależało od allowlisty, bez niej CIK zacząłby się dopiero od ELV."""
+    first = _mi(
+        "1156039", "2012-01-01", "2022-06-28",
+        cik_resolution_method="CURATED_ALLOWLIST", cik_resolution_note="old=ANTM new=ELV",
+    )
+    second = _mi("1156039", "2022-06-28", None, cik_resolution_method="DIRECT")
+    merged = merge_adjacent_same_cik_intervals([first, second])
+    assert len(merged) == 1
+    assert merged[0].cik_resolution_method == "CURATED_ALLOWLIST"
+    assert merged[0].cik_resolution_note == "old=ANTM new=ELV"
+    assert merged[0].end_date is None
 
 
 def test_merge_different_ciks_are_never_joined():

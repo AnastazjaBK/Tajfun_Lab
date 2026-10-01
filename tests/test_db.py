@@ -330,6 +330,24 @@ def test_upsert_universe_membership_inserts_and_updates_on_conflict(conn):
     assert rows[0]["entry_validation_status"] == "MATCHED"
 
 
+def test_upsert_universe_membership_accepts_curated_allowlist_method_and_note(conn):
+    """Faza 5.3 (LIMITED_BUT_HONEST, v1.39): `cik_resolution_method`
+    akceptuje `CURATED_ALLOWLIST`, a `cik_resolution_note` niesie pełną
+    ścieżkę dowodową — kolumna NULL-owalna, nieużywana dla DIRECT/
+    FORMAT_VARIANT."""
+    upsert_company(conn, cik="0001156039", name="Elevance Health Inc")
+    upsert_universe_membership(
+        conn, cik="0001156039", index_name="SP500", start_date="2012-01-01",
+        end_date="2022-06-28", source="fja05680", source_snapshot_ref="ref1",
+        cik_resolution_method="CURATED_ALLOWLIST",
+        cik_resolution_note="MULTI_SIGNAL_VERIFIED_V1 old=ANTM new=ELV",
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM universe_membership WHERE cik = ?", ("0001156039",)).fetchone()
+    assert row["cik_resolution_method"] == "CURATED_ALLOWLIST"
+    assert row["cik_resolution_note"] == "MULTI_SIGNAL_VERIFIED_V1 old=ANTM new=ELV"
+
+
 def test_universe_membership_rejects_invalid_cik_resolution_method(conn):
     upsert_company(conn, cik="0001", name="Test Co")
     with pytest.raises(sqlite3.IntegrityError):

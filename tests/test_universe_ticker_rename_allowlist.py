@@ -7,18 +7,84 @@ from __future__ import annotations
 from buffett_scanner.universe_ticker_rename_allowlist import (
     CURATED_ALLOWLIST_SEED,
     RenameSignals,
+    apply_curated_allowlist,
     evaluate_rename_signals,
 )
 
 
-def test_seed_allowlist_contains_exactly_the_two_approved_cases():
+def test_seed_allowlist_contains_exactly_the_seven_approved_cases():
+    """Finalna allowlista zatwierdzona przez właścicielkę 2026-10-01
+    (2 ręcznie kuratorowane + 5 potwierdzonych wielosygnałowo i
+    niezależnie przez nią w źródłach SEC)."""
     pairs = {(r.old_ticker, r.new_ticker, r.cik) for r in CURATED_ALLOWLIST_SEED}
     assert pairs == {
         ("ANTM", "ELV", "1156039"),
         ("FB", "META", "1326801"),
+        ("MMC", "MRSH", "62709"),
+        ("SATS", "ECHO", "1415404"),
+        ("BK", "BNY", "1390777"),
+        ("DISCK", "WBD", "1437107"),
+        ("FISV", "FI", "798354"),
     }
-    assert all(r.resolution_method == "CURATED_MANUAL_ALLOWLIST_V1" for r in CURATED_ALLOWLIST_SEED)
     assert all(len(r.evidence) >= 2 for r in CURATED_ALLOWLIST_SEED)  # nigdy pojedynczy dowód
+    assert all(
+        any(e.startswith("direction:") for e in r.evidence) for r in CURATED_ALLOWLIST_SEED
+    )  # każdy rekord ma OSOBNE potwierdzenie kierunku, nie tylko same-company/CIK
+
+
+# ---------------------------------------------------------------------------
+# apply_curated_allowlist
+# ---------------------------------------------------------------------------
+
+
+def test_apply_curated_allowlist_adds_old_ticker_when_new_ticker_matches_declared_cik():
+    resolved = {"ELV": "1156039"}
+    unresolved = ("ANTM", "GHOST")
+    result = apply_curated_allowlist(resolved, unresolved, allowlist=CURATED_ALLOWLIST_SEED)
+    assert result.resolved["ANTM"] == "1156039"
+    assert result.resolved["ELV"] == "1156039"
+    assert "ANTM" in result.resolved_via_curated_allowlist
+    assert result.still_unresolved == ("GHOST",)
+
+
+def test_apply_curated_allowlist_never_overwrites_already_resolved_ticker():
+    """ANTM już rozwiązany inną metodą (np. DIRECT, hipotetycznie) —
+    allowlista nigdy nie nadpisuje istniejącego wyniku."""
+    resolved = {"ANTM": "9999999", "ELV": "1156039"}
+    unresolved = ()
+    result = apply_curated_allowlist(resolved, unresolved, allowlist=CURATED_ALLOWLIST_SEED)
+    assert result.resolved["ANTM"] == "9999999"
+    assert "ANTM" not in result.resolved_via_curated_allowlist
+
+
+def test_apply_curated_allowlist_skips_record_when_new_ticker_cik_diverged_from_sec():
+    """Jeśli dzisiejsza mapa SEC rozwiązuje ELV do INNEGO CIK niż
+    zadeklarowany w rekordzie (np. dane się zmieniły od zatwierdzenia),
+    rekord jest pomijany — nigdy ślepe zaufanie allowlistie."""
+    resolved = {"ELV": "DIFFERENT_CIK"}
+    unresolved = ("ANTM",)
+    result = apply_curated_allowlist(resolved, unresolved, allowlist=CURATED_ALLOWLIST_SEED)
+    assert "ANTM" not in result.resolved
+    assert result.still_unresolved == ("ANTM",)
+
+
+def test_apply_curated_allowlist_skips_when_new_ticker_itself_unresolved():
+    resolved = {}
+    unresolved = ("ANTM", "ELV")
+    result = apply_curated_allowlist(resolved, unresolved, allowlist=CURATED_ALLOWLIST_SEED)
+    assert "ANTM" not in result.resolved
+    assert result.still_unresolved == ("ANTM", "ELV")
+
+
+def test_apply_curated_allowlist_provenance_note_contains_key_fields():
+    resolved = {"ELV": "1156039"}
+    unresolved = ("ANTM",)
+    result = apply_curated_allowlist(resolved, unresolved, allowlist=CURATED_ALLOWLIST_SEED)
+    note = result.resolved_via_curated_allowlist["ANTM"]
+    assert "old=ANTM" in note
+    assert "new=ELV" in note
+    assert "run=seed-2026-09-30" in note
+    assert "evidence=" in note
 
 
 def test_all_three_signals_true_is_confirmed():

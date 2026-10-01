@@ -86,6 +86,93 @@ CURATED_ALLOWLIST_SEED: tuple[TickerRenameRecord, ...] = (
         resolution_method="CURATED_MANUAL_ALLOWLIST_V1",
         validation_run_id="seed-2026-09-30",
     ),
+    # Poniższe 5 potwierdzonych przez wielosygnałową weryfikację
+    # (`ticker_rename_multi_signal_verification.py`, realny run
+    # 2026-10-01, >=2/3 sygnałów: FMP get_company_profile + nazwa) ORAZ
+    # dodatkowo niezależnie zweryfikowanych przez właścicielkę w
+    # źródłach SEC (2026-10-01) — zatwierdzone do produkcyjnego wpięcia.
+    # Kierunek dla każdego potwierdzony strukturalnie przez
+    # `chronological_order()` (naprawione po znalezisku błędu FI/FISV).
+    TickerRenameRecord(
+        old_ticker="MMC",
+        new_ticker="MRSH",
+        cik="62709",
+        zero_gap_date="2026-01-14",
+        evidence=(
+            "same-company+CIK: multi-signal 2/3 (fmp_profile_cik_match=True, fmp_name_match=True) "
+            "— ticker_rename_multi_signal_verification.py, run 2026-10-01",
+            "same-company+CIK+direction: niezależna weryfikacja właścicielki w źródłach SEC, 2026-10-01",
+            "direction: strukturalne dir=UNRESOLVED_ENDS_RESOLVED_STARTS (MMC kończy się, MRSH zaczyna) "
+            "— chronological_order(), bez odwrócenia",
+        ),
+        resolution_method="MULTI_SIGNAL_VERIFIED_V1",
+        validation_run_id="ticker-rename-multi-signal-2026-09-30",
+    ),
+    TickerRenameRecord(
+        old_ticker="SATS",
+        new_ticker="ECHO",
+        cik="1415404",
+        zero_gap_date="2026-06-24",
+        evidence=(
+            "same-company+CIK: multi-signal 2/3 (fmp_profile_cik_match=True, fmp_name_match=True) "
+            "— ticker_rename_multi_signal_verification.py, run 2026-10-01",
+            "same-company+CIK+direction: niezależna weryfikacja właścicielki w źródłach SEC, 2026-10-01",
+            "direction: strukturalne dir=UNRESOLVED_ENDS_RESOLVED_STARTS (SATS kończy się, ECHO zaczyna) "
+            "— chronological_order(), bez odwrócenia",
+        ),
+        resolution_method="MULTI_SIGNAL_VERIFIED_V1",
+        validation_run_id="ticker-rename-multi-signal-2026-09-30",
+    ),
+    TickerRenameRecord(
+        old_ticker="BK",
+        new_ticker="BNY",
+        cik="1390777",
+        zero_gap_date="2026-05-21",
+        evidence=(
+            "same-company+CIK: multi-signal 2/3 (fmp_profile_cik_match=True, fmp_name_match=True) "
+            "— ticker_rename_multi_signal_verification.py, run 2026-10-01",
+            "same-company+CIK+direction: niezależna weryfikacja właścicielki w źródłach SEC, 2026-10-01",
+            "direction: strukturalne dir=UNRESOLVED_ENDS_RESOLVED_STARTS (BK kończy się, BNY zaczyna) "
+            "— chronological_order(), bez odwrócenia",
+        ),
+        resolution_method="MULTI_SIGNAL_VERIFIED_V1",
+        validation_run_id="ticker-rename-multi-signal-2026-09-30",
+    ),
+    TickerRenameRecord(
+        old_ticker="DISCK",
+        new_ticker="WBD",
+        cik="1437107",
+        zero_gap_date="2022-04-11",
+        evidence=(
+            "same-company+CIK: multi-signal 2/3 (fmp_profile_cik_match=True, fmp_name_match=True) "
+            "— ticker_rename_multi_signal_verification.py, run 2026-10-01",
+            "same-company+CIK+direction: niezależna weryfikacja właścicielki w źródłach SEC, 2026-10-01; "
+            "zgodne też z publicznie znaną historią (fuzja Discovery/WarnerMedia, kwiecień 2022)",
+            "direction: strukturalne dir=UNRESOLVED_ENDS_RESOLVED_STARTS (DISCK kończy się, WBD zaczyna) "
+            "— chronological_order(), bez odwrócenia",
+        ),
+        resolution_method="MULTI_SIGNAL_VERIFIED_V1",
+        validation_run_id="ticker-rename-multi-signal-2026-09-30",
+    ),
+    TickerRenameRecord(
+        old_ticker="FISV",
+        new_ticker="FI",
+        cik="798354",
+        zero_gap_date="2023-06-07",
+        evidence=(
+            "same-company+CIK: multi-signal 2/3 (fmp_profile_cik_match=True, fmp_name_match=True) "
+            "— ticker_rename_multi_signal_verification.py, run 2026-10-01",
+            "direction: BŁĄD ZNALEZIONY I NAPRAWIONY (2026-10-01) — pierwszy automatyczny wynik "
+            "('FI -> FISV') miał odwrócony kierunek, bo kod mylił 'nierozwiązany wg dzisiejszej mapy SEC' "
+            "z 'chronologicznie starszy'. Właścicielka niezależnie zweryfikowała w źródle pierwotnym: "
+            "Fiserv notowany jako FISV na Nasdaq, przeniesiony na NYSE pod FI 2023-06-07 — "
+            "FISV jest tickerem STARYM, FI NOWYM. Po naprawie (chronological_order(), strukturalne, "
+            "dir=RESOLVED_ENDS_UNRESOLVED_STARTS) ponowny realny run zwrócił poprawnie 'FISV -> FI', "
+            "zgodne z jej weryfikacją.",
+        ),
+        resolution_method="MULTI_SIGNAL_VERIFIED_V1",
+        validation_run_id="ticker-rename-multi-signal-2026-09-30",
+    ),
 )
 
 
@@ -108,6 +195,55 @@ class RenameVerdict:
     status: Literal["DISCONFIRMED", "INSUFFICIENT_EVIDENCE", "CONFIRMED_MULTI_SIGNAL"]
     positive_signal_count: int
     reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AllowlistApplicationResult:
+    resolved: dict[str, str]
+    resolved_via_curated_allowlist: dict[str, str]  # old_ticker -> nota provenance (do zapisu w DB)
+    still_unresolved: tuple[str, ...]
+
+
+def _provenance_note(record: TickerRenameRecord) -> str:
+    return (
+        f"{record.resolution_method} old={record.old_ticker} new={record.new_ticker} "
+        f"run={record.validation_run_id} rule={record.validation_rule_version} "
+        f"evidence={'; '.join(record.evidence)}"
+    )
+
+
+def apply_curated_allowlist(
+    resolved: dict[str, str],
+    unresolved: tuple[str, ...],
+    allowlist: tuple[TickerRenameRecord, ...] = CURATED_ALLOWLIST_SEED,
+) -> AllowlistApplicationResult:
+    """Rozszerza wynik `universe_history.resolve_tickers_to_cik` o
+    kuratorowaną allowlistę rename tickerów (Faza 5.3, LIMITED_BUT_HONEST,
+    zatwierdzone przez właścicielkę 2026-10-01, po dwóch realnych Proof
+    Run i naprawie błędu kierunku starego/nowego tickera). Dla każdego
+    rekordu allowlisty: `old_ticker` zostaje dodany do `resolved` TYLKO
+    jeśli (a) jest obecnie `unresolved` (nigdy nie nadpisuje istniejącego
+    rozwiązania DIRECT/FORMAT_VARIANT) ORAZ (b) `new_ticker` rozwiązuje
+    się DZIŚ do DOKŁADNIE tego samego CIK, co deklaruje rekord —
+    krzyżowa kontrola z aktualnym stanem SEC, NIGDY ślepe zaufanie
+    allowlistie. Jeśli którykolwiek warunek zawiedzie (np. dane SEC się
+    zmieniły od zatwierdzenia rekordu), rekord jest POMIJANY i ticker
+    zostaje `CIK_UNRESOLVED` — zgodnie z zasadą „brak rozwiązania jest
+    preferowany względem potencjalnie błędnego przypisania"."""
+    new_resolved = dict(resolved)
+    notes: dict[str, str] = {}
+    unresolved_set = set(unresolved)
+    for record in allowlist:
+        if record.old_ticker not in unresolved_set:
+            continue
+        if resolved.get(record.new_ticker) != record.cik:
+            continue
+        new_resolved[record.old_ticker] = record.cik
+        notes[record.old_ticker] = _provenance_note(record)
+    remaining_unresolved = tuple(sorted(unresolved_set - notes.keys()))
+    return AllowlistApplicationResult(
+        resolved=new_resolved, resolved_via_curated_allowlist=notes, still_unresolved=remaining_unresolved,
+    )
 
 
 def evaluate_rename_signals(signals: RenameSignals) -> RenameVerdict:

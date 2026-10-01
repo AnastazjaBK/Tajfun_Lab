@@ -88,6 +88,7 @@ from buffett_scanner.universe_membership_build import (
     membership_as_of,
     merge_adjacent_same_cik_intervals,
 )
+from buffett_scanner.universe_ticker_rename_allowlist import apply_curated_allowlist
 
 DEFAULT_DB_PATH = "buffett_scanner.db"
 PREFILTER_CALC_VERSION = "0.1.0-phase1"
@@ -768,10 +769,26 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
         f"tylko_walidator={len(match_result.only_validator)}"
     )
 
-    print("\n== Krok 5: budowa przedziałów CIK-poziomu + scalanie zmian tickera bez opuszczenia indeksu ==")
+    print(
+        "\n== Krok 5: kuratorowana allowlista rename (Faza 5.3, LIMITED_BUT_HONEST) "
+        "+ budowa przedziałów CIK-poziomu + scalanie zmian tickera bez opuszczenia indeksu =="
+    )
+    # Allowlista stosowana TYLKO tutaj (nie w Kroku 3/4, FMP reconciliation) —
+    # rozszerzenie fja_resolution.resolved przed Krokiem 4 wprowadzałoby
+    # sztuczny ADD+REMOVE tego samego CIK w tym samym dniu (ticker rename
+    # widziany jako dwa osobne zdarzenia), co zniekształcałoby krzywą
+    # tolerancji empirycznie wybieraną dla CAŁEGO builda. Krok 4 (walidacja
+    # fja05680 vs FMP) musi pozostać oparty wyłącznie na SEC-direct
+    # rozwiązaniu, zgodnie z oryginalnym projektem Fazy 5.2.
+    allowlist_result = apply_curated_allowlist(fja_resolution.resolved, fja_resolution.unresolved)
+    print(
+        f"Allowlista: +{len(allowlist_result.resolved_via_curated_allowlist)} tickerów odzyskanych "
+        f"({sorted(allowlist_result.resolved_via_curated_allowlist)})"
+    )
     membership_intervals, unresolved_fja = build_cik_membership_intervals(
-        fja_intervals, fja_resolution.resolved, fja_resolution.resolved_via_format_variant,
+        fja_intervals, allowlist_result.resolved, fja_resolution.resolved_via_format_variant,
         index_name=index_name, source="fja05680", source_snapshot_ref=fja_snapshot_ref,
+        resolved_via_curated_allowlist=allowlist_result.resolved_via_curated_allowlist,
     )
     pre_merge_count = len(membership_intervals)
     membership_intervals = merge_adjacent_same_cik_intervals(membership_intervals)
@@ -820,6 +837,7 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
             conn, cik=iv.cik, index_name=iv.index_name, start_date=iv.start_date,
             end_date=iv.end_date, source=iv.source, source_snapshot_ref=iv.source_snapshot_ref,
             cik_resolution_method=iv.cik_resolution_method,
+            cik_resolution_note=iv.cik_resolution_note,
             entry_validation_status=iv.entry_validation_status,
             entry_validation_day_diff=iv.entry_validation_day_diff,
             exit_validation_status=iv.exit_validation_status,
