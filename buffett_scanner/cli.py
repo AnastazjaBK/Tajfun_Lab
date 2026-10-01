@@ -790,7 +790,8 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
         index_name=index_name, source="fja05680", source_snapshot_ref=fja_snapshot_ref,
         resolved_via_curated_allowlist=allowlist_result.resolved_via_curated_allowlist,
     )
-    pre_merge_count = len(membership_intervals)
+    pre_merge_intervals = membership_intervals
+    pre_merge_count = len(pre_merge_intervals)
     membership_intervals = merge_adjacent_same_cik_intervals(membership_intervals)
     membership_intervals = attach_validation_status(
         membership_intervals, match_result, date_field=chosen_field,
@@ -806,6 +807,31 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
         f"Przedziałów członkostwa: {len(membership_intervals)} "
         f"(przed scaleniem: {pre_merge_count}, scalono {merged_away} par zmiany tickera bez opuszczenia indeksu)"
     )
+    # Diagnostyka (Faza 5.3): rozbicie scaleń na te pochodzące z 7
+    # rekordów allowlisty vs pozostałe (nieznane/naturalne DIRECT-DIRECT
+    # rename, niezwiązane z naszą zmianą) — żeby jawnie zweryfikować, że
+    # allowlista scaliła DOKŁADNIE tyle par, ile ma rekordów, i nic więcej.
+    allowlist_ciks = {allowlist_result.resolved[t] for t in allowlist_result.resolved_via_curated_allowlist}
+    pre_by_cik: dict[str, int] = {}
+    for iv in pre_merge_intervals:
+        pre_by_cik[iv.cik] = pre_by_cik.get(iv.cik, 0) + 1
+    post_by_cik: dict[str, int] = {}
+    for iv in membership_intervals:
+        post_by_cik[iv.cik] = post_by_cik.get(iv.cik, 0) + 1
+    merges_in_allowlist_ciks = sum(
+        pre_by_cik.get(cik, 0) - post_by_cik.get(cik, 0) for cik in allowlist_ciks
+    )
+    merges_elsewhere = merged_away - merges_in_allowlist_ciks
+    print(
+        f"  z czego w 7 CIK-ach allowlisty: {merges_in_allowlist_ciks}, "
+        f"gdzie indziej (niezwiązane z allowlistą): {merges_elsewhere}"
+    )
+    if merges_elsewhere:
+        other_merged_ciks = sorted(
+            cik for cik in pre_by_cik
+            if cik not in allowlist_ciks and pre_by_cik[cik] > post_by_cik.get(cik, 0)
+        )
+        print(f"  CIK-i spoza allowlisty, które się scaliły: {other_merged_ciks}")
     print(f"Unikalnych CIK: {len(unique_ciks)}")
     print(f"Unresolved (fja05680, nie generują wiersza): {len(unresolved_fja)}")
     print(
