@@ -8,6 +8,7 @@ from buffett_scanner.universe_history import TickerInterval
 from buffett_scanner.universe_ticker_adjacency import (
     AdjacencyCandidate,
     analyze_ticker_adjacency,
+    chronological_order,
     former_name_corroborates_boundary,
 )
 
@@ -127,6 +128,34 @@ def test_results_sorted_by_unresolved_ticker():
     ]
     result = analyze_ticker_adjacency(intervals, resolved={}, unresolved=("BBB", "AAA"))
     assert [r.unresolved_ticker for r in result] == ["AAA", "BBB"]
+
+
+# ---------------------------------------------------------------------------
+# chronological_order
+# ---------------------------------------------------------------------------
+
+
+def test_chronological_order_unresolved_ends_resolved_starts_keeps_unresolved_as_old():
+    """Zwykły przypadek (np. ANTM/ELV): nierozwiązany ticker kończy
+    się, rozwiązany zaczyna — nierozwiązany jest stary."""
+    cand = AdjacencyCandidate(
+        unresolved_ticker="ANTM", boundary_date="2022-06-28",
+        direction="UNRESOLVED_ENDS_RESOLVED_STARTS", adjacent_ticker="ELV", adjacent_cik="1156039",
+    )
+    assert chronological_order("ANTM", cand) == ("ANTM", "ELV")
+
+
+def test_chronological_order_resolved_ends_unresolved_starts_swaps_old_and_new():
+    """Przypadek FI/FISV (realny błąd znaleziony przez właścicielkę,
+    2026-10-01): dzisiejsza mapa SEC rozwiązuje `FISV` (chronologicznie
+    STARSZY ticker), a `FI` (chronologicznie NOWSZY) jest `unresolved`.
+    Kierunek strukturalny musi odwrócić etykiety względem tego, który
+    ticker jest dziś `unresolved`."""
+    cand = AdjacencyCandidate(
+        unresolved_ticker="FI", boundary_date="2023-06-07",
+        direction="RESOLVED_ENDS_UNRESOLVED_STARTS", adjacent_ticker="FISV", adjacent_cik="798354",
+    )
+    assert chronological_order("FI", cand) == ("FISV", "FI")
 
 
 # ---------------------------------------------------------------------------

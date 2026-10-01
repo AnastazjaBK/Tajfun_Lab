@@ -40,7 +40,11 @@ from buffett_scanner.universe_history import (
     resolve_tickers_to_cik,
     window_from_cutoff,
 )
-from buffett_scanner.universe_ticker_adjacency import analyze_ticker_adjacency, former_name_corroborates_boundary
+from buffett_scanner.universe_ticker_adjacency import (
+    analyze_ticker_adjacency,
+    chronological_order,
+    former_name_corroborates_boundary,
+)
 from buffett_scanner.universe_ticker_rename_allowlist import (
     CURATED_ALLOWLIST_SEED,
     RenameSignals,
@@ -202,13 +206,21 @@ def main() -> int:
             distinct_confirmed_ciks = {c.adjacent_cik for c, _, _ in confirmed}
             if len(distinct_confirmed_ciks) == 1:
                 cand, signals, verdict = confirmed[0]
+                # UWAGA (błąd znaleziony i zgłoszony przez właścicielkę dla
+                # FI/FISV, 2026-10-01): old_ticker/new_ticker MUSZĄ pochodzić
+                # z chronological_order (kierunek strukturalny w fja05680),
+                # NIGDY z tego, który ticker jest `unresolved` wg dzisiejszej
+                # mapy SEC — to dwie niezależne rzeczy. "unresolved" bywa
+                # chronologicznie NOWSZYM tickerem (jak FI), jeśli SEC z
+                # jakiegoś powodu rozwiązuje starszy symbol (FISV).
+                true_old, true_new = chronological_order(old_ticker, cand)
                 new_records.append(
                     TickerRenameRecord(
-                        old_ticker=old_ticker,
-                        new_ticker=cand.adjacent_ticker,
+                        old_ticker=true_old,
+                        new_ticker=true_new,
                         cik=cand.adjacent_cik,
                         zero_gap_date=cand.boundary_date,
-                        evidence=verdict.reasons,
+                        evidence=verdict.reasons + (f"direction (fja05680, strukturalne)={cand.direction}",),
                         resolution_method="MULTI_SIGNAL_VERIFIED_V1",
                         validation_run_id=run_id,
                     )
@@ -220,7 +232,11 @@ def main() -> int:
             else:
                 insufficient_tickers.append(old_ticker)
 
-        print("\n== Tabela: NOWO ODZYSKANE (dokładnie jeden potwierdzony kandydat na ticker) ==")
+        print(
+            "\n== Tabela: NOWO ODZYSKANE (dokładnie jeden potwierdzony kandydat na ticker; "
+            "old_ticker/new_ticker wg STRUKTURALNEGO kierunku fja05680, NIE wg statusu "
+            "resolved/unresolved w dzisiejszej mapie SEC) =="
+        )
         for record in sorted(new_records, key=lambda r: r.old_ticker):
             print(
                 f"  {record.old_ticker} -> {record.new_ticker} [{record.zero_gap_date}] "
@@ -246,9 +262,11 @@ def main() -> int:
         for old_ticker in insufficient_tickers:
             best = max(per_ticker_all_verdicts[old_ticker], key=lambda e: e[2].positive_signal_count)
             cand, signals, verdict = best
+            would_be_old, would_be_new = chronological_order(old_ticker, cand)
             print(
                 f"  {old_ticker}: najlepszy kandydat {cand.adjacent_ticker} [{cand.boundary_date}] "
-                f"CIK={cand.adjacent_cik}, {verdict.positive_signal_count}/3 sygnałów ({', '.join(verdict.reasons)})"
+                f"CIK={cand.adjacent_cik}, {verdict.positive_signal_count}/3 sygnałów ({', '.join(verdict.reasons)}), "
+                f"gdyby potwierdzony: {would_be_old} -> {would_be_new} (dir={cand.direction})"
             )
         if not insufficient_tickers:
             print("  (brak)")

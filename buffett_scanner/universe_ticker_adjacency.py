@@ -136,6 +136,30 @@ def analyze_ticker_adjacency(
     return results
 
 
+def chronological_order(unresolved_ticker: str, candidate: AdjacencyCandidate) -> tuple[str, str]:
+    """Zwraca `(old_ticker, new_ticker)` na podstawie WYŁĄCZNIE
+    strukturalnego kierunku przejścia w fja05680 (`candidate.direction`)
+    — NIGDY na podstawie tego, który ticker jest `unresolved` wg
+    dzisiejszej mapy SEC. To dwie niezależne rzeczy, pomylone w
+    pierwszej wersji `ticker_rename_multi_signal_verification.py`
+    (błąd znaleziony i zgłoszony przez właścicielkę dla pary FI/FISV,
+    2026-10-01: dzisiejsza mapa SEC rozwiązywała `FISV`, mimo że to
+    `FISV` jest CHRONOLOGICZNIE STARSZYM tickerem — Fiserv notuje się
+    pod `FI` dopiero od 2023-06-07). "Unresolved wg SEC dziś" i
+    "chronologicznie starszy w fja05680" to NIE to samo pojęcie i nie
+    wolno ich utożsamiać.
+
+    `UNRESOLVED_ENDS_RESOLVED_STARTS`: `unresolved_ticker` kończy się
+    (stary), `candidate.adjacent_ticker` zaczyna się (nowy).
+    `RESOLVED_ENDS_UNRESOLVED_STARTS`: `candidate.adjacent_ticker`
+    kończy się (stary), `unresolved_ticker` zaczyna się (nowy) —
+    dokładnie ten przypadek wymaga ZAMIANY miejscami względem tego,
+    który ticker jest dziś "unresolved"."""
+    if candidate.direction == "UNRESOLVED_ENDS_RESOLVED_STARTS":
+        return unresolved_ticker, candidate.adjacent_ticker
+    return candidate.adjacent_ticker, unresolved_ticker
+
+
 @dataclass(frozen=True)
 class FormerNameMatch:
     name: str

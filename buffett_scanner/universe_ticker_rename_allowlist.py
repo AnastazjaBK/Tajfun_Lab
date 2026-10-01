@@ -47,6 +47,12 @@ class TickerRenameRecord:
 # (FMP get_company_profile, FMP historical-sp500-constituent event log,
 # SEC formerNames — patrz Proof Run 2026-09-30). Data zero-gap i CIK
 # wzięte z realnych uruchomień `ticker_adjacency_proof_run`.
+# Każdy rekord niesie TRZY oddzielne potwierdzenia (wymóg właścicielki,
+# 2026-10-01, po znalezisku błędu kierunku FI/FISV): (1) same-company —
+# że oba tickery to naprawdę ta sama spółka, (2) CIK — który konkretnie
+# CIK, (3) direction/chronology — który ticker jest STARY (kończy się),
+# który NOWY (zaczyna się). Dowód (1)+(2) NIE implikuje automatycznie
+# (3) — to osobne pytanie, patrz `universe_ticker_adjacency.chronological_order`.
 CURATED_ALLOWLIST_SEED: tuple[TickerRenameRecord, ...] = (
     TickerRenameRecord(
         old_ticker="ANTM",
@@ -54,8 +60,12 @@ CURATED_ALLOWLIST_SEED: tuple[TickerRenameRecord, ...] = (
         cik="1156039",
         zero_gap_date="2022-06-28",
         evidence=(
-            "FMP get_company_profile('ANTM'/'ELV') — Proof Run 2026-09-30 (rename diagnosis)",
-            "SEC formerNames: 'Anthem, Inc.' to=2022-06-24 (4 dni od zero-gap)",
+            "same-company+CIK: FMP get_company_profile('ANTM'/'ELV') — Proof Run 2026-09-30 (rename diagnosis)",
+            "same-company+CIK: SEC formerNames: 'Anthem, Inc.' to=2022-06-24 (4 dni od zero-gap)",
+            "direction: publicznie znana historia korporacyjna — Anthem Inc. (ANTM) formalnie zmieniła nazwę "
+            "na Elevance Health, Inc. i ticker na ELV 2022-06-28; ANTM jest tickerem STARYM (kończy się), "
+            "ELV NOWYM (zaczyna się) — zgodne ze strukturalnym kierunkiem w fja05680 "
+            "(ANTM w koszyku UNIQUE_CANDIDATE od pierwszego Proof Run, bez odwrócenia)",
         ),
         resolution_method="CURATED_MANUAL_ALLOWLIST_V1",
         validation_run_id="seed-2026-09-30",
@@ -66,8 +76,12 @@ CURATED_ALLOWLIST_SEED: tuple[TickerRenameRecord, ...] = (
         cik="1326801",
         zero_gap_date="2022-06-09",
         evidence=(
-            "FMP get_company_profile('FB') — Proof Run 2026-09-30 (Price Data Proof Run #2)",
-            "SEC formerNames: 'Facebook Inc' to=2021-10-27 (225 dni od zero-gap)",
+            "same-company+CIK: FMP get_company_profile('FB') — Proof Run 2026-09-30 (Price Data Proof Run #2)",
+            "same-company+CIK: SEC formerNames: 'Facebook Inc' to=2021-10-27 (225 dni od zero-gap)",
+            "direction: publicznie znana historia korporacyjna — Facebook Inc. (FB) formalnie zmieniła nazwę "
+            "na Meta Platforms, Inc. (2021-10-28) i ticker na META (2022-06-09); FB jest tickerem STARYM "
+            "(kończy się), META NOWYM (zaczyna się) — potwierdzone strukturalnie w realnym Proof Run 1 "
+            "(dir=UNRESOLVED_ENDS_RESOLVED_STARTS dla kandydata FB->META, 2026-09-30)",
         ),
         resolution_method="CURATED_MANUAL_ALLOWLIST_V1",
         validation_run_id="seed-2026-09-30",
