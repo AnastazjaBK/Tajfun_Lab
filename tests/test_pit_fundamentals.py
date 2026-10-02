@@ -16,9 +16,21 @@ from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_a
 
 
 def make_company_facts(tag_entries: dict[str, list[dict]]) -> dict:
+    """`diluted_shares_outstanding` leży w SEC XBRL pod units["shares"],
+    nie units["USD"] (realny błąd znaleziony 2026-10-02, patrz
+    point_in_time.CONCEPT_UNITS) — rozpoznawane tu po nazwie tagu, żeby
+    testy nie musiały same o tym pamiętać przy każdym wywołaniu."""
     return {
         "cik": 320193, "entityName": "Test Co",
-        "facts": {"us-gaap": {tag: {"label": tag, "units": {"USD": entries}} for tag, entries in tag_entries.items()}},
+        "facts": {"us-gaap": {
+            tag: {
+                "label": tag,
+                "units": {
+                    "shares" if tag == "WeightedAverageNumberOfDilutedSharesOutstanding" else "USD": entries
+                },
+            }
+            for tag, entries in tag_entries.items()
+        }},
     }
 
 

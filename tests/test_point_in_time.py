@@ -134,6 +134,56 @@ def test_find_first_matching_tag_unknown_concept_returns_none():
     assert find_first_matching_tag(facts, "not_a_real_concept") is None
 
 
+def test_find_first_matching_tag_diluted_shares_resolves_shares_unit_not_usd():
+    """REGRESJA (realny błąd znaleziony 2026-10-02, Proof Run na realnych
+    AAPL/MSFT/KO): diluted_shares_outstanding wychodziło "ŻADEN_KANDYDAT"
+    dla WSZYSTKICH trzech spółek, bo SEC XBRL trzyma liczbę akcji pod
+    units["shares"], nie units["USD"] — domyślne globalne unit="USD"
+    nigdy by tego nie znalazło, niezależnie od spółki. Fakt pod
+    units["USD"] dla tego samego tagu MUSI być zignorowany (to nie byłaby
+    ta sama wielkość, nawet gdyby liczbowo pasowała)."""
+    facts = {
+        "facts": {"us-gaap": {
+            "WeightedAverageNumberOfDilutedSharesOutstanding": {
+                "units": {
+                    "shares": [{"start": "2023-01-01", "end": "2023-12-31", "val": 1_000_000.0, "filed": "2024-02-01"}],
+                    "USD": [{"start": "2023-01-01", "end": "2023-12-31", "val": 999.0, "filed": "2024-02-01"}],
+                }
+            },
+        }},
+    }
+    result = find_first_matching_tag(facts, "diluted_shares_outstanding")
+    assert result is not None
+    tag, history = result
+    assert tag == "WeightedAverageNumberOfDilutedSharesOutstanding"
+    assert len(history) == 1
+    assert history[0].val == 1_000_000.0
+
+
+def test_find_first_matching_tag_explicit_unit_overrides_concept_units():
+    facts = {
+        "facts": {"us-gaap": {
+            "WeightedAverageNumberOfDilutedSharesOutstanding": {
+                "units": {"USD": [{"end": "2023-12-31", "val": 999.0, "filed": "2024-02-01"}]}
+            },
+        }},
+    }
+    result = find_first_matching_tag(facts, "diluted_shares_outstanding", unit="USD")
+    assert result is not None
+    assert result[0] == "WeightedAverageNumberOfDilutedSharesOutstanding"
+
+
+def test_find_first_matching_tag_monetary_concepts_still_default_to_usd():
+    """Żaden koncept pieniężny (revenue/net_income/...) nie jest w
+    CONCEPT_UNITS -> musi nadal domyślnie trafiać do units["USD"],
+    zero regresji dla istniejącego zachowania."""
+    facts = make_company_facts({
+        "Revenues": [{"end": "2024-12-31", "val": 1000.0, "filed": "2025-02-01"}],
+    })
+    result = find_first_matching_tag(facts, "revenue")
+    assert result is not None
+
+
 # ---------------------------------------------------------------------------
 # value_as_of — rdzeń PIT, w tym scenariusz restatement (look-ahead bias)
 # ---------------------------------------------------------------------------

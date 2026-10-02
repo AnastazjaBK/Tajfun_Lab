@@ -81,6 +81,23 @@ CANDIDATE_TAGS: dict[str, list[str]] = {
     ],
 }
 
+# Jednostka SEC XBRL per kanoniczny koncept — DOMYŚLNIE "USD" (wielkości
+# pieniężne), jawny override tam, gdzie koncept jest z natury niepieniężny.
+#
+# KRYTYCZNE, EMPIRYCZNIE POTWIERDZONE (2026-10-02, realny Proof Run,
+# AAPL/MSFT/KO): `diluted_shares_outstanding` wychodziło "ŻADEN_KANDYDAT"
+# dla WSZYSTKICH trzech spółek — nie przypadek braku danych u konkretnej
+# spółki (jak D&A u MSFT), ale systematyczna awaria mechanizmu. Przyczyna:
+# liczba akcji w SEC XBRL leży pod `units["shares"]`, NIGDY pod
+# `units["USD"]` (to fakt niepieniężny) — szukanie jej z domyślnym
+# `unit="USD"` z definicji nigdy nic nie znajduje, niezależnie od spółki.
+# NAPRAWIONE: `find_first_matching_tag` wybiera jednostkę per koncept z
+# tej mapy, zamiast zakładać globalnie "USD". Żadna wartość nie jest
+# konwertowana — to wyłącznie odczyt faktu z właściwej jednostki.
+CONCEPT_UNITS: dict[str, str] = {
+    "diluted_shares_outstanding": "shares",
+}
+
 
 @dataclass(frozen=True)
 class PitFact:
@@ -131,13 +148,21 @@ def extract_fact_history(company_facts: dict, tag: str, *, unit: str = "USD") ->
 
 
 def find_first_matching_tag(
-    company_facts: dict, canonical_concept: str, *, unit: str = "USD"
+    company_facts: dict, canonical_concept: str, *, unit: str | None = None
 ) -> tuple[str, list[PitFact]] | None:
     """Próbuje kandydatów z `CANDIDATE_TAGS[canonical_concept]` po
     kolei, zwraca `(tag, historia)` dla pierwszego z niepustą historią,
-    albo `None`, jeśli żaden kandydat nie pasuje."""
+    albo `None`, jeśli żaden kandydat nie pasuje.
+
+    `unit=None` (domyślnie) -> jednostka rozwiązywana z `CONCEPT_UNITS`
+    per koncept (fallback `"USD"` dla nieujętych tam konceptów
+    pieniężnych) — NIGDY zakładana globalnie, patrz docstring
+    `CONCEPT_UNITS` (realny błąd 2026-10-02: diluted_shares_outstanding
+    leży pod `units["shares"]`, nie `units["USD"]`). Jawne podanie
+    `unit` nadpisuje tę mapę, dla wywołań, które same znają jednostkę."""
+    resolved_unit = unit if unit is not None else CONCEPT_UNITS.get(canonical_concept, "USD")
     for tag in CANDIDATE_TAGS.get(canonical_concept, []):
-        history = extract_fact_history(company_facts, tag, unit=unit)
+        history = extract_fact_history(company_facts, tag, unit=resolved_unit)
         if history:
             return tag, history
     return None

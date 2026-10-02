@@ -132,6 +132,36 @@ def _print_field_row(row: dict) -> None:
         )
 
 
+def _diagnose_raw_tags_matching_keywords(company_facts: dict, *, keywords: tuple[str, ...]) -> None:
+    """Krok 2c: surowy dump WSZYSTKICH tagów us-gaap, których nazwa
+    semantycznie zawiera jedno ze `keywords` (case-insensitive) — każdy
+    wpis z tagiem/unit/start/end/duration/filed/form/val. Cel: ustalić z
+    REALNYCH danych, czy spółka taguje dany koncept pod innym, nieujętym
+    jeszcze w CANDIDATE_TAGS standardowym tagiem, zamiast zgadywać z
+    pamięci które tagi 'zwykle' istnieją."""
+    us_gaap = company_facts.get("facts", {}).get("us-gaap", {})
+    matching_tags = sorted(tag for tag in us_gaap if any(kw in tag.lower() for kw in keywords))
+    if not matching_tags:
+        print(f"  ŻADEN tag us-gaap nie zawiera semantycznie {keywords} dla tej spółki.")
+        return
+    for tag in matching_tags:
+        units = us_gaap[tag].get("units", {})
+        for unit_name, entries in units.items():
+            print(f"  tag={tag} unit={unit_name} ({len(entries)} wpisów)")
+            for e in entries:
+                start, end = e.get("start"), e.get("end")
+                duration_days = None
+                if start and end:
+                    try:
+                        duration_days = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days
+                    except ValueError:
+                        duration_days = None
+                print(
+                    f"    start={start} end={end} duration_days={duration_days} "
+                    f"filed={e.get('filed')} form={e.get('form')} val={e.get('val')}"
+                )
+
+
 def _diagnose_fields_for_period(company_facts: dict, *, period_end: str, as_of_date: str) -> None:
     """Krok 2b: dla jednego (period_end, as_of_date) pokazuje per-pole
     tag/PIT/duration/wartość/missing dla wszystkich 12 wymaganych pól
@@ -261,6 +291,16 @@ def main() -> int:
                 continue
             latest_period_end = periods_for_diag[-1].period_end_date
             _diagnose_fields_for_period(company_facts, period_end=latest_period_end, as_of_date=last_decision_date)
+
+        print(
+            "\n== Krok 2c: SUROWA diagnostyka tagów MSFT zawierających Depreciation/Depletion/"
+            "Amortization (dodane po realnym run 2026-10-02: D&A MISSING u MSFT — żaden z 3 "
+            "kandydackich tagów nie pasuje; sprawdzamy, czy MSFT taguje D&A pod innym standardowym "
+            "tagiem, zamiast zgadywać z pamięci) =="
+        )
+        _diagnose_raw_tags_matching_keywords(
+            company_facts_by_ticker["MSFT"], keywords=("depreciation", "depletion", "amortization")
+        )
 
         print(f"\n== Krok 3: walk-forward dla {len(SAMPLE_TICKERS)} spółek x {len(DECISION_DATES)} dat ==")
         stage_counts: dict[str, int] = {}
