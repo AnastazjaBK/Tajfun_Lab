@@ -3,7 +3,12 @@ walk-forward backtest harness) — wartości referencyjne policzone ręcznie.
 
 Zawiera regresyjny test dla realnie znalezionego błędu (2026-10-01,
 realny Proof Run, AAPL): `fp == 'FY'` NIE jest wiarygodnym wskaźnikiem
-rzeczywistego czasu trwania faktu — filtr musi liczyć `end - start`."""
+rzeczywistego czasu trwania faktu — filtr musi liczyć `end - start`.
+
+Rozszerzone (Faza 5.3b, dependency audit 2026-10-01/02): pokrycie
+12 pól FundamentalsPeriod, rozróżnienie duration/instant, kompozyt
+EBITDA (zasady 1-5 zatwierdzone przez właścicielkę 2026-10-02),
+total_debt pozostaje jawnie None (decyzja jeszcze nierozstrzygnięta)."""
 
 from __future__ import annotations
 
@@ -76,8 +81,8 @@ def test_build_annual_periods_excludes_quarterly_duration_even_when_tagged_fp_fy
 
 
 def test_build_annual_periods_excludes_facts_missing_start_never_guesses():
-    """Fakt bez `start` (np. skrócony wpis, albo koncept "instant") nie
-    da się zweryfikować jako roczny -> odrzucony, nigdy nie zgadujemy."""
+    """Fakt bez `start` (np. skrócony wpis) nie da się zweryfikować jako
+    roczny duration-koncept -> odrzucony, nigdy nie zgadujemy."""
     facts = make_company_facts({
         "NetIncomeLoss": [
             {"end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},  # brak start
@@ -118,19 +123,17 @@ def test_build_annual_periods_uses_restatement_known_before_as_of_date():
     assert after_restatement[0].filed_date == "2024-11-01"
 
 
-def test_build_annual_periods_other_fields_always_none_never_fabricated():
+def test_build_annual_periods_total_debt_always_none_decision_not_yet_made():
+    """total_debt jest jawnie None na tym etapie -- SEC XBRL nie ma
+    jednego uniwersalnego tagu, decyzja o kompozycie (current+noncurrent)
+    nie jest jeszcze podjęta (dependency audit 2026-10-02). Nigdy
+    fabrykowane, nawet gdyby jakiś tag przypadkiem pasował."""
     facts = make_company_facts({
         "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "LongTermDebtNoncurrent": [{"end": "2023-12-31", "val": 500.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
     })
     periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
-    p = periods[0]
-    assert p.ebitda is None
-    assert p.operating_cash_flow is None
-    assert p.capital_expenditure is None
-    assert p.total_debt is None
-    assert p.cash_and_equivalents is None
-    assert p.total_current_assets is None
-    assert p.total_current_liabilities is None
+    assert periods[0].total_debt is None
 
 
 def test_build_annual_periods_empty_company_facts_returns_empty_list():
@@ -147,3 +150,202 @@ def test_build_annual_periods_sorted_ascending_by_period_end_date():
     })
     periods = build_annual_fundamentals_periods_as_of(facts, "2025-06-01")
     assert [p.period_end_date for p in periods] == ["2022-12-31", "2023-12-31", "2024-12-31"]
+
+
+# ---------------------------------------------------------------------------
+# Pola "instant" (bilansowe) -- bez `start`, bez walidacji duration.
+# ---------------------------------------------------------------------------
+
+def test_build_annual_periods_instant_fields_no_start_no_duration_filter():
+    """cash_and_equivalents/total_current_assets/total_current_liabilities
+    to koncepty "instant" -- z definicji nie mają `start` w SEC XBRL.
+    Walidacja duration (350-380 dni) NIE może być stosowana, inaczej
+    każdy taki fakt byłby błędnie odrzucany (brak start -> False)."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "CashAndCashEquivalentsAtCarryingValue": [
+            {"end": "2023-12-31", "val": 1000.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "AssetsCurrent": [{"end": "2023-12-31", "val": 2000.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "LiabilitiesCurrent": [{"end": "2023-12-31", "val": 800.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].cash_and_equivalents == 1000.0
+    assert periods[0].total_current_assets == 2000.0
+    assert periods[0].total_current_liabilities == 800.0
+
+
+def test_build_annual_periods_instant_field_missing_is_none_never_fabricated():
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].cash_and_equivalents is None
+    assert periods[0].total_current_assets is None
+    assert periods[0].total_current_liabilities is None
+
+
+# ---------------------------------------------------------------------------
+# Pola "duration" rozszerzone (OCF, capex, dywidendy, buybacki, DSO).
+# ---------------------------------------------------------------------------
+
+def test_build_annual_periods_extended_duration_fields_basic():
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "NetCashProvidedByUsedInOperatingActivities": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 300.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "PaymentsToAcquirePropertyPlantAndEquipment": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 50.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "PaymentsOfDividendsCommonStock": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 20.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "PaymentsForRepurchaseOfCommonStock": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 15.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "WeightedAverageNumberOfDilutedSharesOutstanding": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 1_000_000.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    p = periods[0]
+    assert p.operating_cash_flow == 300.0
+    assert p.capital_expenditure == 50.0
+    assert p.dividends_paid == 20.0
+    assert p.share_buybacks == 15.0
+    assert p.diluted_shares_outstanding == 1_000_000.0
+
+
+def test_build_annual_periods_extended_duration_field_rejects_quarterly_even_tagged_fy():
+    """Ten sam realny błąd (fp='FY' niewiarygodne) MUSI być naprawiony
+    konsekwentnie dla WSZYSTKICH pól duration, nie tylko net_income --
+    tu: operating_cash_flow, 90-dniowy fakt mimo fp='FY'."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "NetCashProvidedByUsedInOperatingActivities": [
+            {"start": "2023-10-01", "end": "2023-12-31", "val": 70.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},  # 92 dni -- kwartał
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].operating_cash_flow is None
+
+
+# ---------------------------------------------------------------------------
+# EBITDA -- kompozyt dwóch faktów (zasady 1-5, zatwierdzone 2026-10-02).
+# ---------------------------------------------------------------------------
+
+def test_ebitda_computed_as_sum_of_both_components_same_period():
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "OperatingIncomeLoss": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 150.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "DepreciationDepletionAndAmortization": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 40.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].ebitda == 190.0
+
+
+def test_ebitda_none_when_depreciation_component_missing_no_substitute():
+    """Zasada 4: brak D&A -> ebitda=None. NIGDY OperatingIncomeLoss jako
+    substytut EBITDA."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "OperatingIncomeLoss": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 150.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].ebitda is None
+
+
+def test_ebitda_none_when_operating_income_component_missing_no_substitute():
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "DepreciationDepletionAndAmortization": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 40.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].ebitda is None
+
+
+def test_ebitda_none_when_components_from_incompatible_periods():
+    """Zasada 3: OperatingIncomeLoss dostępny tylko dla FY2022,
+    D&A tylko dla FY2023 -> dla ŻADNEGO z tych okresów nie wolno
+    złożyć EBITDA (nie łączymy komponentów z różnych lat fiskalnych,
+    mimo że oba mogłyby być value_as_of(D)-dostępne)."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [
+            {"start": "2022-01-01", "end": "2022-12-31", "val": 70.0, "filed": "2023-02-01", "fy": 2022, "fp": "FY"},
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "OperatingIncomeLoss": [
+            {"start": "2022-01-01", "end": "2022-12-31", "val": 120.0, "filed": "2023-02-01", "fy": 2022, "fp": "FY"},
+        ],
+        "DepreciationDepletionAndAmortization": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 40.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    by_end = {p.period_end_date: p for p in periods}
+    assert by_end["2022-12-31"].ebitda is None
+    assert by_end["2023-12-31"].ebitda is None
+
+
+def test_ebitda_component_duration_validated_independently_rejects_quarterly():
+    """Zasada 2: D&A tagowane fp='FY', ale 90-dniowe -> odrzucone przez
+    tę samą walidację duration co net_income/revenue -> ebitda=None
+    (nie "połowa roku D&A" jako substytut)."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "OperatingIncomeLoss": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 150.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "DepreciationDepletionAndAmortization": [
+            {"start": "2023-10-01", "end": "2023-12-31", "val": 10.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},  # 92 dni
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].ebitda is None
+
+
+def test_ebitda_component_respects_point_in_time_no_look_ahead():
+    """D&A dla FY2023 złożone PO as_of_date -> niewidoczne jeszcze ->
+    ebitda=None dla tej daty (mimo że OperatingIncomeLoss jest znany)."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "OperatingIncomeLoss": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 150.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "DepreciationDepletionAndAmortization": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 40.0, "filed": "2024-11-01", "fy": 2023, "fp": "FY"},  # późny restatement/filing
+        ],
+    })
+    before = build_annual_fundamentals_periods_as_of(facts, "2024-06-01")
+    assert before[0].ebitda is None
+    after = build_annual_fundamentals_periods_as_of(facts, "2024-12-01")
+    assert after[0].ebitda == 190.0
+
+
+def test_ebitda_depreciation_candidate_tags_tried_in_order_not_summed():
+    """Zasada 5: gdyby (hipotetycznie) spółka miała wpisy pod dwoma
+    różnymi kandydackimi tagami D&A, używamy TYLKO pierwszego
+    niepustego -- nigdy sumy obu (ryzyko double counting)."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "OperatingIncomeLoss": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 150.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "DepreciationDepletionAndAmortization": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 40.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "DepreciationAmortizationAndAccretionNet": [
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 999.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].ebitda == 190.0  # 150 + 40, NIE 150 + 40 + 999

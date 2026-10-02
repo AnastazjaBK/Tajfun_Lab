@@ -19,12 +19,14 @@ Sprawdza WPROST (nie tylko przez brak wyjątku):
   4. forward returns 1m/3m/6m/12m.
   5. pełny decision snapshot + run_id + wersje configu/scoringu.
 
-CELOWO WĄSKI ZAKRES DANYCH FUNDAMENTALNYCH (patrz `pit_fundamentals.py`):
-tylko net_income/revenue z rocznych (10-K) faktów SEC XBRL — reszta pól
-None. Oznacza to, że scores w tym Proof Run są SYSTEMATYCZNIE niższe niż
-będą po pełnym backfillu (więcej pól = więcej możliwych punktów) — to
-NIE jest ocena jakości tych spółek, tylko ograniczenie zakresu danych
-tego konkretnego etapu.
+ROZSZERZONY ZAKRES DANYCH FUNDAMENTALNYCH (Faza 5.3b, dependency audit
+2026-10-01/02, patrz `pit_fundamentals.py`): 11 z 12 wymaganych pól z
+rocznych (10-K) faktów SEC XBRL, włącznie z kompozytem EBITDA
+(OperatingIncomeLoss + D&A, zasady 1-5 zatwierdzone przez właścicielkę
+2026-10-02). `total_debt` jest jawnie None (brak jednego uniwersalnego
+tagu SEC XBRL — decyzja o kompozycie current/noncurrent jeszcze
+nierozstrzygnięta) — to NIE jest ocena jakości tych spółek, tylko znana
+granica tego etapu.
 
 WYŁĄCZNIE DIAGNOSTYCZNE — nic nie zapisuje do bazy.
 
@@ -41,11 +43,23 @@ from pathlib import Path
 
 from buffett_scanner.backtest_harness import attach_forward_returns, evaluate_candidate_at_date
 from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
-from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_as_of
+from buffett_scanner.pit_fundamentals import (
+    DURATION_CONCEPTS,
+    EBITDA_COMPONENT_CONCEPTS,
+    INSTANT_CONCEPTS,
+    _is_annual_duration,
+    build_annual_fundamentals_periods_as_of,
+    fact_duration_days,
+)
 from buffett_scanner.providers.fmp import FMPClient, FMPError
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
-from buffett_scanner.point_in_time import CANDIDATE_TAGS
+from buffett_scanner.point_in_time import CANDIDATE_TAGS, find_first_matching_tag, value_as_of
 from buffett_scanner.scanner import PriceBar
+
+# 12 pol FundamentalsPeriod wymaganych przez istniejacy deterministic
+# pipeline (dependency audit 2026-10-01/02) -- total_debt swiadomie
+# wylaczone z tej listy, patrz komentarz w _diagnose_fields_for_period.
+SIMPLE_FIELD_CONCEPTS = DURATION_CONCEPTS + INSTANT_CONCEPTS
 
 SAMPLE_TICKERS = ("AAPL", "MSFT", "KO")
 SECTOR_PROFILE = "GENERAL"  # wszystkie 3 spolki -- trafna klasyfikacja, nie bankowa/ubezpieczeniowa/REIT
@@ -75,6 +89,79 @@ def _build_price_bars(rows: list[dict]) -> list[PriceBar]:
         )
         for r in rows
     ]
+
+
+def _diagnose_one_concept(
+    company_facts: dict, concept: str, *, period_end: str, as_of_date: str, is_instant: bool
+) -> dict:
+    """Jeden wiersz diagnostyki dla jednego konceptu XBRL: znaleziony
+    tag, start/end/filed/duration/wartość albo jawny powód braku.
+    `is_instant=True` pomija walidację duration (koncepty bilansowe nie
+    mają `start` z definicji — patrz pit_fundamentals.py)."""
+    found = find_first_matching_tag(company_facts, concept)
+    if found is None:
+        return {"concept": concept, "tag": None, "missing": True, "reason": "brak kandydackiego tagu w danych spółki"}
+    tag, history = found
+    if not is_instant:
+        history = [f for f in history if _is_annual_duration(f)]
+    facts_for_end = [f for f in history if f.end == period_end]
+    fact = value_as_of(facts_for_end, as_of_date)
+    if fact is None:
+        reason = (
+            "brak faktu dla tego period_end on/before as_of_date"
+            if is_instant
+            else "brak faktu dla tego period_end on/before as_of_date PO filtrze duration (350-380 dni)"
+        )
+        return {"concept": concept, "tag": tag, "missing": True, "reason": reason}
+    return {
+        "concept": concept, "tag": tag, "missing": False,
+        "start": fact.start, "end": fact.end, "filed": fact.filed,
+        "duration_days": fact_duration_days(fact), "val": fact.val,
+    }
+
+
+def _print_field_row(row: dict) -> None:
+    if row["missing"]:
+        tag_part = f"tag={row['tag']}" if row["tag"] else "tag=ŻADEN_KANDYDAT"
+        print(f"      {row['concept']:<28} {tag_part:<45} MISSING ({row['reason']})")
+    else:
+        print(
+            f"      {row['concept']:<28} tag={row['tag']:<40} "
+            f"start={row['start']} end={row['end']} filed={row['filed']} "
+            f"duration_days={row['duration_days']} val={row['val']}"
+        )
+
+
+def _diagnose_fields_for_period(company_facts: dict, *, period_end: str, as_of_date: str) -> None:
+    """Krok 2b: dla jednego (period_end, as_of_date) pokazuje per-pole
+    tag/PIT/duration/wartość/missing dla wszystkich 12 wymaganych pól
+    FundamentalsPeriod (dependency audit 2026-10-01/02) + oba składniki
+    EBITDA z osobnym provenance przed złożeniem wyniku (zasady 1-5,
+    zatwierdzone 2026-10-02)."""
+    print(f"    -- period_end={period_end} as_of_date={as_of_date} --")
+    for concept in DURATION_CONCEPTS:
+        _print_field_row(_diagnose_one_concept(company_facts, concept, period_end=period_end, as_of_date=as_of_date, is_instant=False))
+    for concept in INSTANT_CONCEPTS:
+        _print_field_row(_diagnose_one_concept(company_facts, concept, period_end=period_end, as_of_date=as_of_date, is_instant=True))
+    print(
+        "      total_debt                   tag=N/A — NOT_IMPLEMENTED: SEC XBRL nie ma jednego "
+        "uniwersalnego tagu total debt (current/noncurrent/short-term borrowings dzielone różnie "
+        "między spółkami); kompozyt wymaga osobnej decyzji właścicielki (dependency audit "
+        "2026-10-02, jeszcze nierozstrzygnięte) — jawnie None, nigdy zgadywane."
+    )
+    print("      -- składniki EBITDA (kompozyt, zasady 1-5) --")
+    component_rows = {}
+    for concept in EBITDA_COMPONENT_CONCEPTS:
+        row = _diagnose_one_concept(company_facts, concept, period_end=period_end, as_of_date=as_of_date, is_instant=False)
+        component_rows[concept] = row
+        _print_field_row(row)
+    oi_row = component_rows["operating_income_loss"]
+    da_row = component_rows["depreciation_and_amortization"]
+    if oi_row["missing"] or da_row["missing"]:
+        print("      ebitda (złożone)            = None (co najmniej jeden składnik MISSING — zero substytutu/fallbacku)")
+    else:
+        ebitda = oi_row["val"] + da_row["val"]
+        print(f"      ebitda (złożone)            = {ebitda} (operating_income_loss {oi_row['val']} + D&A {da_row['val']}, ten sam period_end)")
 
 
 def main() -> int:
@@ -160,6 +247,21 @@ def main() -> int:
                 print(f"BŁĄD pobierania cen: {exc}", file=sys.stderr)
                 return 1
 
+        print(
+            "\n== Krok 2b: diagnostyka pokrycia 12 wymaganych pól (dependency audit "
+            "2026-10-01/02), najnowszy roczny okres jako-of ostatniej daty decyzyjnej =="
+        )
+        last_decision_date = DECISION_DATES[-1]
+        for ticker in SAMPLE_TICKERS:
+            company_facts = company_facts_by_ticker[ticker]
+            periods_for_diag = build_annual_fundamentals_periods_as_of(company_facts, last_decision_date)
+            print(f"  -- {ticker} (as_of_date={last_decision_date}) --")
+            if not periods_for_diag:
+                print("     brak żadnego rozpoznanego rocznego okresu (net_income/revenue) — pomijam diagnostykę pól.")
+                continue
+            latest_period_end = periods_for_diag[-1].period_end_date
+            _diagnose_fields_for_period(company_facts, period_end=latest_period_end, as_of_date=last_decision_date)
+
         print(f"\n== Krok 3: walk-forward dla {len(SAMPLE_TICKERS)} spółek x {len(DECISION_DATES)} dat ==")
         stage_counts: dict[str, int] = {}
         candidates = []
@@ -236,11 +338,15 @@ def main() -> int:
             )
 
         print(
-            "\nUWAGA: deterministic_score w tym Proof Run pokrywa WYŁĄCZNIE net_income/revenue "
-            "(PIT z SEC XBRL rocznych 10-K) — reszta pól fundamentalnych jest None. Scores są "
-            "systematycznie niższe niż będą po pełnym backfillu; to ograniczenie zakresu tego etapu, "
-            "nie ocena jakości tych spółek. full_score jest zawsze None (brak historycznego LLM, "
-            "zgodnie z decyzją właścicielki) — nigdy nie prezentować jako pełnego wyniku."
+            "\nUWAGA: deterministic_score w tym Proof Run pokrywa 11 z 12 wymaganych pól "
+            "(dependency audit 2026-10-01/02) — PIT z SEC XBRL rocznych 10-K, włącznie z "
+            "kompozytem EBITDA (OperatingIncomeLoss + D&A). `total_debt` jest jawnie None "
+            "(brak jednego uniwersalnego tagu SEC XBRL — decyzja o kompozycie current/noncurrent "
+            "jeszcze nierozstrzygnięta), co obniża net_debt_to_ebitda/net_debt do None tam, gdzie "
+            "total_debt byłby potrzebny. Scores mogą być niższe niż po ostatecznym rozstrzygnięciu "
+            "total_debt; to znana granica tego etapu, nie ocena jakości tych spółek. full_score "
+            "jest zawsze None (brak historycznego LLM, zgodnie z decyzją właścicielki) — nigdy nie "
+            "prezentować jako pełnego wyniku."
         )
 
     return 0

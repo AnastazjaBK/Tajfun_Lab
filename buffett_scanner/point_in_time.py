@@ -26,14 +26,58 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 # Kandydaci XBRL us-gaap per kanoniczny koncept, w kolejności próbowania.
-# Lista NIE jest wyczerpująca — prototyp na kilku spółkach testowych,
-# nie pełne pokrycie wszystkich wariantów tagowania w uniwersum S&P 500.
+# Lista NIE jest wyczerpująca — pokrycie empirycznie potwierdzane Proof
+# Runami na próbce spółek, nie gwarancja dla każdego filera S&P 500.
+#
+# KRYTYCZNA ZASADA (Faza 5.3b, dependency audit 2026-10-01): kandydaci w
+# jednej liście MUSZĄ być prawdziwymi SYNONIMAMI tej samej wielkości
+# księgowej (różne spółki/okresy tagujące to samo pojęcie różnym tagiem),
+# NIGDY różnymi, tylko częściowo nakładającymi się wielkościami. Dlatego
+# np. "cash_and_equivalents" NIE zawiera
+# "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents" jako
+# fallback — to szersza wielkość (zawiera restricted cash), nie synonim —
+# fallback na nią fałszywie zawyżałby cash i (przez net_debt) fałszywie
+# poprawiałby leverage. Z tego samego powodu "total_debt" NIE jest tu
+# jednym tagiem — patrz `pit_fundamentals.py` (kompozyt z komponentów
+# current+noncurrent, decyzja jeszcze NIE podjęta co do zakresu).
 CANDIDATE_TAGS: dict[str, list[str]] = {
     "net_income": ["NetIncomeLoss", "ProfitLoss"],
     "revenue": [
         "RevenueFromContractWithCustomerExcludingAssessedTax",
         "Revenues",
         "SalesRevenueNet",
+    ],
+    "operating_cash_flow": [
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInOperatingActivitiesContinuingOperations",
+    ],
+    "capital_expenditure": [
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+        "PaymentsToAcquireProductiveAssets",
+    ],
+    "cash_and_equivalents": [
+        "CashAndCashEquivalentsAtCarryingValue",
+    ],
+    "total_current_assets": ["AssetsCurrent"],
+    "total_current_liabilities": ["LiabilitiesCurrent"],
+    "dividends_paid": [
+        "PaymentsOfDividendsCommonStock",
+        "PaymentsOfDividends",
+    ],
+    "share_buybacks": [
+        "PaymentsForRepurchaseOfCommonStock",
+    ],
+    "diluted_shares_outstanding": [
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+    ],
+    # Składniki kompozytu EBITDA (patrz pit_fundamentals.py) — NIE są
+    # samodzielnym kanonicznym konceptem FundamentalsPeriod, tylko
+    # surowcem do złożenia ebitda = operating_income + D&A.
+    "operating_income_loss": ["OperatingIncomeLoss"],
+    "depreciation_and_amortization": [
+        "DepreciationDepletionAndAmortization",
+        "DepreciationAmortizationAndAccretionNet",
+        "DepreciationAndAmortization",
     ],
 }
 
