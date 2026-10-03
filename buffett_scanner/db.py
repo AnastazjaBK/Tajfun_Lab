@@ -16,6 +16,8 @@ migracja nie wymagała przeprojektowania modelu danych.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
 
@@ -272,6 +274,26 @@ CREATE TABLE IF NOT EXISTS universe_membership_unresolved_tickers (
     run_id                TEXT NOT NULL,
     created_at            TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (source, ticker, index_name, run_id)
+);
+
+-- Faza 5.3b (walk-forward backtest, dependency audit 2026-10-02/03) --
+-- cache WYLACZNIE surowego SEC Company Facts JSON, zeby kolejne
+-- backtesty nie wymagaly ponownego pelnego pobierania z SEC EDGAR.
+-- Przechowuje SOURCE DATA as-is, NIGDY wyliczonych historycznych
+-- fundamentals ani snapshotow as_of -- rekonstrukcja PIT
+-- (`pit_fundamentals.build_annual_fundamentals_periods_as_of`) dzieje
+-- sie identycznie przy KAZDYM wywolaniu, niezaleznie od tego, czy JSON
+-- przyszedl z sieci czy z tego cache (zero zmiany logiki PIT).
+-- `fetched_at` opisuje WYLACZNIE moment pobrania kopii do cache --
+-- NIGDY dostepnosci historycznego faktu (to wynika z `filed` w samym
+-- JSON, patrz point_in_time.py). Calkowicie niezalezna od
+-- `fundamentals_raw` (ta zostaje bez zmian, sciezka FMP/live-scan).
+CREATE TABLE IF NOT EXISTS sec_company_facts_cache (
+    cik             TEXT PRIMARY KEY REFERENCES companies(cik),
+    raw_json        TEXT NOT NULL,
+    source          TEXT NOT NULL DEFAULT 'sec_edgar',
+    payload_sha256  TEXT NOT NULL,
+    fetched_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 
@@ -623,3 +645,45 @@ def insert_analysis_sources(conn: sqlite3.Connection, analysis_id: int, sources:
         )
         n += 1
     return n
+
+
+def upsert_sec_company_facts_cache(
+    conn: sqlite3.Connection, *, cik: str, company_facts: dict, source: str = "sec_edgar"
+) -> str:
+    """Zapisuje SUROWY `company_facts` JSON (as-is, dokładnie to, co
+    zwraca `SecEdgarClient.get_company_facts`) jako cache na potrzeby
+    walk-forward backtestu — NIGDY wyliczonych historycznych
+    fundamentals ani snapshotów `as_of` (patrz docstring tabeli w
+    SCHEMA). `cik` musi być wcześniej wpisany do `companies` (FK).
+    Zwraca `payload_sha256` zapisanego payloadu (audyt/reprodukowalność)."""
+    raw_json = json.dumps(company_facts, sort_keys=True)
+    payload_sha256 = hashlib.sha256(raw_json.encode("utf-8")).hexdigest()
+    conn.execute(
+        """
+        INSERT INTO sec_company_facts_cache (cik, raw_json, source, payload_sha256, fetched_at)
+        VALUES (?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(cik) DO UPDATE SET
+            raw_json = excluded.raw_json,
+            source = excluded.source,
+            payload_sha256 = excluded.payload_sha256,
+            fetched_at = excluded.fetched_at
+        """,
+        (cik, raw_json, source, payload_sha256),
+    )
+    return payload_sha256
+
+
+def get_sec_company_facts_cache(conn: sqlite3.Connection, cik: str) -> dict | None:
+    """Odczytuje surowy `company_facts` JSON z cache, albo `None`, jeśli
+    ten CIK nigdy nie był cache'owany — jawny brak danych, NIGDY fallback
+    na `fundamentals_raw` (to inna ścieżka, inny provider, inna
+    semantyka — patrz docstring tabeli). Zwrócony dict ma IDENTYCZNY
+    kształt jak ten, który wejściowo zapisano -- konsumenci (np.
+    `pit_fundamentals.build_annual_fundamentals_periods_as_of`) używają
+    go bez żadnej różnicy względem świeżo pobranego z SEC."""
+    row = conn.execute(
+        "SELECT raw_json FROM sec_company_facts_cache WHERE cik = ?", (cik,)
+    ).fetchone()
+    if row is None:
+        return None
+    return json.loads(row["raw_json"])

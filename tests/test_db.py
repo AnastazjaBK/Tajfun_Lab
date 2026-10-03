@@ -6,6 +6,7 @@ from buffett_scanner.db import (
     create_user,
     get_fundamentals_periods,
     get_price_series,
+    get_sec_company_facts_cache,
     get_universe_membership_as_of,
     init_db,
     insert_analysis,
@@ -17,6 +18,7 @@ from buffett_scanner.db import (
     upsert_company,
     upsert_derived_metric,
     upsert_scoring_model_version,
+    upsert_sec_company_facts_cache,
     upsert_ticker_history,
     upsert_universe_membership,
 )
@@ -419,3 +421,87 @@ def test_get_universe_membership_as_of_end_date_is_exclusive(conn):
     assert get_universe_membership_as_of(conn, "SP500", "2013-01-01") == ["A", "B"]
     assert get_universe_membership_as_of(conn, "SP500", "2015-01-01") == ["B"]  # A kończy się TEGO dnia
     assert get_universe_membership_as_of(conn, "SP500", "2011-01-01") == []
+
+
+# ---------------------------------------------------------------------------
+# sec_company_facts_cache (Faza 5.3b) — cache WYŁĄCZNIE surowego SEC
+# company_facts JSON na potrzeby walk-forward backtestu. Nigdy wyliczonych
+# historycznych fundamentals/snapshotów as_of; całkowicie niezależna od
+# fundamentals_raw (ścieżka FMP/live-scan, bez zmian).
+# ---------------------------------------------------------------------------
+
+import hashlib
+import json
+
+
+def _sample_company_facts():
+    return {
+        "cik": 320193, "entityName": "Apple Inc.",
+        "facts": {"us-gaap": {
+            "NetIncomeLoss": {"units": {"USD": [
+                {"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+            ]}},
+        }},
+    }
+
+
+def test_upsert_sec_company_facts_cache_round_trips_identical_json(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    facts = _sample_company_facts()
+    upsert_sec_company_facts_cache(conn, cik="0000320193", company_facts=facts)
+    conn.commit()
+    cached = get_sec_company_facts_cache(conn, "0000320193")
+    assert cached == facts
+
+
+def test_get_sec_company_facts_cache_none_when_cik_never_cached(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    assert get_sec_company_facts_cache(conn, "0000320193") is None
+
+
+def test_get_sec_company_facts_cache_does_not_fall_back_to_fundamentals_raw(conn):
+    """Brak danych w sec_company_facts_cache MUSI pozostać jawnym None,
+    nawet jeśli fundamentals_raw (inna ścieżka, inny provider) ma dane
+    dla tego samego CIK — zero fallbacku między tymi dwoma tabelami."""
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    insert_fundamentals_rows(
+        conn, "0000320193", source="fmp",
+        rows=[{"fiscal_period": "FY2023", "period_end_date": "2023-12-31",
+               "filed_date": "2024-02-01", "line_item": "net_income", "value": 999.0}],
+    )
+    conn.commit()
+    assert get_sec_company_facts_cache(conn, "0000320193") is None
+
+
+def test_upsert_sec_company_facts_cache_overwrites_on_same_cik(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_sec_company_facts_cache(conn, cik="0000320193", company_facts=_sample_company_facts())
+    updated = _sample_company_facts()
+    updated["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"].append(
+        {"start": "2024-01-01", "end": "2024-12-31", "val": 100.0, "filed": "2025-02-01", "fy": 2024, "fp": "FY"}
+    )
+    upsert_sec_company_facts_cache(conn, cik="0000320193", company_facts=updated)
+    conn.commit()
+    cached = get_sec_company_facts_cache(conn, "0000320193")
+    assert len(cached["facts"]["us-gaap"]["NetIncomeLoss"]["units"]["USD"]) == 2
+
+
+def test_upsert_sec_company_facts_cache_returns_sha256_of_payload(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    facts = _sample_company_facts()
+    returned_hash = upsert_sec_company_facts_cache(conn, cik="0000320193", company_facts=facts)
+    expected = hashlib.sha256(json.dumps(facts, sort_keys=True).encode("utf-8")).hexdigest()
+    assert returned_hash == expected
+    row = conn.execute(
+        "SELECT payload_sha256, source FROM sec_company_facts_cache WHERE cik = ?", ("0000320193",)
+    ).fetchone()
+    assert row["payload_sha256"] == expected
+    assert row["source"] == "sec_edgar"
+
+
+def test_init_db_creates_sec_company_facts_cache_table(conn):
+    tables = {
+        row["name"]
+        for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert "sec_company_facts_cache" in tables
