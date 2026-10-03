@@ -505,3 +505,71 @@ def test_init_db_creates_sec_company_facts_cache_table(conn):
         for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }
     assert "sec_company_facts_cache" in tables
+
+
+# ---------------------------------------------------------------------------
+# backfill_status (Faza 5.3b) — jawny status (cik, task_type) na potrzeby
+# resumability; obecność wierszy w price_daily/sec_company_facts_cache
+# NIE jest dowodem kompletności, stąd osobna, jawna klasyfikacja.
+# ---------------------------------------------------------------------------
+
+from buffett_scanner.db import get_backfill_status, list_backfill_statuses, upsert_backfill_status
+
+
+def test_upsert_and_get_backfill_status_round_trip(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_backfill_status(
+        conn, cik="0000320193", task_type="PRICES", status="COMPLETE",
+        detail="1500 wierszy", run_id="run-1",
+    )
+    conn.commit()
+    row = get_backfill_status(conn, "0000320193", "PRICES")
+    assert row["status"] == "COMPLETE"
+    assert row["detail"] == "1500 wierszy"
+    assert row["run_id"] == "run-1"
+
+
+def test_get_backfill_status_none_when_never_attempted(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    assert get_backfill_status(conn, "0000320193", "PRICES") is None
+
+
+def test_upsert_backfill_status_overwrites_latest_status_not_history(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_backfill_status(conn, cik="0000320193", task_type="PRICES", status="PARTIAL", run_id="run-1")
+    upsert_backfill_status(conn, cik="0000320193", task_type="PRICES", status="COMPLETE", run_id="run-2")
+    conn.commit()
+    row = get_backfill_status(conn, "0000320193", "PRICES")
+    assert row["status"] == "COMPLETE"
+    assert row["run_id"] == "run-2"
+    all_rows = conn.execute(
+        "SELECT * FROM backfill_status WHERE cik = ? AND task_type = ?", ("0000320193", "PRICES")
+    ).fetchall()
+    assert len(all_rows) == 1  # nadpisanie, nie druga linia historii
+
+
+def test_backfill_status_prices_and_fundamentals_independent(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_backfill_status(conn, cik="0000320193", task_type="PRICES", status="COMPLETE", run_id="run-1")
+    upsert_backfill_status(conn, cik="0000320193", task_type="FUNDAMENTALS", status="FAILED", run_id="run-1")
+    conn.commit()
+    assert get_backfill_status(conn, "0000320193", "PRICES")["status"] == "COMPLETE"
+    assert get_backfill_status(conn, "0000320193", "FUNDAMENTALS")["status"] == "FAILED"
+
+
+def test_backfill_status_rejects_unknown_status_value(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    with pytest.raises(sqlite3.IntegrityError):
+        upsert_backfill_status(conn, cik="0000320193", task_type="PRICES", status="BOGUS", run_id="run-1")
+
+
+def test_list_backfill_statuses_filters_by_task_type(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_company(conn, cik="0000789019", name="Microsoft Corp.")
+    upsert_backfill_status(conn, cik="0000320193", task_type="PRICES", status="COMPLETE", run_id="run-1")
+    upsert_backfill_status(conn, cik="0000789019", task_type="FUNDAMENTALS", status="COMPLETE", run_id="run-1")
+    conn.commit()
+    prices_only = list_backfill_statuses(conn, "PRICES")
+    assert len(prices_only) == 1
+    assert prices_only[0]["cik"] == "0000320193"
+    assert len(list_backfill_statuses(conn)) == 2

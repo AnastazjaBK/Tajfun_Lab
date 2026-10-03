@@ -20,6 +20,8 @@ import time
 
 import httpx
 
+from buffett_scanner.providers.retry import RETRYABLE_STATUS_CODES, backoff_seconds, parse_retry_after_seconds
+
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik10}.json"
 COMPANY_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json"
 ARCHIVES_BASE_URL = "https://www.sec.gov/Archives/edgar/data"
@@ -36,7 +38,14 @@ def _pad_cik(cik: str) -> str:
 
 
 class SecEdgarClient:
-    def __init__(self, user_agent: str, *, min_interval_s: float = 0.11):
+    def __init__(
+        self,
+        user_agent: str,
+        *,
+        min_interval_s: float = 0.11,
+        max_retries: int = 5,
+        sleep_fn=time.sleep,
+    ):
         # SEC limit: 10 req/s. 0.11s > 0.10s zostawia margines na jitter.
         if not user_agent or "@" not in user_agent:
             raise SecEdgarError(
@@ -45,6 +54,8 @@ class SecEdgarClient:
             )
         self._user_agent = user_agent
         self._min_interval_s = min_interval_s
+        self._max_retries = max_retries
+        self._sleep_fn = sleep_fn
         self._last_call_ts = 0.0
         self._client = httpx.Client(timeout=DEFAULT_TIMEOUT, headers={"User-Agent": user_agent})
 
@@ -63,14 +74,34 @@ class SecEdgarClient:
             time.sleep(self._min_interval_s - elapsed)
 
     def _get(self, url: str) -> httpx.Response:
-        self._throttle()
-        try:
-            resp = self._client.get(url)
-        except httpx.HTTPError as exc:
-            raise SecEdgarError(f"Błąd sieci przy wywołaniu SEC EDGAR ({url}): {exc}") from exc
-        finally:
+        """Faza 5.3b (backfill 626 CIK, Decyzja właścicielki 2026-10-03):
+        429/5xx i błędy sieciowe są ponawiane z backoffem (max
+        `self._max_retries` prób), `Retry-After` honorowany, gdy obecny.
+        Inne statusy (np. 404 — CIK nie istnieje) wracają od razu, bez
+        ponawiania — to stały, nie przejściowy błąd, wołający (np.
+        `get_company_facts`) sam podnosi `SecEdgarError` ze swoim
+        dotychczasowym, niezmienionym komunikatem."""
+        attempt = 0
+        while True:
+            self._throttle()
+            try:
+                resp = self._client.get(url)
+            except httpx.HTTPError as exc:
+                self._last_call_ts = time.monotonic()
+                if attempt >= self._max_retries:
+                    raise SecEdgarError(
+                        f"Błąd sieci przy wywołaniu SEC EDGAR ({url}) po {attempt + 1} próbach: {exc}"
+                    ) from exc
+                self._sleep_fn(backoff_seconds(attempt))
+                attempt += 1
+                continue
             self._last_call_ts = time.monotonic()
-        return resp
+            if resp.status_code in RETRYABLE_STATUS_CODES and attempt < self._max_retries:
+                retry_after = parse_retry_after_seconds(resp.headers.get("Retry-After"))
+                self._sleep_fn(retry_after if retry_after is not None else backoff_seconds(attempt))
+                attempt += 1
+                continue
+            return resp
 
     def get_filings(self, cik: str) -> list[dict]:
         """Lista filingów spółki z EDGAR Submissions API. Zwraca listę

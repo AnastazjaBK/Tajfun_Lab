@@ -258,3 +258,80 @@ def test_get_company_tickers_is_cik_only_view_of_full_mapping(monkeypatch):
         client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
     )
     assert client.get_company_tickers() == {"AAPL": "320193"}
+
+
+# ---------------------------------------------------------------------------
+# Retry/backoff (Faza 5.3b, backfill 626 CIK, Decyzja właścicielki 2026-10-03)
+# ---------------------------------------------------------------------------
+
+class _FakeResponseWithHeaders:
+    def __init__(self, status_code: int, json_payload=None, headers: dict | None = None):
+        self.status_code = status_code
+        self._json_payload = json_payload
+        self.headers = headers or {}
+
+    def json(self):
+        return self._json_payload
+
+
+def test_get_retries_on_429_then_succeeds_honors_retry_after(monkeypatch):
+    sleeps: list[float] = []
+    client = SecEdgarClient(
+        "Tajfun Lab kontakt@example.com", sleep_fn=lambda s: sleeps.append(s)
+    )
+    responses = [
+        _FakeResponseWithHeaders(429, headers={"Retry-After": "7"}),
+        _FakeResponseWithHeaders(200, json_payload={"ok": True}),
+    ]
+    calls = iter(responses)
+    monkeypatch.setattr(client._client, "get", lambda url: next(calls))
+    resp = client._get("https://example.com")
+    assert resp.status_code == 200
+    assert sleeps == [7.0]  # Retry-After honorowany, nie backoff_seconds
+
+
+def test_get_retries_on_5xx_with_exponential_backoff_when_no_retry_after(monkeypatch):
+    sleeps: list[float] = []
+    client = SecEdgarClient(
+        "Tajfun Lab kontakt@example.com", sleep_fn=lambda s: sleeps.append(s)
+    )
+    responses = [
+        _FakeResponseWithHeaders(503),
+        _FakeResponseWithHeaders(503),
+        _FakeResponseWithHeaders(200, json_payload={"ok": True}),
+    ]
+    calls = iter(responses)
+    monkeypatch.setattr(client._client, "get", lambda url: next(calls))
+    resp = client._get("https://example.com")
+    assert resp.status_code == 200
+    assert sleeps == [1.0, 2.0]
+
+
+def test_get_gives_up_after_max_retries_returns_last_response(monkeypatch):
+    client = SecEdgarClient(
+        "Tajfun Lab kontakt@example.com", max_retries=2, sleep_fn=lambda s: None
+    )
+    monkeypatch.setattr(client._client, "get", lambda url: _FakeResponseWithHeaders(503))
+    resp = client._get("https://example.com")
+    assert resp.status_code == 503  # wolajacy (np. get_company_facts) sam podnosi SecEdgarError
+
+
+def test_get_does_not_retry_on_404_not_a_transient_error(monkeypatch):
+    calls = []
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com", sleep_fn=lambda s: None)
+    def _fake_get(url):
+        calls.append(url)
+        return _FakeResponseWithHeaders(404)
+    monkeypatch.setattr(client._client, "get", _fake_get)
+    resp = client._get("https://example.com")
+    assert resp.status_code == 404
+    assert len(calls) == 1  # zero ponowien
+
+
+def test_get_company_facts_raises_after_exhausted_retries_on_persistent_429(monkeypatch):
+    client = SecEdgarClient(
+        "Tajfun Lab kontakt@example.com", max_retries=1, sleep_fn=lambda s: None
+    )
+    monkeypatch.setattr(client._client, "get", lambda url: _FakeResponseWithHeaders(429))
+    with pytest.raises(SecEdgarError):
+        client.get_company_facts("0000320193")

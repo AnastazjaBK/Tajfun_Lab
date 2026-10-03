@@ -56,6 +56,8 @@ import time
 
 import httpx
 
+from buffett_scanner.providers.retry import RETRYABLE_STATUS_CODES, backoff_seconds, parse_retry_after_seconds
+
 BASE_URL = "https://financialmodelingprep.com/stable"
 DEFAULT_TIMEOUT = 15.0
 MAX_ERROR_BODY_CHARS = 300
@@ -66,12 +68,25 @@ class FMPError(RuntimeError):
 
 
 class FMPClient:
-    def __init__(self, api_key: str, *, base_url: str = BASE_URL, min_interval_s: float = 0.05):
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str = BASE_URL,
+        min_interval_s: float = 0.05,
+        max_retries: int = 5,
+        sleep_fn=time.sleep,
+    ):
         if not api_key:
             raise FMPError("Pusty klucz API FMP.")
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
-        self._min_interval_s = min_interval_s  # throttling — plan Starter: 300 wywołań/min
+        # throttling -- Decyzja wlascicielki 2026-10-03: plan Premium
+        # pozwala 750 calls/min, ale jawnie NIE wykorzystujemy tego
+        # limitu agresywnie; domyslny min_interval_s zostaje konserwatywny.
+        self._min_interval_s = min_interval_s
+        self._max_retries = max_retries
+        self._sleep_fn = sleep_fn
         self._last_call_ts = 0.0
         self._client = httpx.Client(timeout=DEFAULT_TIMEOUT)
 
@@ -90,15 +105,34 @@ class FMPClient:
             time.sleep(self._min_interval_s - elapsed)
 
     def _get(self, path: str, **params) -> object:
-        self._throttle()
+        """Faza 5.3b (backfill 626 CIK, Decyzja właścicielki 2026-10-03):
+        429/5xx i błędy sieciowe ponawiane z backoffem (max
+        `self._max_retries` prób, `Retry-After` honorowany, gdy obecny).
+        402 ("Restricted Endpoint")/404 i inne stałe błędy wracają od
+        razu, bez ponawiania — ponawianie ich tylko traciłoby limit."""
         params = {**params, "apikey": self._api_key}
         url = f"{self._base_url}/{path.lstrip('/')}"
-        try:
-            resp = self._client.get(url, params=params)
-        except httpx.HTTPError as exc:
-            raise FMPError(f"Błąd sieci przy wywołaniu FMP ({path}): {exc}") from exc
-        finally:
+        attempt = 0
+        while True:
+            self._throttle()
+            try:
+                resp = self._client.get(url, params=params)
+            except httpx.HTTPError as exc:
+                self._last_call_ts = time.monotonic()
+                if attempt >= self._max_retries:
+                    raise FMPError(
+                        f"Błąd sieci przy wywołaniu FMP ({path}) po {attempt + 1} próbach: {exc}"
+                    ) from exc
+                self._sleep_fn(backoff_seconds(attempt))
+                attempt += 1
+                continue
             self._last_call_ts = time.monotonic()
+            if resp.status_code in RETRYABLE_STATUS_CODES and attempt < self._max_retries:
+                retry_after = parse_retry_after_seconds(resp.headers.get("Retry-After"))
+                self._sleep_fn(retry_after if retry_after is not None else backoff_seconds(attempt))
+                attempt += 1
+                continue
+            break
         if resp.status_code != 200:
             body_preview = resp.text[:MAX_ERROR_BODY_CHARS]
             raise FMPError(

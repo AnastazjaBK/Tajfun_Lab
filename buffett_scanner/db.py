@@ -295,6 +295,24 @@ CREATE TABLE IF NOT EXISTS sec_company_facts_cache (
     payload_sha256  TEXT NOT NULL,
     fetched_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- Faza 5.3b (backfill 626 CIK, zatwierdzony projekt 2026-10-03) --
+-- jawny status kazdego (cik, task_type) na potrzeby resumability.
+-- Latwa obecnosc wierszy w price_daily/sec_company_facts_cache NIE
+-- jest dowodem kompletnosci (Decyzja wlascicielki: PARTIAL musi byc
+-- rozpoznawalne od COMPLETE) -- stad osobna, jawna klasyfikacja per
+-- CIK/task, nadpisywana (najnowszy status wygrywa) przy kazdym
+-- przebiegu/wznowieniu backfillu. `run_id` to OSTATNI run, ktory
+-- zaktualizowal ten wiersz -- audyt, nie historia wszystkich przebiegow.
+CREATE TABLE IF NOT EXISTS backfill_status (
+    cik           TEXT NOT NULL REFERENCES companies(cik),
+    task_type     TEXT NOT NULL CHECK (task_type IN ('PRICES','FUNDAMENTALS')),
+    status        TEXT NOT NULL CHECK (status IN ('COMPLETE','PARTIAL','FAILED','NOT_ATTEMPTED')),
+    detail        TEXT,
+    run_id        TEXT NOT NULL,
+    updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (cik, task_type)
+);
 """
 
 
@@ -687,3 +705,65 @@ def get_sec_company_facts_cache(conn: sqlite3.Connection, cik: str) -> dict | No
     if row is None:
         return None
     return json.loads(row["raw_json"])
+
+
+def upsert_backfill_status(
+    conn: sqlite3.Connection,
+    *,
+    cik: str,
+    task_type: str,
+    status: str,
+    run_id: str,
+    detail: str | None = None,
+) -> None:
+    """Zapisuje NAJNOWSZY status (cik, task_type) — nadpisuje poprzedni
+    wiersz (resumability: kolejny przebieg musi widzieć aktualny stan,
+    nie historię). `status` musi być jednym z COMPLETE/PARTIAL/FAILED/
+    NOT_ATTEMPTED (patrz CHECK w SCHEMA) — literówka tutaj jest błędem
+    programistycznym, nie danymi wejściowymi, stąd brak walidacji w
+    Pythonie: SQLite CHECK sam odrzuci złą wartość."""
+    conn.execute(
+        """
+        INSERT INTO backfill_status (cik, task_type, status, detail, run_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        ON CONFLICT(cik, task_type) DO UPDATE SET
+            status = excluded.status,
+            detail = excluded.detail,
+            run_id = excluded.run_id,
+            updated_at = excluded.updated_at
+        """,
+        (cik, task_type, status, detail, run_id),
+    )
+
+
+def get_backfill_status(conn: sqlite3.Connection, cik: str, task_type: str) -> sqlite3.Row | None:
+    """`None` = nigdy nie podjęto próby (NOT_ATTEMPTED i `None` to różne
+    rzeczy: NOT_ATTEMPTED jest jawnym wierszem zapisanym przez orkiestrację
+    po stwierdzeniu braku jakichkolwiek danych; `None` to stan PRZED
+    pierwszym przebiegiem backfillu w ogóle — resumability traktuje obie
+    sytuacje identycznie, jako „do zrobienia”, ale rozróżnienie ma
+    znaczenie dla audytu)."""
+    return conn.execute(
+        "SELECT * FROM backfill_status WHERE cik = ? AND task_type = ?", (cik, task_type)
+    ).fetchone()
+
+
+def list_backfill_statuses(conn: sqlite3.Connection, task_type: str | None = None) -> list[sqlite3.Row]:
+    if task_type is None:
+        return conn.execute("SELECT * FROM backfill_status ORDER BY cik, task_type").fetchall()
+    return conn.execute(
+        "SELECT * FROM backfill_status WHERE task_type = ? ORDER BY cik", (task_type,)
+    ).fetchall()
+
+
+def list_universe_membership_ciks(conn: sqlite3.Connection, index_name: str) -> list[str]:
+    """Wszystkie DISTINCT CIK, które kiedykolwiek miały wiersz w
+    `universe_membership` dla danego `index_name` — pełny zresolved
+    zbiór (626 dla SP500/fja05680), niezależnie od aktualnego "as of"
+    membership (backfill potrzebuje WSZYSTKICH historycznych członków,
+    nie tylko dzisiejszych — patrz `backfill.py`)."""
+    rows = conn.execute(
+        "SELECT DISTINCT cik FROM universe_membership WHERE index_name = ? ORDER BY cik",
+        (index_name,),
+    ).fetchall()
+    return [r["cik"] for r in rows]

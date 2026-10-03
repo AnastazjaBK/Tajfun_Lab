@@ -276,6 +276,75 @@ def test_normalize_fundamentals_rows_skips_missing_fields_without_fabricating():
     assert line_items == {"revenue"}  # netIncome/ebitda brak w źródle -> nie fabrykujemy 0/None
 
 
+# ---------------------------------------------------------------------------
+# Retry/backoff (Faza 5.3b, backfill 626 CIK, Decyzja właścicielki 2026-10-03)
+# ---------------------------------------------------------------------------
+
+class _FakeResponseWithHeaders:
+    def __init__(self, status_code: int, payload=None, headers: dict | None = None):
+        self.status_code = status_code
+        self._payload = payload
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+    @property
+    def text(self):
+        return str(self._payload)
+
+
+def test_fmp_get_retries_on_429_then_succeeds_honors_retry_after(monkeypatch):
+    sleeps: list[float] = []
+    client = FMPClient("dummy-key", sleep_fn=lambda s: sleeps.append(s))
+    responses = [
+        _FakeResponseWithHeaders(429, headers={"Retry-After": "3"}),
+        _FakeResponseWithHeaders(200, payload=[{"symbol": "AAPL"}]),
+    ]
+    calls = iter(responses)
+    monkeypatch.setattr(client._client, "get", lambda url, params=None: next(calls))
+    data = client.get_sp500_constituents()
+    assert data == [{"symbol": "AAPL"}]
+    assert sleeps == [3.0]
+
+
+def test_fmp_get_retries_on_5xx_with_exponential_backoff(monkeypatch):
+    sleeps: list[float] = []
+    client = FMPClient("dummy-key", sleep_fn=lambda s: sleeps.append(s))
+    responses = [
+        _FakeResponseWithHeaders(502),
+        _FakeResponseWithHeaders(502),
+        _FakeResponseWithHeaders(200, payload=[]),
+    ]
+    calls = iter(responses)
+    monkeypatch.setattr(client._client, "get", lambda url, params=None: next(calls))
+    client.get_sp500_constituents()
+    assert sleeps == [1.0, 2.0]
+
+
+def test_fmp_get_does_not_retry_on_402_restricted_endpoint(monkeypatch):
+    calls = []
+    client = FMPClient("dummy-key", sleep_fn=lambda s: None)
+
+    def _fake_get(url, params=None):
+        calls.append(url)
+        return _FakeResponseWithHeaders(402, payload={"error": "Restricted Endpoint"})
+
+    monkeypatch.setattr(client._client, "get", _fake_get)
+    with pytest.raises(FMPError):
+        client.get_sp500_constituents()
+    assert len(calls) == 1
+
+
+def test_fmp_get_gives_up_after_max_retries_raises(monkeypatch):
+    client = FMPClient("dummy-key", max_retries=1, sleep_fn=lambda s: None)
+    monkeypatch.setattr(
+        client._client, "get", lambda url, params=None: _FakeResponseWithHeaders(429)
+    )
+    with pytest.raises(FMPError):
+        client.get_sp500_constituents()
+
+
 @pytest.mark.integration
 def test_live_smoke_sp500_constituents_shape():
     """Wymaga prawdziwego FMP_API_KEY. Potwierdza (albo obala) założenia

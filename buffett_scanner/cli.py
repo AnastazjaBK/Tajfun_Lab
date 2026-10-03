@@ -12,6 +12,8 @@
     python -m buffett_scanner.cli pit-prototype AAPL MSFT ... [--as-of YYYY-MM-DD]
     python -m buffett_scanner.cli analyze-sp500-history [--cutoff YYYY-MM-DD]
     python -m buffett_scanner.cli build-universe-membership [--cutoff YYYY-MM-DD]
+    python -m buffett_scanner.cli backfill-walk-forward-data [--target prices|fundamentals|both]
+        [--cutoff YYYY-MM-DD] [--refresh] [--sample CIK1,CIK2,...]
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -27,6 +29,11 @@ import sys
 from pathlib import Path
 
 from buffett_scanner.analysis_schema import AnalysisOutput, AnalysisValidationError, validate_analysis_output
+from buffett_scanner.backfill import (
+    backfill_fundamentals_for_cik,
+    backfill_prices_for_cik,
+    derive_price_fetch_ticker_universe,
+)
 from buffett_scanner.config import load_config
 from buffett_scanner.db import (
     get_fundamentals_periods,
@@ -39,6 +46,7 @@ from buffett_scanner.db import (
     insert_price_rows,
     insert_unresolved_ticker,
     insert_universe_membership_conflict,
+    list_universe_membership_ciks,
     upsert_company,
     upsert_derived_metric,
     upsert_scoring_model_version,
@@ -56,6 +64,7 @@ from buffett_scanner.fmp_sp500_events import (
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
+from buffett_scanner.price_history_plan import build_price_fetch_plan
 from buffett_scanner.prompt import build_analysis_prompt
 from buffett_scanner.providers.claude import ClaudeClient, ClaudeError
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
@@ -930,6 +939,103 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_backfill_walk_forward_data(args: argparse.Namespace) -> int:
+    """Faza 5.3b — backfill 626 CIK / 2012+ dla walk-forward backtestu,
+    projekt zatwierdzony przez właścicielkę 2026-10-03. Wymaga, żeby
+    `universe_membership` było JUŻ zbudowane (`build-universe-membership`)
+    w tym samym `--db` — backfill WYŁĄCZNIE czyta zresolved CIK z tej
+    tabeli, nigdy jej nie przebudowuje/nie modyfikuje. Pełna resumability
+    (patrz `backfill.py`): domyślnie pomija CIK/task już COMPLETE,
+    `--refresh` wymusza ponowne pobranie. `--sample` ogranicza zakres do
+    podanej listy CIK (mały Proof Run przed pełnym runem)."""
+    config = load_config()
+    try:
+        api_key = config.data_provider.resolve_api_key()
+        user_agent = config.sources.sec_edgar.resolve_user_agent()
+    except RuntimeError as exc:
+        print(f"BŁĄD: {exc}", file=sys.stderr)
+        return 1
+
+    index_name = UNIVERSE_MEMBERSHIP_INDEX_NAME
+    cutoff = args.cutoff
+    today = dt.date.today().isoformat()
+    run_id = "backfill-" + dt.datetime.utcnow().strftime("%Y-%m-%dT%H%M%SZ")
+    conn = init_db(args.db)
+
+    all_ciks = list_universe_membership_ciks(conn, index_name)
+    if args.sample:
+        sample_set = {c.strip() for c in args.sample.split(",") if c.strip()}
+        all_ciks = [c for c in all_ciks if c in sample_set]
+    if not all_ciks:
+        print(
+            "BŁĄD: zero CIK w zakresie (sprawdź --sample / czy universe_membership "
+            "jest już zbudowane w tym --db).",
+            file=sys.stderr,
+        )
+        return 1
+    print(f"Zakres backfillu: {len(all_ciks)} CIK (index={index_name}, cutoff={cutoff}, run_id={run_id}).")
+
+    fundamentals_results = []
+    price_results = []
+
+    if args.target in ("fundamentals", "both"):
+        print("\n== Fundamentals (SEC company_facts -> sec_company_facts_cache) ==")
+        with SecEdgarClient(user_agent) as sec_client:
+            for i, cik in enumerate(all_ciks, 1):
+                result = backfill_fundamentals_for_cik(
+                    sec_client, conn, cik=cik, run_id=run_id, refresh=args.refresh,
+                )
+                conn.commit()
+                fundamentals_results.append(result)
+                print(f"  [{i}/{len(all_ciks)}] CIK={cik}: {result.status} — {result.detail}")
+
+    if args.target in ("prices", "both"):
+        print("\n== Prices (price_history_plan -> price_daily) ==")
+        print("  Derivacja (ticker_intervals, resolved) z fja05680 + SEC ticker map ...")
+        with SecEdgarClient(user_agent) as sec_client:
+            try:
+                sec_ticker_map = sec_client.get_company_tickers()
+            except SecEdgarError as exc:
+                print(f"BŁĄD pobierania SEC company_tickers.json: {exc}", file=sys.stderr)
+                return 1
+        try:
+            fja_csv = fetch_components_csv()
+        except Sp500HistoryError as exc:
+            print(f"BŁĄD pobierania fja05680/sp500: {exc}", file=sys.stderr)
+            return 1
+        ticker_intervals, resolved = derive_price_fetch_ticker_universe(
+            sec_ticker_map=sec_ticker_map, fja_csv=fja_csv, cutoff=cutoff, in_scope_ciks=set(all_ciks),
+        )
+        tasks, _unresolved_in_plan = build_price_fetch_plan(
+            ticker_intervals, resolved, cutoff_date=cutoff, today=today,
+        )
+        tasks_by_cik: dict[str, list] = {}
+        for t in tasks:
+            tasks_by_cik.setdefault(t.cik, []).append(t)
+        print(f"  {len(tasks)} zadań cenowych dla {len(tasks_by_cik)}/{len(all_ciks)} CIK w zakresie.")
+
+        with FMPClient(api_key) as fmp_client:
+            for i, cik in enumerate(all_ciks, 1):
+                result = backfill_prices_for_cik(
+                    fmp_client, conn, cik=cik, tasks=tasks_by_cik.get(cik, []),
+                    run_id=run_id, refresh=args.refresh,
+                )
+                conn.commit()
+                price_results.append(result)
+                print(f"  [{i}/{len(all_ciks)}] CIK={cik}: {result.status} — {result.detail}")
+
+    print("\n== Podsumowanie ==")
+    for label, results in (("FUNDAMENTALS", fundamentals_results), ("PRICES", price_results)):
+        if not results:
+            continue
+        counts: dict[str, int] = {}
+        for r in results:
+            counts[r.status] = counts.get(r.status, 0) + 1
+        print(f"  {label}: " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -987,6 +1093,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--cutoff", default="2012-01-01", help="Początek okna budowy (YYYY-MM-DD, domyślnie D14: 2012-01-01)."
     )
     p_build_membership.set_defaults(func=cmd_build_universe_membership)
+
+    p_backfill = sub.add_parser("backfill-walk-forward-data")
+    p_backfill.add_argument(
+        "--target", choices=("prices", "fundamentals", "both"), default="both",
+        help="Który backfill uruchomić (domyślnie both).",
+    )
+    p_backfill.add_argument(
+        "--cutoff", default="2012-01-01",
+        help="Początek okna cen (YYYY-MM-DD, domyślnie D14: 2012-01-01).",
+    )
+    p_backfill.add_argument(
+        "--refresh", action="store_true",
+        help="Wymusza ponowne pobranie nawet dla CIK już COMPLETE (domyślnie pominięte, resumability).",
+    )
+    p_backfill.add_argument(
+        "--sample", default=None,
+        help="Lista CIK po przecinku — ogranicza zakres (np. mały Proof Run na 10-20 CIK przed pełnym runem).",
+    )
+    p_backfill.set_defaults(func=cmd_backfill_walk_forward_data)
 
     return parser
 
