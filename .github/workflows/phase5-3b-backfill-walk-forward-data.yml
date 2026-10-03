@@ -1,0 +1,116 @@
+name: Phase 5.3b Backfill Walk-Forward Data (prices + SEC fundamentals cache)
+
+# Reczne uruchomienie z przegladarki, jak poprzednie fazy. Backfill 626
+# CIK / 2012+ dla deterministycznego walk-forward backtest harnessu
+# (sekcja 13), projekt zatwierdzony przez wlascicielke 2026-10-03.
+#
+# Dwa etapy wykonania (Decyzja wlascicielki, nie zmieniac bez jej
+# zgody):
+#   A. Maly realny Proof Run na ~10-20 reprezentatywnych CIK --
+#      ustaw `sample_ciks` (CIK BEZ wiodacych zer, po przecinku, w
+#      formacie jak w universe_membership.cik, np. "320193,789019,21344").
+#   B. Pelny backfill 626 CIK -- pozostaw `sample_ciks` puste.
+# Przejscie z A do B NIE wymaga ponownej zgody wlascicielki w tej
+# sesji, JESLI Proof Run (A) nie ujawni nowego problemu systemowego
+# (naruszenie PIT, identity mismatch, zly merge cen, zepsuta
+# resumability, zly SEC cache) -- patrz docs/buffett-scanner-design-review.md.
+#
+# Kazde uruchomienie najpierw odbudowuje universe_membership (swiezy
+# plik DB w tym samym jobie -- `build-universe-membership` jest juz
+# zamknieta, zwalidowana Faza 5.3a, uruchamiana tu tylko po to, zeby
+# backfill mial zresolved 626 CIK do pracy), potem uruchamia backfill
+# cen (FMP) + fundamentals (SEC cache) na tym samym pliku DB.
+#
+# Resumability (Decyzja wlascicielki): jesli job zostanie przerwany
+# (np. limit czasu runnera), ustaw `resume_from_run_id` na ID TEGO
+# przerwanego uruchomienia (widoczny w URL/nazwie runu w zakladce
+# Actions) -- workflow pobierze jego artefakt DB i wznowi backfill na
+# nim, pomijajac CIK juz COMPLETE. `build-universe-membership` jest
+# uruchamiane zawsze (idempotentny UPSERT), nawet na wznowionym DB --
+# nie przebudowuje nic, co juz tam jest.
+#
+# Wymaga sekretow FMP_API_KEY i SEC_EDGAR_USER_AGENT (oba juz istnieja).
+# Wlascicielka ma plan FMP Premium (750 calls/min, 50 GB/30 dni) --
+# backfill celowo NIE wykorzystuje tego limitu agresywnie (patrz
+# providers/retry.py, backfill.py).
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample_ciks:
+        description: >
+          Lista CIK po przecinku (BEZ wiodacych zer), np. "320193,789019,21344"
+          -- ogranicza zakres do malego Proof Run. Puste = pelny backfill 626 CIK.
+        required: false
+        default: ""
+      target:
+        description: "Co backfillowac: prices / fundamentals / both"
+        required: false
+        default: "both"
+      refresh:
+        description: "Wymusic ponowne pobranie nawet dla CIK juz COMPLETE (domyslnie: nie)"
+        required: false
+        default: false
+        type: boolean
+      cutoff:
+        description: "Poczatek okna cen (YYYY-MM-DD)"
+        required: false
+        default: "2012-01-01"
+      resume_from_run_id:
+        description: >
+          ID poprzedniego (przerwanego) uruchomienia tego workflow, z
+          ktorego artefaktu DB nalezy wznowic. Puste = zaczyna od zera.
+        required: false
+        default: ""
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe (pelny zestaw przed backfillem)
+        run: python -m pytest -q
+
+      - name: Pobranie artefaktu DB z przerwanego uruchomienia (wznowienie)
+        if: inputs.resume_from_run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: backfill-walk-forward-db
+          run-id: ${{ inputs.resume_from_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build universe_membership (Faza 5.2/5.3a, zamknieta -- przygotowanie 626 CIK dla backfillu)
+        run: python -m buffett_scanner.cli --db backfill_walk_forward.db build-universe-membership --cutoff "${{ inputs.cutoff }}"
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+
+      - name: Backfill walk-forward data (Faza 5.3b -- ceny + SEC fundamentals cache)
+        run: |
+          ARGS="--db backfill_walk_forward.db backfill-walk-forward-data --target ${{ inputs.target }} --cutoff ${{ inputs.cutoff }}"
+          if [ -n "${{ inputs.sample_ciks }}" ]; then
+            ARGS="$ARGS --sample ${{ inputs.sample_ciks }}"
+          fi
+          if [ "${{ inputs.refresh }}" = "true" ]; then
+            ARGS="$ARGS --refresh"
+          fi
+          python -m buffett_scanner.cli $ARGS
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+
+      - name: Upload backfillowanej bazy jako artefakt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backfill-walk-forward-db
+          path: backfill_walk_forward.db
+          retention-days: 14
