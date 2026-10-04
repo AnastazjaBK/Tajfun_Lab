@@ -1,0 +1,99 @@
+name: DIAG -- universe_membership overlapping intervals (one-off)
+
+# Diagnostyczny, jednorazowy workflow (NIE stala czesc pipeline'u) --
+# zbadanie realnego bledu z "Phase 5.3c Baseline Walk-Forward" run
+# 37203999911: sqlite3.IntegrityError UNIQUE constraint failed na
+# (run_id, decision_date, cik) w backtest_candidates. Jedyny sposob na
+# taki blad: get_universe_membership_as_of() zwrocilo TEN SAM CIK
+# dwa razy dla jednej decision_date -- co wymaga DWOCH nakladajacych sie
+# (nie tylko sasiadujacych) przedzialow tego samego CIK w
+# universe_membership. To bylby realny problem tozsamosci/PIT (sekcja 5),
+# wiec sprawdzamy PRZED jakakolwiek interpretacja wynikow walk-forward.
+#
+# Do usuniecia po zdiagnozowaniu -- nie jest czescia stalego pipeline'u.
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pobranie bazy z backfillu (Faza 5.3b, run 37188908038)
+        uses: actions/download-artifact@v4
+        with:
+          name: backfill-walk-forward-db
+          run-id: 37188908038
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Szukanie nakladajacych sie przedzialow tego samego CIK
+        run: |
+          python3 - <<'PYEOF'
+          import sqlite3
+
+          conn = sqlite3.connect("backfill_walk_forward.db")
+          conn.row_factory = sqlite3.Row
+
+          rows = conn.execute(
+              "SELECT cik, start_date, end_date FROM universe_membership "
+              "WHERE index_name = 'SP500' ORDER BY cik, start_date"
+          ).fetchall()
+
+          by_cik = {}
+          for r in rows:
+              by_cik.setdefault(r["cik"], []).append((r["start_date"], r["end_date"]))
+
+          print(f"Lacznie CIK w universe_membership: {len(by_cik)}, wierszy: {len(rows)}")
+
+          overlap_count = 0
+          multi_segment_ciks = {cik: ivs for cik, ivs in by_cik.items() if len(ivs) > 1}
+          print(f"CIK z >1 przedzialem: {len(multi_segment_ciks)}")
+
+          for cik, intervals in sorted(by_cik.items()):
+              if len(intervals) < 2:
+                  continue
+              for i in range(len(intervals) - 1):
+                  start_a, end_a = intervals[i]
+                  start_b, end_b = intervals[i + 1]
+                  # Overlap: end_a (jesli istnieje) > start_b, albo end_a brak (open-ended).
+                  if end_a is None or end_a > start_b:
+                      overlap_count += 1
+                      print(
+                          f"OVERLAP CIK={cik}: [{start_a}, {end_a}) x [{start_b}, {end_b}) "
+                          f"-- wszystkie przedzialy tego CIK: {intervals}"
+                      )
+
+          print(f"\nLacznie znalezionych nakladajacych sie par przedzialow: {overlap_count}")
+
+          # Niezalezna weryfikacja: dla kazdej miesiecznej decision_date 2012-2026,
+          # policz czy get_universe_membership_as_of-owy zapytanie zwraca duplikaty CIK.
+          import datetime as dt
+
+          def months_between(start, end):
+              d = dt.date.fromisoformat(start)
+              end_d = dt.date.fromisoformat(end)
+              while d <= end_d:
+                  yield d.isoformat()
+                  if d.month == 12:
+                      d = dt.date(d.year + 1, 1, 1)
+                  else:
+                      d = dt.date(d.year, d.month + 1, 1)
+
+          dup_dates = []
+          for date in months_between("2012-01-01", "2026-10-01"):
+              r = conn.execute(
+                  "SELECT cik FROM universe_membership WHERE index_name = 'SP500' "
+                  "AND start_date <= ? AND (end_date IS NULL OR end_date > ?)",
+                  (date, date),
+              ).fetchall()
+              ciks = [row["cik"] for row in r]
+              if len(ciks) != len(set(ciks)):
+                  dupes = sorted({c for c in ciks if ciks.count(c) > 1})
+                  dup_dates.append((date, dupes))
+
+          print(f"\nDecision dates (miesieczne) z duplikatem CIK w zapytaniu as-of: {len(dup_dates)}")
+          for date, dupes in dup_dates[:20]:
+              print(f"  {date}: duplikowane CIK = {dupes}")
+          PYEOF
