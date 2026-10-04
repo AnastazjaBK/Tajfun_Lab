@@ -1,0 +1,86 @@
+name: Phase 5.3c Baseline Walk-Forward (deterministic, no LLM)
+
+# Reczne uruchomienie z przegladarki. Pelny BASELINE walk-forward
+# (sekcja 13), Decyzja wlascicielki 2026-10-04: monthly decision dates
+# 2012+, PIT universe -> price history available at D -> decline
+# scanner -> prefilter -> deterministic partial scoring -> deterministic
+# hard gates -> candidate selection -> forward returns jako outcome
+# labels. ZERO LLM, ZERO zmiany scoring weights/thresholds/hard gates/
+# valuation assumptions/deterministic_score_pct methodology wzgledem
+# juz zatwierdzonej (Faza 5.3) -- to jest BASELINE przed kalibracja,
+# nie optymalizacja.
+#
+# Wymaga artefaktu z wczesniejszego "Phase 5.3b Backfill Walk-Forward
+# Data" -- podaj `backfill_run_id` (ID TEGO konkretnego, juz
+# zakonczonego backfillu, z ktorego pobrac baze z cenami/SEC cache).
+# Zero sieci poza samym pobraniem artefaktu -- cala analiza czyta
+# WYLACZNIE z lokalnego pliku DB, nie wymaga FMP_API_KEY/SEC_EDGAR_
+# USER_AGENT.
+
+on:
+  workflow_dispatch:
+    inputs:
+      backfill_run_id:
+        description: >
+          ID uruchomienia "Phase 5.3b Backfill Walk-Forward Data", z
+          ktorego pobrac baze (artefakt backfill-walk-forward-db).
+        required: true
+      window_start:
+        description: "Pierwsza decision_date (YYYY-MM-DD)"
+        required: false
+        default: "2012-01-01"
+      window_end:
+        description: "Ostatnia decision_date (YYYY-MM-DD, puste = dzis)"
+        required: false
+        default: ""
+      sample_ciks:
+        description: >
+          Lista CIK po przecinku (BEZ wiodacych zer) -- ogranicza zakres
+          do malego testu przed pelnym runem. Puste = pelne 615/626 CIK.
+        required: false
+        default: ""
+
+jobs:
+  baseline-walk-forward:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe (pelny zestaw przed runem)
+        run: python -m pytest -q
+
+      - name: Pobranie bazy z backfillu (Faza 5.3b)
+        uses: actions/download-artifact@v4
+        with:
+          name: backfill-walk-forward-db
+          run-id: ${{ inputs.backfill_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Kopia bazy przed analiza (backfill_walk_forward.db zostaje nietkniety jako source data)
+        run: cp backfill_walk_forward.db baseline_walk_forward_result.db
+
+      - name: Pelny baseline walk-forward (Faza 5.3c, zero LLM, zero sieci)
+        run: |
+          ARGS="--db baseline_walk_forward_result.db run-baseline-walk-forward --window-start ${{ inputs.window_start }}"
+          if [ -n "${{ inputs.window_end }}" ]; then
+            ARGS="$ARGS --window-end ${{ inputs.window_end }}"
+          fi
+          if [ -n "${{ inputs.sample_ciks }}" ]; then
+            ARGS="$ARGS --sample ${{ inputs.sample_ciks }}"
+          fi
+          python -m buffett_scanner.cli $ARGS
+
+      - name: Upload wyniku jako artefakt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-walk-forward-result-db
+          path: baseline_walk_forward_result.db
+          retention-days: 14
