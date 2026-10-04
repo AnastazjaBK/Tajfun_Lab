@@ -14,6 +14,8 @@
     python -m buffett_scanner.cli build-universe-membership [--cutoff YYYY-MM-DD]
     python -m buffett_scanner.cli backfill-walk-forward-data [--target prices|fundamentals|both]
         [--cutoff YYYY-MM-DD] [--refresh] [--sample CIK1,CIK2,...]
+    python -m buffett_scanner.cli classify-sector-profiles [--sample CIK1,CIK2,...]
+    python -m buffett_scanner.cli fetch-spy-benchmark-prices [--cutoff YYYY-MM-DD]
     python -m buffett_scanner.cli run-baseline-walk-forward [--window-start YYYY-MM-DD]
         [--window-end YYYY-MM-DD] [--sample CIK1,CIK2,...]
 
@@ -27,6 +29,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import statistics
 import sys
 from pathlib import Path
 
@@ -42,8 +45,10 @@ from buffett_scanner.backtest_harness import (
     evaluate_candidate_at_date,
     generate_rebalance_dates,
 )
+from buffett_scanner.benchmark import compute_benchmark_snapshot
 from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
 from buffett_scanner.db import (
+    get_cik_for_active_ticker,
     get_companies_sector_profiles,
     get_fundamentals_periods,
     get_price_series,
@@ -52,6 +57,7 @@ from buffett_scanner.db import (
     init_db,
     insert_analysis,
     insert_analysis_sources,
+    insert_backtest_benchmark,
     insert_backtest_candidate,
     insert_backtest_coverage,
     insert_fundamentals_rows,
@@ -59,6 +65,7 @@ from buffett_scanner.db import (
     insert_unresolved_ticker,
     insert_universe_membership_conflict,
     list_universe_membership_ciks,
+    update_company_sector_profile,
     upsert_company,
     upsert_derived_metric,
     upsert_scoring_model_version,
@@ -86,6 +93,7 @@ from buffett_scanner.providers.sp500_history import Sp500HistoryError, fetch_com
 from buffett_scanner.report import render_markdown_report
 from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
 from buffett_scanner.scoring import compute_score
+from buffett_scanner.sector_classification import classify_sic_to_sector_profile
 from buffett_scanner.sources import VerifiedSource, build_sec_source_packet
 from buffett_scanner.universe_cik_reconciliation import (
     MATCH_ALGORITHM_VERSION,
@@ -1050,6 +1058,114 @@ def cmd_backfill_walk_forward_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_classify_sector_profiles(args: argparse.Namespace) -> int:
+    """Faza 5.3c — klasyfikacja `sector_profile` z kodu SIC (Decyzja
+    właścicielki 2026-10-04): `sector_profile` nigdy nie był realnie
+    wyliczany (wszystkie 615 CIK domyślnie 'GENERAL'), co powodowało
+    błędne stosowanie `dcf_owner_earnings` do banków/ubezpieczycieli w
+    datasetcie. Czyta CIK z `universe_membership` (już zbudowane w tym
+    `--db`), pyta SEC Submissions API o `sic`/`sicDescription` per CIK,
+    mapuje czystą funkcją `classify_sic_to_sector_profile` (patrz
+    `sector_classification.py`), zapisuje WYŁĄCZNIE `sector_profile`
+    (`update_company_sector_profile` — nigdy nie nadpisuje name/sector/
+    industry). Idempotentne — bezpiecznie powtarzalne."""
+    config = load_config()
+    try:
+        user_agent = config.sources.sec_edgar.resolve_user_agent()
+    except RuntimeError as exc:
+        print(f"BŁĄD: {exc}", file=sys.stderr)
+        return 1
+
+    index_name = UNIVERSE_MEMBERSHIP_INDEX_NAME
+    conn = init_db(args.db)
+    all_ciks = list_universe_membership_ciks(conn, index_name)
+    if args.sample:
+        sample_set = {c.strip() for c in args.sample.split(",") if c.strip()}
+        all_ciks = [c for c in all_ciks if c in sample_set]
+    if not all_ciks:
+        print("BŁĄD: zero CIK w zakresie (sprawdź --sample / universe_membership).", file=sys.stderr)
+        return 1
+    print(f"Klasyfikacja SIC -> sector_profile dla {len(all_ciks)} CIK ...")
+
+    counts: dict[str, int] = {}
+    errors: list[str] = []
+    with SecEdgarClient(user_agent) as sec_client:
+        for i, cik in enumerate(all_ciks, 1):
+            try:
+                sic_info = sec_client.get_sic_classification(cik)
+            except SecEdgarError as exc:
+                print(f"  [{i}/{len(all_ciks)}] CIK={cik}: BŁĄD SEC ({exc}) — sector_profile niezmieniony.")
+                errors.append(cik)
+                continue
+            sector_profile = classify_sic_to_sector_profile(sic_info["sic"])
+            update_company_sector_profile(conn, cik=cik, sector_profile=sector_profile)
+            counts[sector_profile] = counts.get(sector_profile, 0) + 1
+            if i % 50 == 0 or i == len(all_ciks):
+                conn.commit()
+                print(f"  [{i}/{len(all_ciks)}] CIK={cik}: SIC={sic_info['sic']!r} -> {sector_profile}")
+    conn.commit()
+
+    print("\n== Podsumowanie ==")
+    print("  " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
+    if errors:
+        print(f"  BŁĘDY SEC (sector_profile niezmieniony, zachowany poprzedni stan): {len(errors)} CIK: {errors}")
+
+    return 0
+
+
+def cmd_fetch_spy_benchmark_prices(args: argparse.Namespace) -> int:
+    """Faza 5.3c — pobiera realną historię cen SPY, SECONDARY benchmark
+    (Decyzja właścicielki 2026-10-04: "ta sama konwencja forward price
+    return jak dla kandydatów, bez dywidend/reinwestycji"). SPY NIE jest
+    i nie staje się częścią `universe_membership`/PIT universe — to
+    wyłącznie instrument porównawczy. CIK rozwiązany przez SEC
+    `company_tickers.json` (nigdy nie hardkodowany z pamięci, zgodnie z
+    zasadą "tożsamość = CIK, nigdy ticker" z sekcji 5) i zapisany w
+    `ticker_history`, żeby `run-baseline-walk-forward` mógł go odczytać
+    offline (zero sieci, patrz `get_cik_for_active_ticker`)."""
+    config = load_config()
+    try:
+        api_key = config.data_provider.resolve_api_key()
+        user_agent = config.sources.sec_edgar.resolve_user_agent()
+    except RuntimeError as exc:
+        print(f"BŁĄD: {exc}", file=sys.stderr)
+        return 1
+
+    cutoff = args.cutoff
+    today = dt.date.today().isoformat()
+    conn = init_db(args.db)
+
+    print("== Rozwiązanie CIK dla SPY (SEC company_tickers.json) ==")
+    with SecEdgarClient(user_agent) as sec_client:
+        try:
+            sec_full = sec_client.get_company_tickers_full()
+        except SecEdgarError as exc:
+            print(f"BŁĄD pobierania SEC company_tickers.json: {exc}", file=sys.stderr)
+            return 1
+    if "SPY" not in sec_full:
+        print("BŁĄD: SEC company_tickers.json nie zawiera tickera SPY.", file=sys.stderr)
+        return 1
+    spy_cik = sec_full["SPY"]["cik"]
+    spy_title = sec_full["SPY"]["title"] or "SPY"
+    print(f"SPY -> CIK={spy_cik} ({spy_title})")
+
+    upsert_company(conn, cik=spy_cik, name=spy_title)
+    upsert_ticker_history(conn, cik=spy_cik, ticker="SPY", start_date=cutoff)
+    conn.commit()
+
+    print(f"\n== Pobieranie cen SPY ({cutoff}..{today}, FMP) ==")
+    with FMPClient(api_key) as fmp_client:
+        try:
+            rows = fmp_client.get_historical_prices("SPY", from_date=cutoff, to_date=today)
+        except FMPError as exc:
+            print(f"BŁĄD pobierania cen SPY z FMP: {exc}", file=sys.stderr)
+            return 1
+    n = insert_price_rows(conn, spy_cik, source="fmp", rows=rows)
+    conn.commit()
+    print(f"Zapisano/zaktualizowano {n} wierszy cen SPY (CIK={spy_cik}, {len(rows)} dni z FMP).")
+    return 0
+
+
 def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
     """Faza 5.3c — pełny BASELINE walk-forward (Decyzja właścicielki
     2026-10-04). Orkiestracja WYŁĄCZNIE już istniejących, przetestowanych
@@ -1098,7 +1214,28 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
             company_facts_by_cik[cik] = cf
     print(f"  {len(price_bars_by_cik)} CIK z cenami, {len(company_facts_by_cik)} CIK z SEC cache.")
 
+    # SECONDARY benchmark (Decyzja właścicielki 2026-10-04): SPY, jeśli
+    # `fetch-spy-benchmark-prices` już go zapisał w tym `--db`. Brak nie
+    # jest błędem tego runu -- `compute_benchmark_snapshot` daje wtedy
+    # po prostu spy_return_*_pct=None (jawnie, nigdy zgadywane), run
+    # kontynuuje z samym PRIMARY benchmarkiem.
+    spy_cik = get_cik_for_active_ticker(conn, "SPY")
+    spy_bars: list[PriceBar] | None = None
+    if spy_cik is not None:
+        spy_rows = get_price_series(conn, spy_cik)
+        spy_bars = [
+            PriceBar(
+                date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                close=r["close"], adj_close=r["adj_close"], volume=r["volume"],
+            )
+            for r in spy_rows
+        ]
+        print(f"  SPY (CIK={spy_cik}): {len(spy_bars)} barów cenowych -- SECONDARY benchmark aktywny.")
+    else:
+        print("  SPY nieznaleziony w ticker_history -- SECONDARY benchmark będzie None (uruchom fetch-spy-benchmark-prices).")
+
     coverage_snapshots: list[CoverageSnapshot] = []
+    benchmark_snapshots: list = []
     n_candidates = 0
     stage_totals = {"NO_DECLINE_SIGNAL": 0, "EXCLUDED_BY_PREFILTER": 0, "HARD_GATE_FAILED": 0, "CANDIDATE": 0}
 
@@ -1111,6 +1248,7 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
         sufficient_price = sufficient_fund = scanned = 0
         excl_price = excl_fund = 0
         stage_counts = {"NO_DECLINE_SIGNAL": 0, "EXCLUDED_BY_PREFILTER": 0, "HARD_GATE_FAILED": 0, "CANDIDATE": 0}
+        pit_ciks_with_sufficient_price: list[str] = []
 
         for cik in pit_ciks:
             full_bars = price_bars_by_cik.get(cik, [])
@@ -1121,6 +1259,7 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
             has_price, has_fund = classify_data_sufficiency(bars=bars, periods=periods)
             if has_price:
                 sufficient_price += 1
+                pit_ciks_with_sufficient_price.append(cik)
             else:
                 excl_price += 1
             if has_fund:
@@ -1158,6 +1297,15 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
         coverage_snapshots.append(snapshot)
         insert_backtest_coverage(conn, run_id=run_id, snapshot=snapshot)
 
+        benchmark_snapshot = compute_benchmark_snapshot(
+            decision_date=decision_date,
+            pit_universe_ciks_with_sufficient_price=pit_ciks_with_sufficient_price,
+            price_bars_by_cik=price_bars_by_cik,
+            spy_bars=spy_bars,
+        )
+        benchmark_snapshots.append(benchmark_snapshot)
+        insert_backtest_benchmark(conn, run_id=run_id, snapshot=benchmark_snapshot)
+
         if d_idx % 12 == 0 or d_idx == len(decision_dates):
             conn.commit()
             cov_pct = f"{snapshot.coverage_pct:.1f}%" if snapshot.coverage_pct is not None else "n/a"
@@ -1191,7 +1339,22 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
     for stage in ("NO_DECLINE_SIGNAL", "EXCLUDED_BY_PREFILTER", "HARD_GATE_FAILED", "CANDIDATE"):
         print(f"  {stage}: {stage_totals[stage]}")
 
-    print(f"\nrun_id={run_id} — wyniki w backtest_coverage/backtest_candidates ({args.db}).")
+    print("\n== Benchmark (PRIMARY=equal_weighted_pit_universe, SECONDARY=SPY) ==")
+    print("  Uwaga: TYLKO sanity-check (średnia prosta po decision_dates, ignorując None).")
+    print("  Pełna analiza (median/percentyle/hit rate vs kandydaci) — w raporcie końcowym, nie tutaj.")
+    for h in (1, 3, 6, 12):
+        ew_field = f"ew_pit_universe_return_{h}m_pct"
+        spy_field = f"spy_return_{h}m_pct"
+        ew_vals = [getattr(s, ew_field) for s in benchmark_snapshots if getattr(s, ew_field) is not None]
+        spy_vals = [getattr(s, spy_field) for s in benchmark_snapshots if getattr(s, spy_field) is not None]
+        ew_mean = f"{statistics.mean(ew_vals):.2f}%" if ew_vals else "n/a"
+        spy_mean = f"{statistics.mean(spy_vals):.2f}%" if spy_vals else "n/a"
+        print(
+            f"  {h}m: equal_weighted_pit_universe mean={ew_mean} (n_dates={len(ew_vals)}), "
+            f"SPY mean={spy_mean} (n_dates={len(spy_vals)})"
+        )
+
+    print(f"\nrun_id={run_id} — wyniki w backtest_coverage/backtest_candidates/backtest_benchmark ({args.db}).")
     print(f"Łącznie kandydatów (CANDIDATE): {n_candidates}")
 
     return 0
@@ -1273,6 +1436,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lista CIK po przecinku — ogranicza zakres (np. mały Proof Run na 10-20 CIK przed pełnym runem).",
     )
     p_backfill.set_defaults(func=cmd_backfill_walk_forward_data)
+
+    p_sector_profiles = sub.add_parser("classify-sector-profiles")
+    p_sector_profiles.add_argument(
+        "--sample", default=None,
+        help="Lista CIK po przecinku — ogranicza zakres (np. mały test przed pełnym runem).",
+    )
+    p_sector_profiles.set_defaults(func=cmd_classify_sector_profiles)
+
+    p_spy = sub.add_parser("fetch-spy-benchmark-prices")
+    p_spy.add_argument(
+        "--cutoff", default="2012-01-01",
+        help="Początek okna cen SPY (YYYY-MM-DD, domyślnie D14: 2012-01-01, zgodny z resztą backfillu).",
+    )
+    p_spy.set_defaults(func=cmd_fetch_spy_benchmark_prices)
 
     p_baseline = sub.add_parser("run-baseline-walk-forward")
     p_baseline.add_argument(

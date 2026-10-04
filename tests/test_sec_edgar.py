@@ -247,6 +247,31 @@ def test_get_former_names_raises_on_non_200(monkeypatch):
         client.get_former_names("0001156039")
 
 
+def test_get_sic_classification_parses_sic_and_description(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    fake_payload = {"sic": "6022", "sicDescription": "State commercial banks"}
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload=fake_payload)
+    )
+    result = client.get_sic_classification("0000019617")
+    assert result == {"sic": "6022", "sic_description": "State commercial banks"}
+
+
+def test_get_sic_classification_missing_field_returns_none_not_error(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    monkeypatch.setattr(
+        client._client, "get", lambda url: _FakeResponse(200, json_payload={"cik": 320193})
+    )
+    assert client.get_sic_classification("0000320193") == {"sic": None, "sic_description": None}
+
+
+def test_get_sic_classification_raises_on_non_200(monkeypatch):
+    client = SecEdgarClient("Tajfun Lab kontakt@example.com")
+    monkeypatch.setattr(client._client, "get", lambda url: _FakeResponse(404))
+    with pytest.raises(SecEdgarError):
+        client.get_sic_classification("0000320193")
+
+
 def test_get_company_tickers_is_cik_only_view_of_full_mapping(monkeypatch):
     """`get_company_tickers` musi pozostać zgodny wstecznie po
     refaktoryzacji na `get_company_tickers_full` — sam CIK, bez title."""

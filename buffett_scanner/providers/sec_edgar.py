@@ -254,6 +254,29 @@ class SecEdgarClient:
             result.append({"name": name, "from_date": entry.get("from"), "to_date": entry.get("to")})
         return result
 
+    def get_sic_classification(self, cik: str) -> dict:
+        """Kod SIC spółki z EDGAR Submissions API (pola `sic`/
+        `sicDescription`, ten sam payload co `get_filings`/
+        `get_former_names` — patrz tam po `filings.recent`/`formerNames`,
+        tu po polach top-level). Zwraca {sic, sic_description}; `sic`
+        jest `None`, jeśli pole jest nieobecne albo puste w SEC (nigdy
+        nie zgadujemy/nie fabrykujemy kodu). Faza 5.3c (Decyzja
+        właścicielki 2026-10-04) — jedyny cel: SIC-based `sector_profile`
+        (BANK/INSURER/REIT), patrz `sector_classification.py`."""
+        url = SUBMISSIONS_URL.format(cik10=_pad_cik(cik))
+        resp = self._get(url)
+        if resp.status_code != 200:
+            raise SecEdgarError(
+                f"SEC EDGAR zwrócił status {resp.status_code} dla submissions CIK={cik}."
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise SecEdgarError(f"SEC EDGAR zwrócił niepoprawny JSON dla CIK={cik}") from exc
+
+        sic = data.get("sic") or None
+        return {"sic": sic, "sic_description": data.get("sicDescription") or None}
+
     def get_company_tickers(self) -> dict[str, str]:
         """Aktualne (DZISIEJSZE, nie point-in-time) mapowanie ticker->CIK
         — podzbiór `get_company_tickers_full()` bez `title`, zachowany

@@ -365,6 +365,33 @@ CREATE TABLE IF NOT EXISTS backtest_candidates (
     created_at                       TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (run_id, decision_date, cik)
 );
+
+-- Faza 5.3c -- dualny benchmark (Decyzja wlascicielki 2026-10-04): jeden
+-- wiersz per (run_id, decision_date), oba benchmarki osobno, nigdy
+-- zmieszane w jedna kolumne. PRIMARY = equal_weighted_pit_universe
+-- (WSZYSTKIE spolki z PIT universe z wystarczajacymi cenami, nie tylko
+-- kandydaci), SECONDARY = SPY, ta sama konwencja forward price return
+-- (bez dywidend) co kandydaci. ew_*_n_* = liczba spolek z nie-None
+-- forward return na danym horyzoncie (moze sie roznic miedzy
+-- horyzontami -- dalszy horyzont ma mniej dostepnych przyszlych cen).
+CREATE TABLE IF NOT EXISTS backtest_benchmark (
+    run_id                        TEXT NOT NULL,
+    decision_date                 TEXT NOT NULL,
+    ew_pit_universe_return_1m_pct REAL,
+    ew_pit_universe_return_3m_pct REAL,
+    ew_pit_universe_return_6m_pct REAL,
+    ew_pit_universe_return_12m_pct REAL,
+    ew_pit_universe_n_1m          INTEGER NOT NULL,
+    ew_pit_universe_n_3m          INTEGER NOT NULL,
+    ew_pit_universe_n_6m          INTEGER NOT NULL,
+    ew_pit_universe_n_12m         INTEGER NOT NULL,
+    spy_return_1m_pct             REAL,
+    spy_return_3m_pct             REAL,
+    spy_return_6m_pct             REAL,
+    spy_return_12m_pct            REAL,
+    created_at                    TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (run_id, decision_date)
+);
 """
 
 
@@ -429,6 +456,30 @@ def upsert_ticker_history(
         """,
         (cik, ticker, start_date),
     )
+
+
+def get_cik_for_active_ticker(conn: sqlite3.Connection, ticker: str) -> str | None:
+    """CIK aktualnie (end_date IS NULL) używający danego tickera w
+    `ticker_history`. `None`, jeśli brak takiego wiersza — nigdy nie
+    zgaduje CIK dla tickera, którego nie zapisał żaden poprzedni krok
+    (Faza 5.3c: `run-baseline-walk-forward` używa tego do odczytania —
+    zero sieci — CIK SPY zapisanego wcześniej przez `fetch-spy-
+    benchmark-prices`). Jeśli >1 wiersz aktywny dla tego samego tickera
+    (nie powinno się zdarzyć — `upsert_ticker_history` zamyka poprzedni
+    aktywny wpis TEGO CIK, ale nie chroni przed dwoma różnymi CIK
+    współdzielącymi ten sam ticker), podnosi błąd zamiast cichego
+    wyboru jednego z nich."""
+    rows = conn.execute(
+        "SELECT cik FROM ticker_history WHERE ticker = ? AND end_date IS NULL", (ticker,)
+    ).fetchall()
+    if not rows:
+        return None
+    if len(rows) > 1:
+        raise ValueError(
+            f"Wiele aktywnych CIK dla tickera {ticker}: {[r['cik'] for r in rows]} — "
+            "niejednoznaczne, nie wybieram jednego."
+        )
+    return rows[0]["cik"]
 
 
 def insert_price_rows(conn: sqlite3.Connection, cik: str, source: str, rows: list[dict]) -> int:
@@ -889,6 +940,52 @@ def get_backtest_candidates(conn: sqlite3.Connection, run_id: str) -> list[sqlit
     return conn.execute(
         "SELECT * FROM backtest_candidates WHERE run_id = ? ORDER BY decision_date, cik", (run_id,)
     ).fetchall()
+
+
+def insert_backtest_benchmark(conn: sqlite3.Connection, *, run_id: str, snapshot) -> None:
+    """`snapshot`: `benchmark.BenchmarkSnapshot` (Faza 5.3c). Jeden
+    wiersz per (run_id, decision_date), oba benchmarki (equal_weighted_
+    pit_universe + SPY) w tym samym wierszu, ale w ODDZIELNYCH kolumnach
+    — nigdy nie mieszane w jedną wartość."""
+    conn.execute(
+        """
+        INSERT INTO backtest_benchmark (
+            run_id, decision_date,
+            ew_pit_universe_return_1m_pct, ew_pit_universe_return_3m_pct,
+            ew_pit_universe_return_6m_pct, ew_pit_universe_return_12m_pct,
+            ew_pit_universe_n_1m, ew_pit_universe_n_3m, ew_pit_universe_n_6m, ew_pit_universe_n_12m,
+            spy_return_1m_pct, spy_return_3m_pct, spy_return_6m_pct, spy_return_12m_pct
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id, snapshot.decision_date,
+            snapshot.ew_pit_universe_return_1m_pct, snapshot.ew_pit_universe_return_3m_pct,
+            snapshot.ew_pit_universe_return_6m_pct, snapshot.ew_pit_universe_return_12m_pct,
+            snapshot.ew_pit_universe_n_1m, snapshot.ew_pit_universe_n_3m,
+            snapshot.ew_pit_universe_n_6m, snapshot.ew_pit_universe_n_12m,
+            snapshot.spy_return_1m_pct, snapshot.spy_return_3m_pct,
+            snapshot.spy_return_6m_pct, snapshot.spy_return_12m_pct,
+        ),
+    )
+
+
+def get_backtest_benchmark(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM backtest_benchmark WHERE run_id = ? ORDER BY decision_date", (run_id,)
+    ).fetchall()
+
+
+def update_company_sector_profile(conn: sqlite3.Connection, *, cik: str, sector_profile: str) -> None:
+    """Aktualizuje WYŁĄCZNIE `sector_profile` istniejącej spółki (Faza
+    5.3c, klasyfikacja SIC). Celowo nie używa `upsert_company` — to by
+    wymagało przekazania `name`/`sector`/`industry`/`sub_industry`
+    (inaczej `ON CONFLICT DO UPDATE` ustawiłoby je na NULL, nadpisując
+    już zapisane dane niezwiązane z tą zmianą). Brak wiersza dla `cik`
+    -> brak efektu (nigdy nie tworzy spółki z samym sector_profile)."""
+    conn.execute(
+        "UPDATE companies SET sector_profile = ? WHERE cik = ?",
+        (sector_profile, cik),
+    )
 
 
 def get_companies_sector_profiles(conn: sqlite3.Connection) -> dict[str, str]:

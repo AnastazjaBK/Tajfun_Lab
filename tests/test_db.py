@@ -89,6 +89,36 @@ def test_ticker_recycling_is_disambiguated_by_cik(conn):
     assert history[0]["end_date"] is None
 
 
+def test_get_cik_for_active_ticker_returns_resolved_cik(conn):
+    from buffett_scanner.db import get_cik_for_active_ticker
+
+    upsert_company(conn, cik="0000884394", name="SPDR S&P 500 ETF Trust")
+    upsert_ticker_history(conn, cik="0000884394", ticker="SPY", start_date="2012-01-01")
+    conn.commit()
+    assert get_cik_for_active_ticker(conn, "SPY") == "0000884394"
+
+
+def test_get_cik_for_active_ticker_none_when_unresolved(conn):
+    from buffett_scanner.db import get_cik_for_active_ticker
+
+    assert get_cik_for_active_ticker(conn, "SPY") is None
+
+
+def test_get_cik_for_active_ticker_raises_on_ambiguous_recycled_ticker(conn):
+    """Edge case z `test_ticker_recycling_is_disambiguated_by_cik`: dwa
+    różne CIK mogą mieć jednocześnie aktywny (end_date IS NULL) ten sam
+    ticker — funkcja NIE wybiera cicho jednego z nich."""
+    from buffett_scanner.db import get_cik_for_active_ticker
+
+    upsert_company(conn, cik="0000111111", name="SunTrust Banks (przykład)")
+    upsert_ticker_history(conn, cik="0000111111", ticker="STI", start_date="2010-01-01")
+    upsert_company(conn, cik="0000222222", name="Inna spółka (przykład)")
+    upsert_ticker_history(conn, cik="0000222222", ticker="STI", start_date="2020-01-01")
+    conn.commit()
+    with pytest.raises(ValueError):
+        get_cik_for_active_ticker(conn, "STI")
+
+
 def test_insert_and_read_price_series_ordered_by_date(conn):
     upsert_company(conn, cik="0000320193", name="Apple Inc.")
     rows = [
@@ -651,3 +681,59 @@ def test_get_companies_sector_profiles_defaults_to_general(conn):
     upsert_company(conn, cik="0000320193", name="Apple Inc.")
     conn.commit()
     assert get_companies_sector_profiles(conn) == {"0000320193": "GENERAL"}
+
+
+def test_update_company_sector_profile_changes_only_that_column(conn):
+    from buffett_scanner.db import update_company_sector_profile
+
+    upsert_company(conn, cik="0000019617", name="JPMorgan Chase & Co.", sector="Financials")
+    conn.commit()
+    update_company_sector_profile(conn, cik="0000019617", sector_profile="BANK")
+    conn.commit()
+    row = conn.execute("SELECT name, sector, sector_profile FROM companies WHERE cik = ?", ("0000019617",)).fetchone()
+    assert row["name"] == "JPMorgan Chase & Co."
+    assert row["sector"] == "Financials"
+    assert row["sector_profile"] == "BANK"
+
+
+def test_update_company_sector_profile_is_noop_for_unknown_cik(conn):
+    from buffett_scanner.db import update_company_sector_profile
+
+    update_company_sector_profile(conn, cik="0000000001", sector_profile="BANK")
+    conn.commit()
+    assert get_companies_sector_profiles(conn) == {}
+
+
+def _benchmark_snapshot(decision_date="2020-01-01"):
+    from buffett_scanner.benchmark import BenchmarkSnapshot
+
+    return BenchmarkSnapshot(
+        decision_date=decision_date,
+        ew_pit_universe_return_1m_pct=1.5, ew_pit_universe_return_3m_pct=3.0,
+        ew_pit_universe_return_6m_pct=None, ew_pit_universe_return_12m_pct=12.0,
+        ew_pit_universe_n_1m=480, ew_pit_universe_n_3m=470, ew_pit_universe_n_6m=0, ew_pit_universe_n_12m=400,
+        spy_return_1m_pct=1.0, spy_return_3m_pct=2.5, spy_return_6m_pct=5.0, spy_return_12m_pct=10.0,
+    )
+
+
+def test_insert_and_get_backtest_benchmark(conn):
+    from buffett_scanner.db import get_backtest_benchmark, insert_backtest_benchmark
+
+    insert_backtest_benchmark(conn, run_id="run-1", snapshot=_benchmark_snapshot())
+    conn.commit()
+    rows = get_backtest_benchmark(conn, "run-1")
+    assert len(rows) == 1
+    assert rows[0]["ew_pit_universe_return_1m_pct"] == 1.5
+    assert rows[0]["ew_pit_universe_return_6m_pct"] is None
+    assert rows[0]["ew_pit_universe_n_6m"] == 0
+    assert rows[0]["spy_return_12m_pct"] == 10.0
+
+
+def test_backtest_benchmark_isolated_by_run_id(conn):
+    from buffett_scanner.db import get_backtest_benchmark, insert_backtest_benchmark
+
+    insert_backtest_benchmark(conn, run_id="run-1", snapshot=_benchmark_snapshot())
+    insert_backtest_benchmark(conn, run_id="run-2", snapshot=_benchmark_snapshot())
+    conn.commit()
+    assert len(get_backtest_benchmark(conn, "run-1")) == 1
+    assert len(get_backtest_benchmark(conn, "run-2")) == 1
