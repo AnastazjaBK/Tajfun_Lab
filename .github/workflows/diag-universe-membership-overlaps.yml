@@ -96,4 +96,25 @@ jobs:
           print(f"\nDecision dates (miesieczne) z duplikatem CIK w zapytaniu as-of: {len(dup_dates)}")
           for date, dupes in dup_dates[:20]:
               print(f"  {date}: duplikowane CIK = {dupes}")
+
+          print("\n== Szczegoly (nazwa + ticker_history + validation_status) dla CIK z overlapem ==")
+          overlap_ciks = sorted({cik for cik, ivs in by_cik.items() if len(ivs) > 1})
+          for cik in overlap_ciks:
+              company = conn.execute("SELECT name FROM companies WHERE cik = ?", (cik,)).fetchone()
+              name = company["name"] if company else "(brak w companies)"
+              print(f"\nCIK={cik} name={name!r}")
+              th_rows = conn.execute(
+                  "SELECT ticker, start_date, end_date FROM ticker_history WHERE cik = ? ORDER BY start_date",
+                  (cik,),
+              ).fetchall()
+              print(f"  ticker_history: {[(r['ticker'], r['start_date'], r['end_date']) for r in th_rows]}")
+              um_rows = conn.execute(
+                  "SELECT start_date, end_date, source, cik_resolution_method, cik_resolution_note, "
+                  "entry_validation_status, entry_validation_day_diff, exit_validation_status, "
+                  "exit_validation_day_diff FROM universe_membership WHERE cik = ? AND index_name = 'SP500' "
+                  "ORDER BY start_date",
+                  (cik,),
+              ).fetchall()
+              for r in um_rows:
+                  print(f"  universe_membership: {dict(r)}")
           PYEOF
