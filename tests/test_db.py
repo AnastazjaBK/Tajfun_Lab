@@ -30,6 +30,71 @@ def conn(tmp_path):
     return init_db(tmp_path / "test.db")
 
 
+def test_init_db_adds_overlap_merge_note_column_to_pre_existing_table(tmp_path):
+    """Realny błąd znaleziony 2026-10-04: `CREATE TABLE IF NOT EXISTS`
+    nie dodaje nowych kolumn do tabeli, która już istnieje w pliku DB ze
+    starszą wersją schematu (np. reużywany artefakt backfillu). Symuluje
+    "stary" plik DB (tabela `universe_membership` BEZ `overlap_merge_
+    note`, dokładnie jak przed dodaniem tej kolumny), potem wywołuje
+    `init_db` NOWYM kodem -- kolumna musi się dodać, a upsert z tym
+    polem musi zadziałać, bez odtwarzania całej bazy od zera."""
+    import sqlite3
+
+    db_path = tmp_path / "old_schema.db"
+    raw = sqlite3.connect(db_path)
+    raw.execute(
+        """
+        CREATE TABLE companies (cik TEXT PRIMARY KEY, name TEXT NOT NULL)
+        """
+    )
+    raw.execute(
+        """
+        CREATE TABLE universe_membership (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cik TEXT NOT NULL,
+            index_name TEXT NOT NULL,
+            start_date TEXT NOT NULL,
+            end_date TEXT,
+            source TEXT NOT NULL DEFAULT 'fja05680',
+            source_snapshot_ref TEXT NOT NULL,
+            cik_resolution_method TEXT NOT NULL,
+            cik_resolution_note TEXT,
+            entry_validation_status TEXT NOT NULL DEFAULT 'NOT_VALIDATED',
+            entry_validation_day_diff INTEGER,
+            exit_validation_status TEXT,
+            exit_validation_day_diff INTEGER,
+            validation_tolerance_days INTEGER,
+            validation_date_field TEXT,
+            validation_rule_version TEXT,
+            validation_run_id TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (cik, index_name, start_date)
+        )
+        """
+    )
+    raw.execute("INSERT INTO companies (cik, name) VALUES ('0001', 'Old Co')")
+    raw.commit()
+    raw.close()
+
+    columns_before = {
+        row[1] for row in sqlite3.connect(db_path).execute("PRAGMA table_info(universe_membership)")
+    }
+    assert "overlap_merge_note" not in columns_before
+
+    conn = init_db(db_path)
+    columns_after = {row["name"] for row in conn.execute("PRAGMA table_info(universe_membership)")}
+    assert "overlap_merge_note" in columns_after
+
+    upsert_universe_membership(
+        conn, cik="0001", index_name="SP500", start_date="2012-01-01", end_date=None,
+        source="fja05680", source_snapshot_ref="ref1", cik_resolution_method="DIRECT",
+        overlap_merge_note="test",
+    )
+    conn.commit()
+    row = conn.execute("SELECT overlap_merge_note FROM universe_membership WHERE cik = '0001'").fetchone()
+    assert row["overlap_merge_note"] == "test"
+
+
 def test_init_db_creates_expected_tables(conn):
     tables = {
         row["name"]

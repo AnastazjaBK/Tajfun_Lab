@@ -410,10 +410,38 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+# `CREATE TABLE IF NOT EXISTS` w SCHEMA tworzy tabelę tylko, gdy jeszcze
+# nie istnieje -- NIE dodaje nowych kolumn do tabeli, która już istnieje
+# w pliku DB ze starszą wersją schematu (realny błąd znaleziony
+# 2026-10-04: workflow ponownie używający już istniejącego artefaktu
+# backfillu padł na `sqlite3.OperationalError: table universe_membership
+# has no column named overlap_merge_note`, bo ta kolumna została dodana
+# do schematu PO tym, jak dany plik DB już miał tabelę `universe_
+# membership`). SQLite (tu: 3.45) NIE wspiera `ALTER TABLE ... ADD
+# COLUMN IF NOT EXISTS` (zweryfikowane empirycznie -- `sqlite3.
+# OperationalError: near "EXISTS"`, mimo że ta sama wersja SQLite
+# wspiera `CREATE TABLE IF NOT EXISTS`), więc idempotencja jest
+# sprawdzana ręcznie przez `PRAGMA table_info` przed `ADD COLUMN`.
+# Projekt nie ma (i na tym etapie nie potrzebuje) formalnego systemu
+# migracji — to minimalny, wystarczający mechanizm na SQLite (Decyzja
+# D5: Postgres/Supabase od V1, gdzie migracje będą formalne).
+_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("universe_membership", "overlap_merge_note", "TEXT"),
+)
+
+
+def _apply_column_migrations(conn: sqlite3.Connection) -> None:
+    for table, column, coltype in _COLUMN_MIGRATIONS:
+        existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
+
+
 def init_db(db_path: str | Path) -> sqlite3.Connection:
     """Tworzy schemat (idempotentnie) i zwraca otwarte połączenie."""
     conn = connect(db_path)
     conn.executescript(SCHEMA)
+    _apply_column_migrations(conn)
     conn.commit()
     return conn
 
