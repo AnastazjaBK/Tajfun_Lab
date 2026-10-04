@@ -313,6 +313,58 @@ CREATE TABLE IF NOT EXISTS backfill_status (
     updated_at    TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (cik, task_type)
 );
+
+-- Faza 5.3c (pelny baseline walk-forward, Decyzja wlascicielki
+-- 2026-10-04) -- jeden wiersz per decision_date, MIERZONY NIEZALEZNIE
+-- od tego, czy ktokolwiek zostal kandydatem. "Brak danych... moze
+-- powodowac selection/coverage bias, poniewaz missingness nie musi byc
+-- losowe" -- stad explicit coverage, nigdy tylko liczba kandydatow.
+CREATE TABLE IF NOT EXISTS backtest_coverage (
+    run_id                              TEXT NOT NULL,
+    decision_date                       TEXT NOT NULL,
+    pit_universe_count                  INTEGER NOT NULL,
+    sufficient_price_count              INTEGER NOT NULL,
+    sufficient_fundamentals_count       INTEGER NOT NULL,
+    scanned_count                       INTEGER NOT NULL,
+    excluded_missing_price_count        INTEGER NOT NULL,
+    excluded_missing_fundamentals_count INTEGER NOT NULL,
+    stage_no_decline_signal             INTEGER NOT NULL,
+    stage_excluded_by_prefilter         INTEGER NOT NULL,
+    stage_hard_gate_failed              INTEGER NOT NULL,
+    stage_candidate                     INTEGER NOT NULL,
+    created_at                          TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (run_id, decision_date)
+);
+
+-- Faza 5.3c -- jeden wiersz per (run_id, decision_date, cik) ktory
+-- osiagnal stage=CANDIDATE. full_score NIE jest kolumna -- zawsze
+-- None w tym trybie (brak historycznego LLM), nie fabrykujemy kolumny
+-- sugerujacej jego istnienie.
+CREATE TABLE IF NOT EXISTS backtest_candidates (
+    run_id                      TEXT NOT NULL,
+    decision_date                TEXT NOT NULL,
+    cik                          TEXT NOT NULL,
+    ticker_as_of_date            TEXT,
+    decision_price               REAL NOT NULL,
+    pit_fundamentals_period_end  TEXT,
+    pit_fundamentals_filed_date  TEXT,
+    safety_score                 REAL NOT NULL,
+    valuation_score               REAL,
+    dividend_score                REAL NOT NULL,
+    deterministic_partial_score   REAL NOT NULL,
+    deterministic_score_pct       REAL,
+    available_components          TEXT NOT NULL,
+    missing_components            TEXT NOT NULL,
+    margin_of_safety_base_pct     REAL,
+    config_version                 TEXT NOT NULL,
+    scoring_version                 TEXT NOT NULL,
+    return_1m_pct                   REAL,
+    return_3m_pct                   REAL,
+    return_6m_pct                   REAL,
+    return_12m_pct                  REAL,
+    created_at                       TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (run_id, decision_date, cik)
+);
 """
 
 
@@ -767,3 +819,81 @@ def list_universe_membership_ciks(conn: sqlite3.Connection, index_name: str) -> 
         (index_name,),
     ).fetchall()
     return [r["cik"] for r in rows]
+
+
+def insert_backtest_coverage(conn: sqlite3.Connection, *, run_id: str, snapshot) -> None:
+    """`snapshot`: `walk_forward_coverage.CoverageSnapshot`. Jeden
+    wiersz per (run_id, decision_date) — PRIMARY KEY zapobiega cichemu
+    duplikowaniu, jeśli ten sam run zapisze tę samą datę dwa razy
+    (błąd wołającego, nie coś, co powinno się zdarzyć w normalnym
+    przebiegu)."""
+    conn.execute(
+        """
+        INSERT INTO backtest_coverage (
+            run_id, decision_date, pit_universe_count, sufficient_price_count,
+            sufficient_fundamentals_count, scanned_count, excluded_missing_price_count,
+            excluded_missing_fundamentals_count, stage_no_decline_signal,
+            stage_excluded_by_prefilter, stage_hard_gate_failed, stage_candidate
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id, snapshot.decision_date, snapshot.pit_universe_count,
+            snapshot.sufficient_price_count, snapshot.sufficient_fundamentals_count,
+            snapshot.scanned_count, snapshot.excluded_missing_price_count,
+            snapshot.excluded_missing_fundamentals_count, snapshot.stage_no_decline_signal,
+            snapshot.stage_excluded_by_prefilter, snapshot.stage_hard_gate_failed,
+            snapshot.stage_candidate,
+        ),
+    )
+
+
+def insert_backtest_candidate(conn: sqlite3.Connection, *, run_id: str, candidate) -> None:
+    """`candidate`: `backtest_harness.BacktestCandidate` (już z
+    `forward_returns` dołączonymi przez `attach_forward_returns`, może
+    być `None` jeśli wywołujący jeszcze tego nie zrobił — wtedy
+    return_*_pct zapisane jako NULL, nigdy zgadywane)."""
+    fr = candidate.forward_returns
+    conn.execute(
+        """
+        INSERT INTO backtest_candidates (
+            run_id, decision_date, cik, ticker_as_of_date, decision_price,
+            pit_fundamentals_period_end, pit_fundamentals_filed_date,
+            safety_score, valuation_score, dividend_score, deterministic_partial_score,
+            deterministic_score_pct, available_components, missing_components,
+            margin_of_safety_base_pct, config_version, scoring_version,
+            return_1m_pct, return_3m_pct, return_6m_pct, return_12m_pct
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id, candidate.decision_date, candidate.cik, candidate.ticker_as_of_date,
+            candidate.decision_price, candidate.pit_fundamentals_period_end,
+            candidate.pit_fundamentals_filed_date, candidate.safety_score,
+            candidate.valuation_score, candidate.dividend_score,
+            candidate.deterministic_partial_score, candidate.deterministic_score_pct,
+            ",".join(candidate.available_components), ",".join(candidate.missing_components),
+            candidate.margin_of_safety_base_pct, candidate.config_version,
+            candidate.scoring_version,
+            fr.return_1m_pct if fr else None, fr.return_3m_pct if fr else None,
+            fr.return_6m_pct if fr else None, fr.return_12m_pct if fr else None,
+        ),
+    )
+
+
+def get_backtest_coverage(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM backtest_coverage WHERE run_id = ? ORDER BY decision_date", (run_id,)
+    ).fetchall()
+
+
+def get_backtest_candidates(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM backtest_candidates WHERE run_id = ? ORDER BY decision_date, cik", (run_id,)
+    ).fetchall()
+
+
+def get_companies_sector_profiles(conn: sqlite3.Connection) -> dict[str, str]:
+    """Jedno zapytanie zamiast N — per-CIK `sector_profile` już w
+    `companies` (domyślnie `'GENERAL'` dla każdego CIK, bo klasyfikacja
+    sektorowa nie była jeszcze wykonana — patrz raport Fazy 5.3c)."""
+    rows = conn.execute("SELECT cik, sector_profile FROM companies").fetchall()
+    return {r["cik"]: r["sector_profile"] for r in rows}

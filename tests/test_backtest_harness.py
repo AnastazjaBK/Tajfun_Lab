@@ -10,6 +10,7 @@ from buffett_scanner.backtest_harness import (
     BacktestFunnelResult,
     add_months,
     attach_forward_returns,
+    classify_data_sufficiency,
     compute_deterministic_score,
     compute_forward_returns,
     evaluate_candidate_at_date,
@@ -425,3 +426,28 @@ def test_attach_forward_returns_only_touches_forward_returns_field():
     assert updated.safety_score == candidate.safety_score
     assert updated.hard_gate_passed == candidate.hard_gate_passed
     assert updated.decision_price == candidate.decision_price
+
+
+# ---------------------------------------------------------------------------
+# classify_data_sufficiency (Faza 5.3c, pełny baseline walk-forward,
+# coverage reporting per-przyczyna — Decyzja właścicielki 2026-10-04)
+# ---------------------------------------------------------------------------
+
+def test_classify_data_sufficiency_both_present():
+    bars = [_bar("2020-01-01", 100.0)]
+    periods = [_period("FY2019", "2019-12-31", "2020-02-01")]
+    assert classify_data_sufficiency(bars=bars, periods=periods) == (True, True)
+
+
+def test_classify_data_sufficiency_missing_price_only():
+    periods = [_period("FY2019", "2019-12-31", "2020-02-01")]
+    assert classify_data_sufficiency(bars=[], periods=periods) == (False, True)
+
+
+def test_classify_data_sufficiency_missing_fundamentals_only():
+    bars = [_bar("2020-01-01", 100.0)]
+    assert classify_data_sufficiency(bars=bars, periods=[]) == (True, False)
+
+
+def test_classify_data_sufficiency_missing_both():
+    assert classify_data_sufficiency(bars=[], periods=[]) == (False, False)

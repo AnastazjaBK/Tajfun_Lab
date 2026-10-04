@@ -573,3 +573,81 @@ def test_list_backfill_statuses_filters_by_task_type(conn):
     assert len(prices_only) == 1
     assert prices_only[0]["cik"] == "0000320193"
     assert len(list_backfill_statuses(conn)) == 2
+
+
+# ---------------------------------------------------------------------------
+# backtest_coverage / backtest_candidates (Faza 5.3c, pełny baseline
+# walk-forward) — persystencja wyniku do artefaktu DB.
+# ---------------------------------------------------------------------------
+
+from buffett_scanner.backtest_harness import BacktestCandidate, ForwardReturns
+from buffett_scanner.db import get_backtest_candidates, get_backtest_coverage, get_companies_sector_profiles, insert_backtest_candidate, insert_backtest_coverage
+from buffett_scanner.walk_forward_coverage import CoverageSnapshot
+
+
+def _coverage_snapshot(decision_date="2020-01-01"):
+    return CoverageSnapshot(
+        decision_date=decision_date, pit_universe_count=500, sufficient_price_count=450,
+        sufficient_fundamentals_count=400, scanned_count=380, excluded_missing_price_count=50,
+        excluded_missing_fundamentals_count=100, stage_no_decline_signal=350,
+        stage_excluded_by_prefilter=10, stage_hard_gate_failed=15, stage_candidate=5,
+    )
+
+
+def _backtest_candidate(forward_returns=None):
+    return BacktestCandidate(
+        run_id="run-1", decision_date="2020-01-01", cik="0000320193", ticker_as_of_date="0000320193",
+        decision_price=100.0, decline_flags={"month_decline": True},
+        pit_fundamentals_period_end="2019-12-31", pit_fundamentals_filed_date="2020-02-01",
+        financial_quality_breakdown={"fcf_positive": True}, safety_score=10.0, valuation_score=None,
+        dividend_score=5.0, full_score=None, deterministic_partial_score=15.0,
+        deterministic_score_pct=60.0, available_components=("safety", "dividend"),
+        missing_components=("business_quality", "fear", "valuation"), hard_gate_passed=True,
+        hard_gate_triggered=(), margin_of_safety_base_pct=None, config_version="config.yaml:abc",
+        scoring_version="0.1.0-draft", universe_provenance="test", forward_returns=forward_returns,
+    )
+
+
+def test_insert_and_get_backtest_coverage(conn):
+    insert_backtest_coverage(conn, run_id="run-1", snapshot=_coverage_snapshot())
+    conn.commit()
+    rows = get_backtest_coverage(conn, "run-1")
+    assert len(rows) == 1
+    assert rows[0]["pit_universe_count"] == 500
+    assert rows[0]["scanned_count"] == 380
+
+
+def test_backtest_coverage_isolated_by_run_id(conn):
+    insert_backtest_coverage(conn, run_id="run-1", snapshot=_coverage_snapshot())
+    insert_backtest_coverage(conn, run_id="run-2", snapshot=_coverage_snapshot())
+    conn.commit()
+    assert len(get_backtest_coverage(conn, "run-1")) == 1
+    assert len(get_backtest_coverage(conn, "run-2")) == 1
+
+
+def test_insert_and_get_backtest_candidate_without_forward_returns(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    insert_backtest_candidate(conn, run_id="run-1", candidate=_backtest_candidate())
+    conn.commit()
+    rows = get_backtest_candidates(conn, "run-1")
+    assert len(rows) == 1
+    assert rows[0]["cik"] == "0000320193"
+    assert rows[0]["return_1m_pct"] is None
+    assert rows[0]["available_components"] == "safety,dividend"
+
+
+def test_insert_backtest_candidate_with_forward_returns(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    fr = ForwardReturns(return_1m_pct=5.0, return_3m_pct=10.0, return_6m_pct=None, return_12m_pct=20.0)
+    insert_backtest_candidate(conn, run_id="run-1", candidate=_backtest_candidate(forward_returns=fr))
+    conn.commit()
+    row = get_backtest_candidates(conn, "run-1")[0]
+    assert row["return_1m_pct"] == 5.0
+    assert row["return_6m_pct"] is None
+    assert row["return_12m_pct"] == 20.0
+
+
+def test_get_companies_sector_profiles_defaults_to_general(conn):
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    conn.commit()
+    assert get_companies_sector_profiles(conn) == {"0000320193": "GENERAL"}

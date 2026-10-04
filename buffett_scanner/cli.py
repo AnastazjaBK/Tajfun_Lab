@@ -14,6 +14,8 @@
     python -m buffett_scanner.cli build-universe-membership [--cutoff YYYY-MM-DD]
     python -m buffett_scanner.cli backfill-walk-forward-data [--target prices|fundamentals|both]
         [--cutoff YYYY-MM-DD] [--refresh] [--sample CIK1,CIK2,...]
+    python -m buffett_scanner.cli run-baseline-walk-forward [--window-start YYYY-MM-DD]
+        [--window-end YYYY-MM-DD] [--sample CIK1,CIK2,...]
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -34,14 +36,24 @@ from buffett_scanner.backfill import (
     backfill_prices_for_cik,
     derive_price_fetch_ticker_universe,
 )
-from buffett_scanner.config import load_config
+from buffett_scanner.backtest_harness import (
+    attach_forward_returns,
+    classify_data_sufficiency,
+    evaluate_candidate_at_date,
+    generate_rebalance_dates,
+)
+from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
 from buffett_scanner.db import (
+    get_companies_sector_profiles,
     get_fundamentals_periods,
     get_price_series,
+    get_sec_company_facts_cache,
     get_universe_membership_as_of,
     init_db,
     insert_analysis,
     insert_analysis_sources,
+    insert_backtest_candidate,
+    insert_backtest_coverage,
     insert_fundamentals_rows,
     insert_price_rows,
     insert_unresolved_ticker,
@@ -63,6 +75,7 @@ from buffett_scanner.fmp_sp500_events import (
     resolve_fmp_tickers,
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
+from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_as_of
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
 from buffett_scanner.price_history_plan import build_price_fetch_plan
 from buffett_scanner.prompt import build_analysis_prompt
@@ -98,6 +111,7 @@ from buffett_scanner.universe_membership_build import (
     merge_adjacent_same_cik_intervals,
 )
 from buffett_scanner.universe_ticker_rename_allowlist import apply_curated_allowlist
+from buffett_scanner.walk_forward_coverage import CoverageSnapshot, aggregate_coverage
 
 DEFAULT_DB_PATH = "buffett_scanner.db"
 PREFILTER_CALC_VERSION = "0.1.0-phase1"
@@ -1036,6 +1050,153 @@ def cmd_backfill_walk_forward_data(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
+    """Faza 5.3c — pełny BASELINE walk-forward (Decyzja właścicielki
+    2026-10-04). Orkiestracja WYŁĄCZNIE już istniejących, przetestowanych
+    funkcji (`backtest_harness.py`) na danych już zebranych przez
+    backfill (Faza 5.3b) — zero zmiany scoring weights/thresholds/hard
+    gates/valuation assumptions/`deterministic_score_pct` methodology,
+    zero sieci (czyta WYŁĄCZNIE z `--db`). Dla KAŻDEJ decision_date
+    mierzy coverage NIEZALEŻNIE od liczby kandydatów (Decyzja
+    właścicielki: missingness nie musi być losowy, więc sama liczba
+    kandydatów nie wystarcza — patrz `walk_forward_coverage.py`)."""
+    config = load_config()
+    config_text = Path(DEFAULT_CONFIG_PATH).read_text(encoding="utf-8")
+    config_version = f"config.yaml:{hashlib.sha256(config_text.encode()).hexdigest()[:16]}"
+    run_id = "walk-forward-baseline-" + dt.datetime.utcnow().strftime("%Y-%m-%dT%H%M%SZ")
+    conn = init_db(args.db)
+
+    index_name = UNIVERSE_MEMBERSHIP_INDEX_NAME
+    window_start = args.window_start
+    window_end = args.window_end or dt.date.today().isoformat()
+    decision_dates = generate_rebalance_dates(window_start, window_end, "MONTHLY")
+    print(f"Decision dates: {len(decision_dates)} ({window_start}..{window_end}), run_id={run_id}")
+
+    all_ciks = list_universe_membership_ciks(conn, index_name)
+    sample_set: set[str] | None = None
+    if args.sample:
+        sample_set = {c.strip() for c in args.sample.split(",") if c.strip()}
+        all_ciks = [c for c in all_ciks if c in sample_set]
+    print(f"CIK w zakresie (universe_membership, kiedykolwiek): {len(all_ciks)}")
+
+    sector_profiles = get_companies_sector_profiles(conn)
+
+    print("Wczytywanie cen i fundamentals per CIK (raz, z lokalnej bazy) ...")
+    price_bars_by_cik: dict[str, list[PriceBar]] = {}
+    company_facts_by_cik: dict[str, dict] = {}
+    for cik in all_ciks:
+        rows = get_price_series(conn, cik)
+        price_bars_by_cik[cik] = [
+            PriceBar(
+                date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                close=r["close"], adj_close=r["adj_close"], volume=r["volume"],
+            )
+            for r in rows
+        ]
+        cf = get_sec_company_facts_cache(conn, cik)
+        if cf is not None:
+            company_facts_by_cik[cik] = cf
+    print(f"  {len(price_bars_by_cik)} CIK z cenami, {len(company_facts_by_cik)} CIK z SEC cache.")
+
+    coverage_snapshots: list[CoverageSnapshot] = []
+    n_candidates = 0
+    stage_totals = {"NO_DECLINE_SIGNAL": 0, "EXCLUDED_BY_PREFILTER": 0, "HARD_GATE_FAILED": 0, "CANDIDATE": 0}
+
+    print(f"\n== Walk-forward: {len(decision_dates)} dat x PIT universe ==")
+    for d_idx, decision_date in enumerate(decision_dates, 1):
+        pit_ciks = get_universe_membership_as_of(conn, index_name, decision_date)
+        if sample_set is not None:
+            pit_ciks = [c for c in pit_ciks if c in sample_set]
+
+        sufficient_price = sufficient_fund = scanned = 0
+        excl_price = excl_fund = 0
+        stage_counts = {"NO_DECLINE_SIGNAL": 0, "EXCLUDED_BY_PREFILTER": 0, "HARD_GATE_FAILED": 0, "CANDIDATE": 0}
+
+        for cik in pit_ciks:
+            full_bars = price_bars_by_cik.get(cik, [])
+            bars = [b for b in full_bars if b.date <= decision_date]
+            cf = company_facts_by_cik.get(cik)
+            periods = build_annual_fundamentals_periods_as_of(cf, decision_date) if cf is not None else []
+
+            has_price, has_fund = classify_data_sufficiency(bars=bars, periods=periods)
+            if has_price:
+                sufficient_price += 1
+            else:
+                excl_price += 1
+            if has_fund:
+                sufficient_fund += 1
+            else:
+                excl_fund += 1
+            if not (has_price and has_fund):
+                continue
+            scanned += 1
+
+            result = evaluate_candidate_at_date(
+                cik=cik, ticker_as_of_date=cik, decision_date=decision_date,
+                bars=bars, periods=periods, sector_profile=sector_profiles.get(cik, "GENERAL"),
+                config=config, run_id=run_id, config_version=config_version,
+                universe_provenance="universe_membership_as_of",
+            )
+            if result.stage in stage_counts:
+                stage_counts[result.stage] += 1
+                stage_totals[result.stage] += 1
+            if result.stage == "CANDIDATE":
+                candidate = attach_forward_returns(result.candidate, full_bars)
+                insert_backtest_candidate(conn, run_id=run_id, candidate=candidate)
+                n_candidates += 1
+
+        snapshot = CoverageSnapshot(
+            decision_date=decision_date, pit_universe_count=len(pit_ciks),
+            sufficient_price_count=sufficient_price, sufficient_fundamentals_count=sufficient_fund,
+            scanned_count=scanned, excluded_missing_price_count=excl_price,
+            excluded_missing_fundamentals_count=excl_fund,
+            stage_no_decline_signal=stage_counts["NO_DECLINE_SIGNAL"],
+            stage_excluded_by_prefilter=stage_counts["EXCLUDED_BY_PREFILTER"],
+            stage_hard_gate_failed=stage_counts["HARD_GATE_FAILED"],
+            stage_candidate=stage_counts["CANDIDATE"],
+        )
+        coverage_snapshots.append(snapshot)
+        insert_backtest_coverage(conn, run_id=run_id, snapshot=snapshot)
+
+        if d_idx % 12 == 0 or d_idx == len(decision_dates):
+            conn.commit()
+            cov_pct = f"{snapshot.coverage_pct:.1f}%" if snapshot.coverage_pct is not None else "n/a"
+            print(
+                f"  [{d_idx}/{len(decision_dates)}] {decision_date}: pit={len(pit_ciks)} "
+                f"scanned={scanned} coverage={cov_pct} candidates_this_date={stage_counts['CANDIDATE']} "
+                f"candidates_total={n_candidates}"
+            )
+
+    conn.commit()
+
+    agg = aggregate_coverage(coverage_snapshots)
+    print("\n== Coverage (agregat) ==")
+    print(f"  Decision dates: {agg.n_decision_dates}")
+    print(f"  Suma obserwacji PIT universe: {agg.total_pit_universe_observations}")
+    print(f"  Suma faktycznie przeskanowanych: {agg.total_scanned_observations}")
+    if agg.overall_coverage_pct is not None:
+        print(f"  Overall coverage_pct (ważony obserwacjami): {agg.overall_coverage_pct:.2f}%")
+    if agg.coverage_pct_median is not None:
+        print(
+            f"  coverage_pct min/p10/p25/median/p75/p90/max: "
+            f"{agg.coverage_pct_min:.1f} / {agg.coverage_pct_p10:.1f} / {agg.coverage_pct_p25:.1f} / "
+            f"{agg.coverage_pct_median:.1f} / {agg.coverage_pct_p75:.1f} / {agg.coverage_pct_p90:.1f} / "
+            f"{agg.coverage_pct_max:.1f}"
+        )
+    print("  Najgorzej pokryte decision dates:")
+    for d, pct in agg.worst_decision_dates:
+        print(f"    {d}: {pct:.1f}%")
+
+    print("\n== Funnel (suma po wszystkich decision dates x CIK) ==")
+    for stage in ("NO_DECLINE_SIGNAL", "EXCLUDED_BY_PREFILTER", "HARD_GATE_FAILED", "CANDIDATE"):
+        print(f"  {stage}: {stage_totals[stage]}")
+
+    print(f"\nrun_id={run_id} — wyniki w backtest_coverage/backtest_candidates ({args.db}).")
+    print(f"Łącznie kandydatów (CANDIDATE): {n_candidates}")
+
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -1112,6 +1273,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lista CIK po przecinku — ogranicza zakres (np. mały Proof Run na 10-20 CIK przed pełnym runem).",
     )
     p_backfill.set_defaults(func=cmd_backfill_walk_forward_data)
+
+    p_baseline = sub.add_parser("run-baseline-walk-forward")
+    p_baseline.add_argument(
+        "--window-start", default="2012-01-01",
+        help="Pierwsza decision_date (YYYY-MM-DD, domyślnie D14: 2012-01-01).",
+    )
+    p_baseline.add_argument(
+        "--window-end", default=None,
+        help="Ostatnia decision_date (YYYY-MM-DD, domyślnie dziś).",
+    )
+    p_baseline.add_argument(
+        "--sample", default=None,
+        help="Lista CIK po przecinku — ogranicza zakres (np. mały test przed pełnym runem).",
+    )
+    p_baseline.set_defaults(func=cmd_run_baseline_walk_forward)
 
     return parser
 

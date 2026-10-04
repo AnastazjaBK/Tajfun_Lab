@@ -409,6 +409,25 @@ def evaluate_candidate_at_date(
     )
 
 
+def classify_data_sufficiency(
+    *, bars: list[PriceBar], periods: list[FundamentalsPeriod]
+) -> tuple[bool, bool]:
+    """Faza 5.3c (pełny baseline walk-forward, 2026-10-04): klasyfikacja
+    NIEZALEŻNA od `evaluate_candidate_at_date` — czy dla (CIK,
+    decision_date) w ogóle da się uruchomić decline scanner / odczytać
+    PIT fundamentals, osobno dla każdego z tych dwóch wejść. "Wystarczające"
+    = niepuste (scanner/funnel mogą w ogóle wystartować bez crasha) —
+    NIGDY nie ocenia JAKOŚCI/ILOŚCI danych (np. czy jest pełne 252 sesji
+    dla 52-tygodniowego drawdown) — `compute_price_changes`/
+    `evaluate_decline_flags` już to robią per-metryka (None gdy za mało
+    historii, nigdy fabrykowane). Rozróżnienie "brak ceny" vs "brak
+    fundamentals" (Decyzja właścicielki: `evaluate_candidate_at_date`
+    konfliduje oba w jeden `NO_FUNDAMENTALS`, niewystarczające do
+    coverage reportingu per-przyczyna) — ta funkcja istnieje WYŁĄCZNIE
+    do policzenia coverage, nigdy nie zmienia zachowania funnela."""
+    return bool(bars), bool(periods)
+
+
 def attach_forward_returns(
     candidate: BacktestCandidate, bars_including_future: list[PriceBar]
 ) -> BacktestCandidate:
