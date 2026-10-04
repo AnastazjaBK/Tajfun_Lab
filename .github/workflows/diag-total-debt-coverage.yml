@@ -112,7 +112,7 @@ jobs:
                       # Grupuj przyczyny None do krotszych kategorii (pelny reason
                       # bywa unikalny per end_date -- grupujemy po pierwszych slowach).
                       if result.reason:
-                          if "nie dotycza tego samego balance-sheet instant" in result.reason:
+                          if "balance-sheet instant" in result.reason:
                               reason_counts["END_DATE_MISMATCH"] += 1
                           elif "Brakuje" in result.reason:
                               reason_counts["MISSING_ONE_COMPONENT_LTD_FAMILY_EXISTS"] += 1
