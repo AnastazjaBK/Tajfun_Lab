@@ -54,17 +54,22 @@ jobs:
 
           # Reprezentatywna probka (3 wymagane + proste + zlozone struktury
           # dlugu), wszystkie CIK potwierdzone realne w tym projekcie.
+          # UWAGA: realna baza przechowuje cik BEZ wiodacych zer (np.
+          # "320193", nie "0000320193" -- zweryfikowane empirycznie,
+          # poprzedni dry-run tego diagnostyka z zero-padding dal 100%
+          # "BRAK"). Lookup nizej i tak normalizuje przez CAST(...AS
+          # INTEGER), zeby byc odporne na oba formaty.
           SAMPLE = {
-              "0000320193": "AAPL (wymagane)",
-              "0000789019": "MSFT (wymagane)",
-              "0000021344": "KO (wymagane)",
-              "0000097210": "TERADYNE (prosty profil -- hipoteza do weryfikacji)",
-              "0000898293": "JABIL (prosty profil -- hipoteza do weryfikacji)",
-              "0001004980": "PG&E Corp (zlozony profil -- regulowana utility, hipoteza)",
-              "0001868275": "Constellation Energy Corp (zlozony profil -- utility/nuclear, hipoteza)",
-              "0000033213": "EQT Corp (zlozony profil -- energy, hipoteza)",
-              "0000726728": "Realty Income / O (REIT -- sale-leaseback, hipoteza)",
-              "0001751788": "DOW INC (zlozony profil -- chemicals/industrial, hipoteza)",
+              "320193": "AAPL (wymagane)",
+              "789019": "MSFT (wymagane)",
+              "21344": "KO (wymagane)",
+              "97210": "TERADYNE (prosty profil -- hipoteza do weryfikacji)",
+              "898293": "JABIL (prosty profil -- hipoteza do weryfikacji)",
+              "1004980": "PG&E Corp (zlozony profil -- regulowana utility, hipoteza)",
+              "1868275": "Constellation Energy Corp (zlozony profil -- utility/nuclear, hipoteza)",
+              "33213": "EQT Corp (zlozony profil -- energy, hipoteza)",
+              "726728": "Realty Income / O (REIT -- sale-leaseback, hipoteza)",
+              "1751788": "DOW INC (zlozony profil -- chemicals/industrial, hipoteza)",
           }
 
           CANDIDATE_TAGS = [
@@ -115,7 +120,8 @@ jobs:
 
           for cik, label in SAMPLE.items():
               row = conn.execute(
-                  "SELECT raw_json FROM sec_company_facts_cache WHERE cik = ?", (cik,)
+                  "SELECT raw_json FROM sec_company_facts_cache WHERE CAST(cik AS INTEGER) = CAST(? AS INTEGER)",
+                  (cik,),
               ).fetchone()
               print(f"\n{'='*100}")
               print(f"CIK={cik}  {label}")
