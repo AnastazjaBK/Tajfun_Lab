@@ -1,7 +1,7 @@
 # BUFFETT OPPORTUNITY SCANNER — Technical Design Review
 
-**Status:** v1.44 — **Wszystkie Fazy 0–4 formalnie ukończone i dowiedzione na realnych danych. Faza 5.1 empirycznie potwierdzona i formalnie ukończona.** **Faza 5.2 (historyczny skład S&P 500, OPEN BLOCKER 2): EMPIRYCZNIE ZWALIDOWANA.** **Faza 5.3a (rozwiązanie ticker→CIK dla rename, LIMITED_BUT_HONEST): ZAMKNIĘTA (2026-10-01)** — kuratorowana allowlista 7 przypadków produkcyjnie wpięta, finalny coverage CIK 626/815 = 76.81%, 189 jawnie `CIK_UNRESOLVED`. **Faza 5.3b (dependency audit + backfill 615 CIK): ZAKOŃCZONA SUKCESEM, LIMITED_BUT_HONEST (2026-10-04)** — fundamentals 614/615 COMPLETE (99,8%), ceny 587/615 COMPLETE (95,4%), 13 PARTIAL (głównie konflikty merge przy zmianie tickera) + 15 FAILED (w tym BRK.B/BF.B zablokowane przez FMP "Special Endpoint" mimo planu Premium) — świadomie nienaprawiane teraz, do rewizji tylko jeśli materialnie wpłyną na walk-forward. **Faza 5.3c (infrastruktura pełnego BASELINE walk-forward + obie otwarte decyzje domknięte): ZAIMPLEMENTOWANA I PRZETESTOWANA (offline dry-run), GOTOWA DO REALNEGO URUCHOMIENIA** — coverage reporting per decision_date (`walk_forward_coverage.py`), SIC-based `sector_profile` (`sector_classification.py`, CLI `classify-sector-profiles`), dualny benchmark PRIMARY `equal_weighted_pit_universe` + SECONDARY SPY (`benchmark.py`, CLI `fetch-spy-benchmark-prices`), CLI `run-baseline-walk-forward`, workflow `phase5-3c-baseline-walk-forward.yml` (3 kroki: SIC, SPY, analiza). Patrz „Faza 5.3c — obie otwarte decyzje domknięte: SIC sector_profile + dualny benchmark, v1.44" niżej. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów.
-**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6), 2026-09-24–29 (v1.7–v1.33), 2026-09-30–10-04 (v1.37–v1.44)
+**Status:** v1.45 — **Wszystkie Fazy 0–4 formalnie ukończone i dowiedzione na realnych danych. Faza 5.1 empirycznie potwierdzona i formalnie ukończona.** **Faza 5.2 (historyczny skład S&P 500, OPEN BLOCKER 2): EMPIRYCZNIE ZWALIDOWANA.** **Faza 5.3a (rozwiązanie ticker→CIK dla rename, LIMITED_BUT_HONEST): ZAMKNIĘTA (2026-10-01)** — kuratorowana allowlista 7 przypadków produkcyjnie wpięta, finalny coverage CIK 626/815 = 76.81%, 189 jawnie `CIK_UNRESOLVED`. **Faza 5.3b (dependency audit + backfill 615 CIK): ZAKOŃCZONA SUKCESEM, LIMITED_BUT_HONEST (2026-10-04)** — fundamentals 614/615 COMPLETE (99,8%), ceny 587/615 COMPLETE (95,4%), 13 PARTIAL + 15 FAILED (w tym BRK.B/BF.B zablokowane przez FMP "Special Endpoint"). **Faza 5.3c (REALNY pełny BASELINE walk-forward): ZAKOŃCZONA SUKCESEM (2026-10-04, run 37208774401)** — po naprawie realnego błędu identity/PIT znalezionego w trakcie tego runu (overlapping dual-class share intervals — GOOGL/GOOG, UAA/UA, NWSA/NWS, FOXA/FOX — w `universe_membership`, patrz sekcja niżej), 178 decision dates/615 CIK/2012-2026, 15 656 kandydatów, dualny benchmark (equal_weighted_pit_universe + SPY), zero kalibracji. Najważniejsze znalezisko: `valuation_score` niedostępny dla 100% kandydatów (`total_debt` zawsze `None`, znana, odłożona luka z Fazy 5.3b — skala wpływu zmierzona teraz po raz pierwszy). Hit rate kandydatów vs oba benchmarki <50% na każdym horyzoncie (1m/3m/6m/12m) — oczekiwany wynik niekalibrowanego modelu, nie dowód braku działania scannera. Pełny 10-punktowy raport: patrz „Faza 5.3c — REALNY pełny BASELINE walk-forward, wynik i raport 10-punktowy, v1.45" niżej. Ten plik jest samodzielny — nie wymaga sięgania do historii commitów.
+**Data:** 2026-09-20 (v1.0–v1.4), 2026-09-21 (v1.5–v1.6), 2026-09-24–29 (v1.7–v1.33), 2026-09-30–10-04 (v1.37–v1.45)
 **Zmiana względem v1.0:** (1) BLOCKER 3, 4, 5 przeszły w status rozwiązany na poziomie decyzji architektonicznej; (2) BLOCKER 1 i 2 pozostają otwarte, ale z konkretnymi, zweryfikowanymi ścieżkami rozwiązania; (3) dodano projekt modułu MY HOLDINGS / EXIT MONITORING; (4) poprawiono identyfikację spółek w schemacie DB (CIK zamiast tickera).
 **Zmiana w v1.2:** dodano projekt modułu BIOTECH: EXTERNAL VALIDATION & RESEARCH NETWORK (sekcja 18) jako jedną warstwę przyszłego pełnego modelu biotech.
 **Zmiana w v1.3:** zamknięto decyzje D2, D4–D14 zgodnie z odpowiedziami właściciela; D15 rozstrzygnięte na rzecz nowej kolejności priorytetów — **BIOTECH ma wyższy priorytet niż pełne rozszerzenie BANK/INSURER/REIT**; dodano rejestr pełnego docelowego zakresu BIOTECH MODULE jako scope dla przyszłej Fazy 8 (DESIGN) — External Validation pozostaje tylko jedną z jego warstw.
@@ -1202,6 +1202,114 @@ Decyzje właścicielki 2026-10-04: (1) sector_profile — opcja (b) powyżej, sz
 **Weryfikacja:** 25 nowych testów jednostkowych (`test_sector_classification.py`, `test_benchmark.py`, rozszerzenia `test_sec_edgar.py`/`test_db.py`) — 516 passed / 1 skipped razem w projekcie. Offline dry-run (fake SEC/FMP, monkeypatch `cli.SecEdgarClient`/`cli.FMPClient`, bez sieci) na 4 syntetycznych CIK (GENERAL/BANK/INSURER/REIT po jednym) potwierdza: SIC mapuje się na właściwy `sector_profile`; `fetch-spy-benchmark-prices` poprawnie rozwiązuje CIK i zapisuje ceny; `run-baseline-walk-forward` z aktywnym SPY poprawnie liczy SECONDARY benchmark (niepusty `spy_return_1m_pct`), a spółka z `sector_profile='BANK'` ma `valuation_score=None` z przyczyny `NOT_YET_IMPLEMENTED` (potwierdzone bezpośrednim wywołaniem `compute_valuation('BANK', ...)` → `implemented=False, reason="Brak zaimplementowanej metody wyceny dla sector_profile='BANK'"`), NIE z braku danych — odróżnione od analogicznego przypadku GENERAL, gdzie `implemented=False` wynika z niewystarczających danych FCF w syntetycznym przykładzie, nie z routingu.
 
 Obie otwarte decyzje z poprzedniej sekcji są teraz zamknięte. Przed realnym uruchomieniem pełnego BASELINE walk-forward na 615 CIK pozostaje: (a) uruchomić `classify-sector-profiles` i `fetch-spy-benchmark-prices` na realnej, zabackfillowanej bazie (Faza 5.3b), (b) uruchomić `run-baseline-walk-forward` na pełnym oknie 2012+, (c) przedstawić raport wg 10 punktów zatwierdzonych przez właścicielkę 2026-10-04 — włącznie z coverage, oboma benchmarkami, rozkładami score'ów i forward returns, bez kalibracji.
+
+## Faza 5.3c — REALNY pełny BASELINE walk-forward, wynik i raport 10-punktowy, v1.45
+
+Uruchomiony i zakończony sukcesem 2026-10-04 (GH Actions run [37208774401](https://github.com/AnastazjaBK/Tajfun_Lab/actions/runs/37208774401), branch `claude/buffett-scanner-design-review-mrud89`, `run_id` backtestu = `walk-forward-baseline-2026-10-04T142105Z`). 615 CIK, monthly, 2012-01-01 → 2026-10-04. **Zero zmiany scoring weights/thresholds/decline thresholds/hard gates/valuation assumptions/`deterministic_score_pct` methodology względem już zatwierdzonej konfiguracji — potwierdzone (punkt 10).**
+
+### Realny problem znaleziony i naprawiony PRZED tym runem (identity/PIT, zgłoszony i rozstrzygnięty w trakcie tej sesji)
+
+Pierwsza próba realnego uruchomienia (run `37203999911`) padła na `sqlite3.IntegrityError: UNIQUE constraint failed` w `backtest_candidates`. Diagnoza: 4 CIK (Alphabet, Under Armour, News Corp, Fox Corp) mają **dual-class share tickery** (GOOGL/GOOG, UAA/UA, NWSA/NWS, FOXA/FOX) — `fja05680` traktuje obie klasy jako odrębne tickery S&P 500, oba poprawnie rozwiązują się do TEGO SAMEGO CIK, ale `merge_adjacent_same_cik_intervals` scalała tylko sąsiadujące (zero-gap) przedziały, nie nakładające się — jej własny docstring to explicite zakładał jako „poza zakresem". Efekt: `get_universe_membership_as_of()` zwracało ten sam CIK dwa razy dla 150/178 decision dates. **Decyzja właścicielki: naprawić builder, nie query layer.** `merge_adjacent_same_cik_intervals` przepisana na jedną, ogólną regułę interval-union (`next.start_date <= current.end_date`, adjacency jako szczególny przypadek), z audytowalną notą (`overlap_merge_note`) i sanity checkiem po scaleniu (FAIL FAST, jeśli jakakolwiek para nadal się nakłada). Nowa defensywna asercja w `run-baseline-walk-forward`: `universe_membership_as_of(D)` nigdy nie może zwrócić duplikatu CIK — FAIL FAST, nigdy cichy `DISTINCT`. Po dwóch dodatkowych technicznych (nie-danych) poprawkach — brakująca migracja kolumny `overlap_merge_note` w `init_db` dla reużywanego pliku DB (SQLite nie wspiera `ALTER TABLE ADD COLUMN IF NOT EXISTS`, zweryfikowane empirycznie) — trzecia próba (`37208774401`) przeszła w całości, z sanity checkiem potwierdzającym **0 nakładających się par po scaleniu** dla wszystkich 615 CIK. 31 nowych testów jednostkowych pokrywa przypadki B/C/D/E ze specyfikacji właścicielki (dual-class overlap, partial overlap, open-ended overlap, genuine exit/re-entry) — 526 passed/1 skipped.
+
+### 1. Decision dates i obserwacje
+
+178 decision dates (miesięcznie, 2012-01-01..2026-10-04). Company-date observations: **76 292** w PIT universe, **71 467** faktycznie przeskanowanych (93,68% ważone obserwacjami).
+
+### 2. Pełny funnel (suma po wszystkich decision dates × CIK)
+
+| Etap | Liczba | % PIT universe |
+|---|---|---|
+| PIT universe | 76 292 | 100% |
+| sufficient price data | 74 400 | 97,5% |
+| sufficient PIT fundamentals | 72 381 | 94,9% |
+| **scanned** (oba warunki) | **71 467** | **93,7%** |
+| wykluczeni: missing price | 1 892 | 2,5% |
+| wykluczeni: missing fundamentals | 3 911 | 5,1% |
+| NO_DECLINE_SIGNAL | 55 811 | 73,2% |
+| EXCLUDED_BY_PREFILTER | 0 | 0% |
+| HARD_GATE_FAILED | 0 | 0% |
+| **CANDIDATE** | **15 656** | **20,5%** |
+
+`EXCLUDED_BY_PREFILTER=0` i `HARD_GATE_FAILED=0` to oczekiwany stan tej konfiguracji (`exclude_rules` puste od Fazy 1/BLOCKER 5, `hard_gates.min_margin_of_safety_pct=null`, `UNCALIBRATED`) — **nie** wynik modelu "nic nie wykluczającego z zasady". Każda spółka z wykrytym sygnałem spadku automatycznie staje się kandydatem w tym baseline.
+
+### 3. Coverage w czasie
+
+Overall coverage_pct (ważony obserwacjami): **93,68%**. Rozkład w czasie: min/p10/p25/median/p75/p90/max = **0,0 / 86,9 / 89,4 / 95,8 / 97,7 / 98,4 / 99,0**. `min=0,0%` to wyłącznie pierwsza decision date (2012-01-01) — strukturalny artefakt (decline scanner wymaga historii cenowej *przed* datą decyzji, której przy pierwszym dniu okna z definicji nie ma dla nikogo) — nie błąd, nie reprezentatywne.
+
+**Starsze lata są istotnie słabiej pokryte**, zgodnie z przewidywaniem: 10 najgorzej pokrytych dat to wyłącznie 2012 i wczesny 2013 (82,6%–85,9%, pomijając artefakt 0,0%), podczas gdy 2019+ utrzymuje 96–99%. To systematyczna, nie losowa, różnica w czasie — potencjalny selection/coverage bias we wczesnym okresie backtestu, zgodnie z zasadą, że missingness nie musi być losowe.
+
+### 4. Kandydaci w czasie
+
+Łącznie: **15 656**. Mediana na miesiąc: **70,5**. Miesięcy z 0 kandydatów: **1** (2012-01-01 — ten sam strukturalny artefakt co w punkcie 3).
+
+| Rok | Kandydaci | Rok | Kandydaci |
+|---|---|---|---|
+| 2012 | 431 | 2020 | 2 179 |
+| 2013 | 319 | 2021 | 605 |
+| 2014 | 316 | 2022 | 2 162 |
+| 2015 | 705 | 2023 | 1 454 |
+| 2016 | 900 | 2024 | 1 084 |
+| 2017 | 514 | 2025 | 1 689 |
+| 2018 | 774 | 2026* | 1 420 |
+| 2019 | 1 104 | | |
+
+*2026: tylko 9 miesięcy (do 2026-10-01). Duże wahania rok-do-roku (316 → 2 179) odzwierciedlają zmienność rynku (2020 COVID, 2022 bear market) wykrywaną przez decline scanner — nieoczekiwane przy nieaktywnych hard gates.
+
+### 5. Rozkład `deterministic_score_pct` i komponentów (n=15 656)
+
+| Metryka | n | min | p25 | median | p75 | max | mean |
+|---|---|---|---|---|---|---|---|
+| `deterministic_score_pct` | 15 656 | 0,00 | 30,00 | 45,50 | 58,75 | 88,75 | 46,00 |
+| `safety_score` | 15 656 | 0,00 | 4,69 | 6,56 | 9,38 | 12,19 | 6,52 |
+| `dividend_score` | 15 656 | 0,00 | 2,00 | 5,00 | 8,00 | 10,00 | 4,98 |
+| `valuation_score` | **0** | — | — | — | — | — | — |
+
+**Najważniejsze znalezisko tego punktu: `valuation_score`/`margin_of_safety_base_pct` niedostępne dla 100% kandydatów (0/15 656).** `available_components` = `"safety,dividend"` dla WSZYSTKICH 15 656 wierszy, bez wyjątku. Zdiagnozowane u źródła (nie zgaduję): `compute_valuation`'s `dcf_owner_earnings` wymaga `net_debt()`, a `net_debt()` wymaga `period.total_debt` — pole świadomie, jawnie ustawione na `None` dla KAŻDEGO okresu w `pit_fundamentals.py` od Fazy 5.3b (decyzja odłożona: "kompozyt current/noncurrent jeszcze nierozstrzygnięty"). To było już wcześniej dokumentowane jako znana, odłożona luka (11/12 pól), ale **skala jej wpływu — 100% w realnym 15-letnim backteście na 615 spółkach — nie była wcześniej zmierzona**. Konsekwencja: `deterministic_score_pct` w CAŁYM tym baseline jest de facto sumą WYŁĄCZNIE safety+dividend (waga valuation = 20pkt nigdy nie przyznana, nigdy przetestowana). To nie jest błąd obliczeń — gate `NOT_YET_IMPLEMENTED` działa zgodnie z projektem (nigdy nie fabrykuje wyceny) — ale to materialne ograniczenie interpretacji wyników tego baseline, wymagające wyraźnego zastrzeżenia (patrz punkt 9).
+
+### 6. Forward returns kandydatów (bez interpretacji jako dowód przewagi)
+
+| Horyzont | n | min | p25 | median | p75 | max | mean |
+|---|---|---|---|---|---|---|---|
+| 1m | 15 350 | -74,37% | -5,39% | 1,37% | 8,26% | 181,41% | 1,98% |
+| 3m | 14 892 | -84,86% | -6,90% | 3,98% | 14,93% | 214,67% | 5,02% |
+| 6m | 14 255 | -94,90% | -8,69% | 6,72% | 23,23% | 738,10% | 9,51% |
+| 12m | 13 177 | -99,11% | -8,94% | 13,50% | 39,62% | 996,23% | 20,34% |
+
+`n` spada z horyzontem, bo najnowsze decision dates (2025–2026) jeszcze nie mają pełnej przyszłości — dla 12m dostępne dla 84% kandydatów. Rozkłady są silnie prawostronnie skośne (ekstremalne maksima, np. 996% na 12m) — `mean` nie jest reprezentatywne dla typowego wyniku, `median` jest właściwszą miarą centralną. Same dodatnie `mean`/`median` nie dowodzą niczego o przewadze scannera — potrzebne jest porównanie z benchmarkiem (punkt 8).
+
+### 7. Benchmark — dualna implementacja (zrealizowana bez nowego stopu metodologicznego)
+
+Zaimplementowane zgodnie ze specyfikacją właścicielki z poprzedniej tury (`benchmark.py`, tabela `backtest_benchmark`): **PRIMARY** `equal_weighted_pit_universe` (średni forward return WSZYSTKICH spółek z PIT universe z wystarczającymi cenami na danej decision_date, nie tylko kandydatów) i **SECONDARY** realny SPY (ta sama konwencja `forward_return_pct`, bez dywidend, co kandydaci). SPY CIK rozwiązany przez SEC `company_tickers.json` (884394), 3 709 realnych barów cenowych z FMP. Implementacja nie ujawniła problemu z dostępnością/konwencją danych — run przeszedł bezpośrednio do pełnego baseline, zgodnie z instrukcją.
+
+### 8. Wyniki względem benchmarku
+
+| Horyzont | n | hit rate vs EW | mean excess vs EW | median excess vs EW | hit rate vs SPY | mean excess vs SPY | median excess vs SPY |
+|---|---|---|---|---|---|---|---|
+| 1m | 15 350 | 49,0% | +0,49pp | -0,21pp | 49,3% | +0,44pp | -0,14pp |
+| 3m | 14 892 | 49,5% | +0,77pp | -0,17pp | 49,1% | +0,61pp | -0,27pp |
+| 6m | 14 255 | 47,9% | +1,52pp | -1,03pp | 47,1% | +0,90pp | -1,51pp |
+| 12m | 13 177 | 47,9% | +3,61pp | -1,55pp | 46,3% | +2,70pp | -2,81pp |
+
+(hit rate = % kandydatów z return > return benchmarku tej samej decision_date; excess = return kandydata − return benchmarku; pp = punkty procentowe)
+
+**Odczyt, bez nadinterpretacji:** hit rate jest **poniżej 50% na każdym horyzoncie, wobec obu benchmarków** — większość kandydatów radzi sobie gorzej niż przeciętna spółka z PIT universe / SPY w tym samym okresie. `mean excess` jest lekko pozytywny, ale to efekt ciągnięty przez rzadkie, bardzo duże dodatnie wartości odstające (zgodnie z rozkładem z punktu 6) — `median excess` jest **ujemny na 3 z 4 horyzontów wobec obu benchmarków**, co jest właściwszym odczytem typowego przypadku. Dokładnie to, czego należy oczekiwać od NIEKALIBROWANEGO modelu bez komponentu valuation i bez aktywnych hard gates — **to nie jest dowód, że scanner nie działa**, to jest dowód, że ten konkretny baseline (safety+dividend, zero wykluczeń) nie wybiera systematycznie lepszych spółek niż przeciętna. Kalibracja (waga valuation, hard gates, thresholds) może to zmienić — ale to już następny krok, nie ten raport.
+
+### 9. Ograniczenia i braki danych (jawnie)
+
+- **Zawężone PIT universe:** 626/815 unikalnych tickerów z fja05680 w oknie 2012+ rozwiązanych do CIK (76,8%); **189 CIK_UNRESOLVED nigdy nie wchodzi do PIT universe** — to systematyczne zawężenie uniwersum (nie losowe missingness), więc "PIT universe" w tym backteście to ≈77% prawdziwego historycznego składu S&P 500, nie 100%. Potwierdzone ponownie w tym runie: `Unresolved (fja05680, nie generują wiersza): 189`.
+- **28 CIK z niepełnymi cenami** z 615 w backfillu: 15 FAILED (w tym BRK.B/BF.B, zablokowane przez FMP „Special Endpoint" mimo planu Premium) + 13 PARTIAL (głównie konflikty merge przy zmianie tickera, np. FB/META, DISCK/WBD) + 1 FUNDAMENTALS PARTIAL. Włączone do walk-forward z dostępnymi danymi tam, gdzie istnieją — classify_data_sufficiency poprawnie wyklucza daty bez wystarczających cen (patrz punkt 2), nigdy nie fabrykuje.
+- **Coverage NIE jest stała w czasie** — 82–86% w 2012–2013 vs 96–99% od 2019 (punkt 3). Starsze lata systematycznie słabiej pokryte.
+- **`valuation_score` niedostępny dla 100% kandydatów** (punkt 5) — `deterministic_score_pct` w tym baseline mierzy wyłącznie safety+dividend, nie pełną zatwierdzoną rubrykę (waga valuation 20pkt nigdy przyznana).
+- **Hard gates i prefilter nieaktywne w tej konfiguracji** (0 wykluczeń na 71 467 scanned) — `UNCALIBRATED`, nie wynik modelu uznającego wszystko za bezpieczne.
+- **Forward returns 12m dostępne dla 84% kandydatów** (najnowsze decyzje nie mają jeszcze pełnej przyszłości) — rozkład z punktu 6 oparty na mniejszej, starszej podpróbce niż 1m/3m.
+- **Oba benchmarki (PRIMARY i SECONDARY) są liczone względem tego samego, zawężonego PIT universe** (626/815 CIK) — nie są to niezależne, pełne 100% S&P 500 punkty odniesienia.
+- **Sektor finansowy:** SIC-based klasyfikacja (Faza 5.3c, v1.44) poprawnie routinguje 20 BANK + 35 INSURER + 33 REIT na `NOT_YET_IMPLEMENTED` — te spółki nigdy nie miały fabrykowanej wyceny w tym baseline (ale jak wyżej, GENERALNE spółki też nie mają wyceny, z innej przyczyny: `total_debt`).
+
+### 10. Brak kalibracji — potwierdzone
+
+Scoring weights, thresholds, decline thresholds, hard gates, valuation assumptions i `deterministic_score_pct` methodology **nie zostały zmienione** względem konfiguracji zatwierdzonej w Fazie 4/5.3. Ten baseline nie został użyty do dostrajania żadnego parametru. Jedyne zmiany kodu w tej turze dotyczyły: (a) naprawy realnego błędu identity/PIT (overlapping dual-class intervals, sekcja wyżej) — poprawka struktury danych, nie modelu; (b) SIC sector_profile + dualny benchmark (Faza 5.3c v1.44) — infrastruktura pomiaru, nie parametry scoringu.
+
+**Wniosek:** baseline jest kompletny, zweryfikowany (0 nakładających się przedziałów membership, testy jednostkowe zielone, offline dry-run potwierdzony wcześniej), i jawnie udokumentowany wraz z ograniczeniami. Najważniejszy fakt do uwzględnienia przy ewentualnej decyzji o kalibracji: **w tym baseline `deterministic_score_pct` nigdy nie zawierał komponentu valuation** — jakakolwiek przyszła kalibracja progu/wag powinna albo rozwiązać `total_debt` najpierw, albo jawnie uznać, że kalibruje tylko safety+dividend.
 
 Poniższe trzy punkty **nie wymagają dalszej dyskusji** — decyzje przyjęte i wbudowane w architekturę/schema powyżej. Poniżej pełna treść pierwotnie proponowanych zmian wraz z uzasadnieniem, dla kompletności dokumentu.
 
