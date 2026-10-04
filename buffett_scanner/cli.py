@@ -48,6 +48,7 @@ from buffett_scanner.backtest_harness import (
 from buffett_scanner.benchmark import compute_benchmark_snapshot
 from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
 from buffett_scanner.db import (
+    clear_universe_membership_for_rebuild,
     get_cik_for_active_ticker,
     get_companies_sector_profiles,
     get_fundamentals_periods,
@@ -836,8 +837,45 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
     merged_away = pre_merge_count - len(membership_intervals)
     print(
         f"Przedziałów członkostwa: {len(membership_intervals)} "
-        f"(przed scaleniem: {pre_merge_count}, scalono {merged_away} par zmiany tickera bez opuszczenia indeksu)"
+        f"(przed scaleniem: {pre_merge_count}, scalono {merged_away} par tego samego CIK -- "
+        f"rename bez opuszczenia indeksu LUB nakładające się dual-class tickery)"
     )
+
+    # Sanity check PO scaleniu (Decyzja właścicielki 2026-10-04, po realnym
+    # znalezisku -- dual-class share tickery dawały nakładające się, nie
+    # tylko sąsiadujące, przedziały tego samego CIK): skoro
+    # merge_adjacent_same_cik_intervals ma teraz scalać WSZYSTKIE
+    # nakładające się przedziały, każdy CIK z >1 segmentem PO scaleniu musi
+    # reprezentować genuine exit/re-entry (dodatnia przerwa) -- jeśli
+    # którykolwiek pozostały >1-segmentowy CIK nadal nakłada się, to błąd w
+    # samej funkcji merge, nie coś do cichego naprawienia tutaj.
+    post_merge_by_cik: dict[str, list] = {}
+    for iv in membership_intervals:
+        post_merge_by_cik.setdefault(iv.cik, []).append(iv)
+    multi_segment_after_merge = {cik: ivs for cik, ivs in post_merge_by_cik.items() if len(ivs) > 1}
+    overlapping_pairs_after_merge = []
+    for cik, ivs in multi_segment_after_merge.items():
+        ivs_sorted = sorted(ivs, key=lambda iv: iv.start_date)
+        for i in range(len(ivs_sorted) - 1):
+            a_end = ivs_sorted[i].end_date
+            b_start = ivs_sorted[i + 1].start_date
+            if a_end is None or b_start <= a_end:
+                overlapping_pairs_after_merge.append((cik, ivs_sorted[i], ivs_sorted[i + 1]))
+    print(
+        f"Sanity check po scaleniu: CIK z >1 segmentem = {len(multi_segment_after_merge)} "
+        f"(oczekiwane: wszystkie to genuine exit/re-entry), nakładające się pary PO scaleniu = "
+        f"{len(overlapping_pairs_after_merge)} (musi być 0)"
+    )
+    if overlapping_pairs_after_merge:
+        print(
+            "BŁĄD: merge_adjacent_same_cik_intervals nie scaliło wszystkich nakładających "
+            "się przedziałów -- to błąd w samej funkcji, nie coś do cichego naprawienia tutaj:",
+            file=sys.stderr,
+        )
+        for cik, a, b in overlapping_pairs_after_merge:
+            print(f"  CIK={cik}: [{a.start_date}, {a.end_date}) x [{b.start_date}, {b.end_date})", file=sys.stderr)
+        return 1
+
     # Diagnostyka (Faza 5.3): rozbicie scaleń na te pochodzące z 7
     # rekordów allowlisty vs pozostałe (nieznane/naturalne DIRECT-DIRECT
     # rename, niezwiązane z naszą zmianą) — żeby jawnie zweryfikować, że
@@ -892,6 +930,11 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
     fmp_unresolved_in_window = sorted(t for t in fmp_resolution.unresolved if t in fmp_relevant_tickers)
 
     print(f"\n== Krok 6: zapis do bazy ({args.db}) ==")
+    # Decyzja właścicielki 2026-10-04: pełne zastąpienie, nie dopisanie --
+    # ponowny build (np. po naprawie overlapping dual-class intervals) na
+    # już istniejącej bazie NIE może zostawiać starych, osieroconych
+    # wierszy, których nowy wynik już nie produkuje.
+    clear_universe_membership_for_rebuild(conn, index_name)
     cik_to_name: dict[str, str] = {}
     for ticker in sorted(fja_resolution.resolved):
         cik = fja_resolution.resolved[ticker]
@@ -916,6 +959,7 @@ def cmd_build_universe_membership(args: argparse.Namespace) -> int:
             validation_date_field=iv.validation_date_field,
             validation_rule_version=iv.validation_rule_version,
             validation_run_id=iv.validation_run_id,
+            overlap_merge_note=iv.overlap_merge_note,
         )
     for c in conflicts:
         insert_universe_membership_conflict(
@@ -1242,6 +1286,16 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
     print(f"\n== Walk-forward: {len(decision_dates)} dat x PIT universe ==")
     for d_idx, decision_date in enumerate(decision_dates, 1):
         pit_ciks = get_universe_membership_as_of(conn, index_name, decision_date)
+        if len(pit_ciks) != len(set(pit_ciks)):
+            dupes = sorted({c for c in pit_ciks if pit_ciks.count(c) > 1})
+            raise RuntimeError(
+                f"FAIL FAST: universe_membership_as_of({decision_date!r}) zwróciło "
+                f"duplikat CIK {dupes} -- to oznacza nakładające się przedziały membership "
+                f"dla tego samego CIK w universe_membership (patrz universe_membership_build."
+                f"merge_adjacent_same_cik_intervals -- ten build musi być uruchomiony PO "
+                f"naprawie z 2026-10-04). Celowo nie naprawiam tego przez DISTINCT -- to by "
+                f"ukryło realny problem danych, zamiast go sygnalizować."
+            )
         if sample_set is not None:
             pit_ciks = [c for c in pit_ciks if c in sample_set]
 

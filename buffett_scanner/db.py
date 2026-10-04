@@ -234,6 +234,14 @@ CREATE TABLE IF NOT EXISTS universe_membership (
     -- 2026-09-30, przed implementacją tej tabeli).
     validation_rule_version     TEXT,
     validation_run_id           TEXT,
+    -- Decyzja właścicielki 2026-10-04: audytowalny ślad, że ten wiersz
+    -- company-level jest wynikiem unii >1 NAKŁADAJĄCYCH SIĘ (nie tylko
+    -- sąsiadujących) source intervals tego samego CIK -- typowo
+    -- dual-class share tickery (GOOGL/GOOG, UAA/UA, NWSA/NWS, FOXA/FOX).
+    -- NULL dla zwykłego, jednego interwału albo zero-gap rename
+    -- (adjacency) -- to nie jest "nowa" normalizacja wymagająca noty.
+    -- Patrz universe_membership_build.merge_adjacent_same_cik_intervals.
+    overlap_merge_note          TEXT,
     created_at                  TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (cik, index_name, start_date)
 );
@@ -699,6 +707,25 @@ def upsert_universe_membership(conn: sqlite3.Connection, *, cik: str, index_name
         """,
         values,
     )
+
+
+def clear_universe_membership_for_rebuild(conn: sqlite3.Connection, index_name: str) -> None:
+    """Usuwa WSZYSTKIE wiersze `universe_membership`/`universe_membership_
+    conflicts`/`universe_membership_unresolved_tickers` dla danego
+    `index_name` (Decyzja właścicielki 2026-10-04, dodane przy naprawie
+    overlapping dual-class intervals). `cmd_build_universe_membership`
+    woła to na początku zapisu — bez tego, ponowny build na już
+    istniejącej bazie zostawiałby STARE wiersze, których nowy (poprawiony)
+    wynik już nie produkuje (np. dla CIK, które po naprawie scaliły się
+    do JEDNEGO przedziału — stary, osobny drugi wiersz zostałby cichym,
+    osierocionym duplikatem, bo `upsert_universe_membership` tylko
+    wstawia/aktualizuje, nigdy nie usuwa). Rebuild = pełne zastąpienie,
+    nie dopisanie. UWAGA: usuwa też ręczne `review_note` z konfliktów —
+    w tym projekcie nic tam jeszcze nie wpisano ręcznie, ale przyszła
+    funkcja, która by to robiła, musiałaby to uwzględnić."""
+    conn.execute("DELETE FROM universe_membership WHERE index_name = ?", (index_name,))
+    conn.execute("DELETE FROM universe_membership_conflicts WHERE index_name = ?", (index_name,))
+    conn.execute("DELETE FROM universe_membership_unresolved_tickers WHERE index_name = ?", (index_name,))
 
 
 def insert_universe_membership_conflict(conn: sqlite3.Connection, **fields) -> int:

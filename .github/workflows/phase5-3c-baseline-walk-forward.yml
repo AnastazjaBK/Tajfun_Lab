@@ -14,16 +14,28 @@ name: Phase 5.3c Baseline Walk-Forward (deterministic, no LLM)
 # Data" -- podaj `backfill_run_id` (ID TEGO konkretnego, juz
 # zakonczonego backfillu, z ktorego pobrac baze z cenami/SEC cache).
 #
-# Faza 5.3c, Decyzja wlascicielki 2026-10-04 -- dwa dodatkowe kroki
+# Faza 5.3c, Decyzja wlascicielki 2026-10-04 -- trzy dodatkowe kroki
 # PRZED sama analiza (jedyne miejsca w tym workflow z realnym dostepem
-# do sieci): (1) `classify-sector-profiles` -- SIC z SEC Submissions
-# API, naprawia odkryty gap (sector_profile byl zawsze 'GENERAL',
-# wiec dcf_owner_earnings bylo blednie stosowane do bankow/
-# ubezpieczycieli w datasetcie); (2) `fetch-spy-benchmark-prices` --
-# SECONDARY benchmark (realna historia cen SPY z FMP, ta sama
+# do sieci): (0) `build-universe-membership` -- PRZEBUDOWA (pelne
+# zastapienie, nie dopisanie) na tej samej bazie, naprawia realny blad
+# znaleziony przy pierwszym uruchomieniu tego workflow (run 37203999911):
+# 4 CIK z dual-class share tickerami (GOOGL/GOOG, UAA/UA, NWSA/NWS,
+# FOXA/FOX) mialy NAKLADAJACE SIE przedzialy membership tego samego CIK,
+# co crashowalo walk-forward na UNIQUE constraint w backtest_candidates
+# -- patrz merge_adjacent_same_cik_intervals (teraz: company-level
+# interval union). Ceny/fundamentals/SEC cache z backfillu (614/615 i
+# 587/615) NIE sa ponownie pobierane -- przebudowa membership jest
+# szybka (SEC company_tickers + fja05680 + FMP historical constituents,
+# bez company_facts/price fetchy per-CIK); (1) `classify-sector-profiles`
+# -- SIC z SEC Submissions API, naprawia odkryty gap (sector_profile byl
+# zawsze 'GENERAL', wiec dcf_owner_earnings bylo blednie stosowane do
+# bankow/ubezpieczycieli w datasetcie); (2) `fetch-spy-benchmark-prices`
+# -- SECONDARY benchmark (realna historia cen SPY z FMP, ta sama
 # konwencja forward price return co kandydaci). Sama analiza
 # (`run-baseline-walk-forward`) nadal czyta WYLACZNIE z lokalnego
-# pliku DB, zero sieci.
+# pliku DB, zero sieci -- i FAIL FAST, jesli universe_membership_as_of()
+# zwroci duplikat CIK dla jakiejkolwiek decision_date (defensywna
+# asercja, nigdy cichy DISTINCT).
 
 on:
   workflow_dispatch:
@@ -73,6 +85,12 @@ jobs:
 
       - name: Kopia bazy przed analiza (backfill_walk_forward.db zostaje nietkniety jako source data)
         run: cp backfill_walk_forward.db baseline_walk_forward_result.db
+
+      - name: Przebudowa universe_membership (naprawa overlapping dual-class intervals, 2026-10-04)
+        run: python -m buffett_scanner.cli --db baseline_walk_forward_result.db build-universe-membership --cutoff 2012-01-01
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
 
       - name: Klasyfikacja sector_profile z SIC (Faza 5.3c, Decyzja wlascicielki 2026-10-04)
         run: python -m buffett_scanner.cli --db baseline_walk_forward_result.db classify-sector-profiles

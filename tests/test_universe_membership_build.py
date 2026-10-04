@@ -199,6 +199,98 @@ def test_merge_direct_vs_format_variant_precedence_unchanged_without_curated_all
     assert merged[0].cik_resolution_method == "FORMAT_VARIANT"  # z pierwszego, bez zmian
 
 
+def test_merge_dual_class_overlap_is_one_cik_membership():
+    """Przypadek B (Decyzja właścicielki 2026-10-04, realne znalezisko
+    przy pełnym 615-CIK walk-forward): Alphabet GOOGL (od 2012-01-01,
+    open-ended) + GOOG (od 2014-04-03, powstał przy split na klasę C,
+    open-ended) -- DWIE klasy akcji, JEDNA spółka/CIK. Mimo że oba
+    przedziały są RÓWNOLEGLE aktywne (nie sąsiadują, naprawdę się
+    nakładają), to musi być JEDNO, nie dwa, membership tego CIK."""
+    intervals = [
+        _mi("1652044", "2012-01-01", None),
+        _mi("1652044", "2014-04-03", None),
+    ]
+    merged = merge_adjacent_same_cik_intervals(intervals)
+    assert len(merged) == 1
+    assert merged[0].start_date == "2012-01-01"
+    assert merged[0].end_date is None
+    assert merged[0].overlap_merge_note is not None
+    assert "2014-04-03" in merged[0].overlap_merge_note
+
+
+def test_merge_partial_overlap_unions_to_widest_range():
+    """Przypadek C: przedział A 2014-2020, przedział B 2016-2022
+    (częściowe nakładanie, różne końce) -> wynik MUSI być 2014-2022 --
+    `end_date` to PÓŹNIEJSZY z dwóch, nigdy przypadkowo skrócony do
+    końca wcześniej zaczynającego się przedziału."""
+    intervals = [
+        _mi("0001", "2014-01-01", "2020-01-01"),
+        _mi("0001", "2016-01-01", "2022-01-01"),
+    ]
+    merged = merge_adjacent_same_cik_intervals(intervals)
+    assert len(merged) == 1
+    assert merged[0].start_date == "2014-01-01"
+    assert merged[0].end_date == "2022-01-01"
+    assert merged[0].overlap_merge_note is not None
+
+
+def test_merge_nested_overlap_does_not_shorten_wider_interval():
+    """Under Armour UAA/UA (realny przypadek): oba przedziały mają TEN
+    SAM `end_date` (2022-06-21), drugi zaczyna się później (2016-04-08)
+    -- w pełni zagnieżdżony w pierwszym. Scalony koniec musi zostać
+    2022-06-21 (PÓŹNIEJSZY-lub-równy), nie zostać cofnięty."""
+    intervals = [
+        _mi("1336917", "2014-05-01", "2022-06-21"),
+        _mi("1336917", "2016-04-08", "2022-06-21"),
+    ]
+    merged = merge_adjacent_same_cik_intervals(intervals)
+    assert len(merged) == 1
+    assert merged[0].start_date == "2014-05-01"
+    assert merged[0].end_date == "2022-06-21"
+    assert merged[0].overlap_merge_note is not None
+
+
+def test_merge_open_ended_overlap_both_none_stays_open_ended():
+    """Przypadek D: 2013-NULL + 2015-NULL (oba open-ended) -> 2013-NULL.
+    News Corp NWSA/NWS ma dokładnie ten kształt."""
+    intervals = [
+        _mi("0001", "2013-01-01", None),
+        _mi("0001", "2015-01-01", None),
+    ]
+    merged = merge_adjacent_same_cik_intervals(intervals)
+    assert len(merged) == 1
+    assert merged[0].start_date == "2013-01-01"
+    assert merged[0].end_date is None
+
+
+def test_merge_real_exit_reentry_stays_two_intervals_exact_dates():
+    """Przypadek E (dokładne daty ze specyfikacji właścicielki): 2012-
+    2015 + 2018-NULL, dodatnia przerwa (3 lata) -> dwa OSOBNE
+    membership intervals, zero `overlap_merge_note`."""
+    intervals = [
+        _mi("0001", "2012-01-01", "2015-01-01"),
+        _mi("0001", "2018-01-01", None),
+    ]
+    merged = merge_adjacent_same_cik_intervals(intervals)
+    assert len(merged) == 2
+    assert (merged[0].start_date, merged[0].end_date) == ("2012-01-01", "2015-01-01")
+    assert (merged[1].start_date, merged[1].end_date) == ("2018-01-01", None)
+    assert merged[0].overlap_merge_note is None
+    assert merged[1].overlap_merge_note is None
+
+
+def test_merge_plain_adjacency_rename_does_not_get_overlap_note():
+    """Kontrola nieregresji: zwykła zero-gap adjacency (rename, np.
+    FB->META) NIE dostaje `overlap_merge_note` -- to nie jest "nowa"
+    normalizacja, tylko już wcześniej obsługiwany przypadek."""
+    intervals = [
+        _mi("0001326801", "2012-01-01", "2021-10-28"),
+        _mi("0001326801", "2021-10-28", None),
+    ]
+    merged = merge_adjacent_same_cik_intervals(intervals)
+    assert merged[0].overlap_merge_note is None
+
+
 def test_merge_different_ciks_are_never_joined():
     intervals = [_mi("0001", "2012-01-01", "2015-01-01"), _mi("0002", "2015-01-01", None)]
     merged = merge_adjacent_same_cik_intervals(intervals)

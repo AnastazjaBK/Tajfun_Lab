@@ -380,6 +380,68 @@ def test_upsert_universe_membership_accepts_curated_allowlist_method_and_note(co
     assert row["cik_resolution_note"] == "MULTI_SIGNAL_VERIFIED_V1 old=ANTM new=ELV"
 
 
+def test_upsert_universe_membership_accepts_overlap_merge_note(conn):
+    """Decyzja właścicielki 2026-10-04: `overlap_merge_note` niesie
+    audytowalny ślad company-level interval union (dual-class share
+    tickery) -- kolumna NULL-owalna, domyślnie nieustawiona."""
+    upsert_company(conn, cik="0001652044", name="Alphabet Inc.")
+    upsert_universe_membership(
+        conn, cik="0001652044", index_name="SP500", start_date="2012-01-01",
+        end_date=None, source="fja05680", source_snapshot_ref="ref1",
+        cik_resolution_method="DIRECT",
+        overlap_merge_note="company-level interval union: pochłonięto [2014-04-03, None)",
+    )
+    conn.commit()
+    row = conn.execute("SELECT * FROM universe_membership WHERE cik = ?", ("0001652044",)).fetchone()
+    assert row["overlap_merge_note"] == "company-level interval union: pochłonięto [2014-04-03, None)"
+
+
+def test_clear_universe_membership_for_rebuild_removes_only_that_index(conn):
+    """Decyzja właścicielki 2026-10-04: ponowny build musi być pełnym
+    zastąpieniem, nie dopisaniem -- stary wiersz, którego nowy
+    (poprawiony) wynik już nie produkuje, nie może zostać osieroconym
+    duplikatem. Usuwanie jest ograniczone do jednego `index_name`."""
+    from buffett_scanner.db import clear_universe_membership_for_rebuild, insert_unresolved_ticker
+
+    upsert_company(conn, cik="0001", name="Test SP500")
+    upsert_company(conn, cik="0002", name="Test OTHER_INDEX")
+    upsert_universe_membership(
+        conn, cik="0001", index_name="SP500", start_date="2012-01-01", end_date=None,
+        source="fja05680", source_snapshot_ref="ref1", cik_resolution_method="DIRECT",
+    )
+    upsert_universe_membership(
+        conn, cik="0002", index_name="OTHER_INDEX", start_date="2012-01-01", end_date=None,
+        source="fja05680", source_snapshot_ref="ref1", cik_resolution_method="DIRECT",
+    )
+    insert_universe_membership_conflict(
+        conn, cik="0001", index_name="SP500", event_date="2013-01-05", action="REMOVE",
+        conflict_type="ONLY_CANONICAL", tolerance_days=6, date_field="dateAdded",
+        validation_rule_version="cik_tolerance_match_v1", validation_run_id="run1",
+    )
+    insert_unresolved_ticker(
+        conn, source="fja05680", ticker="ZZZ", index_name="SP500",
+        source_snapshot_ref="ref1", run_id="run1",
+    )
+    conn.commit()
+
+    clear_universe_membership_for_rebuild(conn, "SP500")
+    conn.commit()
+
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM universe_membership WHERE index_name = 'SP500'"
+    ).fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM universe_membership_conflicts WHERE index_name = 'SP500'"
+    ).fetchone()["n"] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM universe_membership_unresolved_tickers WHERE index_name = 'SP500'"
+    ).fetchone()["n"] == 0
+    # OTHER_INDEX nietknięty.
+    assert conn.execute(
+        "SELECT COUNT(*) AS n FROM universe_membership WHERE index_name = 'OTHER_INDEX'"
+    ).fetchone()["n"] == 1
+
+
 def test_universe_membership_rejects_invalid_cik_resolution_method(conn):
     upsert_company(conn, cik="0001", name="Test Co")
     with pytest.raises(sqlite3.IntegrityError):

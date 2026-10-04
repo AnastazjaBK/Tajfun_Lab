@@ -43,6 +43,18 @@ class MembershipInterval:
     validation_date_field: str | None = None
     validation_rule_version: str | None = None
     validation_run_id: str | None = None
+    # Decyzja właścicielki 2026-10-04 (po realnym znalezisku -- dual-class
+    # share tickery GOOGL/GOOG, UAA/UA, NWSA/NWS, FOXA/FOX dające
+    # NAKŁADAJĄCE SIĘ, nie tylko sąsiadujące, przedziały tego samego CIK):
+    # audytowalny ślad, że ten przedział company-level jest wynikiem unii
+    # >1 nakładających się ticker-level source intervals. `None`, gdy
+    # przedział pochodzi z jednego źródłowego interwału albo ze zwykłego
+    # zero-gap rename (adjacency) -- nie jest to "nowa" normalizacja,
+    # którą trzeba specjalnie oznaczać. Nie rozbudowuje schematu o pełną
+    # listę źródłowych tickerów (ticker_history ma tę historię osobno,
+    # nietkniętą przez tę funkcję) -- to jest minimalny, wystarczający
+    # zapis faktu normalizacji, zgodnie z decyzją "nie przy tej okazji".
+    overlap_merge_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,34 +126,71 @@ def build_cik_membership_intervals(
     return intervals, tuple(sorted(unresolved))
 
 
+# Sentinel dla end_date=None (open-ended/"nadal aktywny") w porównaniach
+# stringowych ISO-daty poniżej -- żaden realny wiersz w tym datasecie nie
+# sięga roku 9999, więc to bezpieczny, deterministyczny sposób traktowania
+# "brak końca" jako +infinity bez trójstanowej logiki w każdym porównaniu.
+_OPEN_ENDED_SENTINEL = "9999-12-31"
+
+
+def _end_or_infinity(end_date: str | None) -> str:
+    return end_date if end_date is not None else _OPEN_ENDED_SENTINEL
+
+
 def merge_adjacent_same_cik_intervals(intervals: list[MembershipInterval]) -> list[MembershipInterval]:
-    """Scala przedziały TEGO SAMEGO CIK, gdy `end_date` jednego dokładnie
-    równa się `start_date` następnego (zero-dniowa przerwa) — typowy
-    ślad zmiany tickera BEZ opuszczenia indeksu (np. FB->META), którą
-    `build_ticker_intervals` na poziomie tickera poprawnie widzi jako
-    dwa przedziały, ale na poziomie CIK to JEDNO ciągłe członkostwo.
-    Rzeczywiste opuszczenie i powrót (niezerowa przerwa) NIE jest
-    scalane — zostaje dwoma osobnymi przedziałami (zgodnie z regułą
-    zatwierdzoną przez właścicielkę). Provenance (source,
-    cik_resolution_method) scalonego przedziału pochodzi z PIERWSZEGO
-    (dotyczy wejścia w ciągły okres); `exit_validation_*` z DRUGIEGO
-    (dotyczy faktycznego końca, jeśli istnieje).
+    """Scala przedziały TEGO SAMEGO CIK membership-poziomu w jeden,
+    company-level interval union (Decyzja właścicielki 2026-10-04, po
+    realnym znalezisku przy pełnym 615-CIK walk-forward: dual-class
+    share tickery -- GOOGL/GOOG, UAA/UA, NWSA/NWS, FOXA/FOX -- dają
+    DWA RÓWNOLEGLE AKTYWNE, nakładające się przedziały tego samego CIK,
+    bo `fja05680` traktuje obie klasy akcji jako odrębne tickery S&P 500,
+    a oba poprawnie rozwiązują się do TEJ SAMEJ spółki/CIK).
+
+    JEDNA reguła, bez rozróżniania przypadków: dwa kolejne (po sortowaniu
+    wg `start_date`) przedziały tego samego CIK scalają się WTEDY I
+    TYLKO WTEDY, gdy
+
+        next.start_date <= current.end_date
+
+    (`end_date=None` = open-ended = +infinity, więc zawsze scala).
+    Zero-dniowa przerwa (zmiana tickera BEZ opuszczenia indeksu, np.
+    FB->META) jest SZCZEGÓLNYM PRZYPADKIEM tej samej reguły (`next.
+    start_date == current.end_date`), nie osobną ścieżką kodu.
+    Rzeczywiste opuszczenie i powrót (`next.start_date > current.
+    end_date`, dodatnia przerwa) NIE jest scalane — zostaje dwoma
+    osobnymi przedziałami (reguła zatwierdzona wcześniej, niezmieniona).
+
+    Scalony `end_date` = PÓŹNIEJSZY z dwóch (open-ended/`None` zawsze
+    wygrywa — zagnieżdżony przedział NIGDY nie "skraca" membership, np.
+    Under Armour [2014-05-01,2022-06-21) + [2016-04-08,2022-06-21) musi
+    zostać [2014-05-01,2022-06-21), nie przypadkowo skrócone). `exit_
+    validation_*` pochodzi z przedziału, którego `end_date` został
+    wybrany jako późniejszy.
+
+    `ticker_history` NIE jest tu modyfikowane i nie jest wejściem tej
+    funkcji — dual-class tickery nadal widoczne osobno tam, dokładnie
+    jak przed tą zmianą. Zmiana dotyczy WYŁĄCZNIE company-level
+    `universe_membership`.
+
+    Audyt (bez rozbudowy schematu o pełną listę źródłowych tickerów,
+    decyzja właścicielki "nie teraz"): gdy scalenie wynika z PRAWDZIWEGO
+    nakładania (`next.start_date < current.end_date`, silniejsze niż
+    zero-dniowa przerwa), `overlap_merge_note` dokumentuje to jawnie —
+    audytowalny ślad normalizacji z >1 nakładającego się source interval.
+    Zwykła adjacency (rename) nie dostaje tej noty — to nie jest "nowa"
+    normalizacja, którą trzeba specjalnie oznaczać.
 
     WYJĄTEK (Faza 5.3, LIMITED_BUT_HONEST, v1.39, znalezione 2026-10-01
-    przy realnym buildzie dla pary FISV->FI): jeśli KTÓRYKOLWIEK z dwóch
-    scalanych przedziałów ma `cik_resolution_method == 'CURATED_ALLOWLIST'`,
-    TEN przedział wygrywa — niezależnie, czy jest pierwszy czy drugi.
-    Bez tego wyjątku para typu FISV(DIRECT, wcześniejszy)->FI(CURATED_
-    ALLOWLIST, późniejszy) scaliłaby się do method='DIRECT', fałszywie
-    ukrywając, że DRUGA połowa ciągłego członkostwa zależała od
-    allowlisty, by w ogóle się pojawić (bez niej FI zostałby CIK_
-    UNRESOLVED, obcinając historię na dacie zmiany tickera). Reguła
-    "z pierwszego" dla zwykłego DIRECT/FORMAT_VARIANT (bez udziału
-    CURATED_ALLOWLIST) pozostaje NIEZMIENIONA — to ustalone zachowanie
-    z Fazy 5.2, zatwierdzone wcześniej.
-
-    Zakłada brak nakładających się przedziałów dla tego samego CIK (to
-    inny problem, poza zakresem tej funkcji)."""
+    przy realnym buildzie dla pary FISV->FI, NIEZMIENIONE tą zmianą):
+    jeśli KTÓRYKOLWIEK z dwóch scalanych przedziałów ma
+    `cik_resolution_method == 'CURATED_ALLOWLIST'`, TEN przedział wygrywa
+    (method+note) — niezależnie, czy jest pierwszy czy drugi. Bez tego
+    wyjątku para typu FISV(DIRECT, wcześniejszy)->FI(CURATED_ALLOWLIST,
+    późniejszy) scaliłaby się do method='DIRECT', fałszywie ukrywając,
+    że DRUGA połowa ciągłego członkostwa zależała od allowlisty, by w
+    ogóle się pojawić. Reguła "z pierwszego" dla zwykłego DIRECT/
+    FORMAT_VARIANT (bez udziału CURATED_ALLOWLIST) pozostaje
+    NIEZMIENIONA."""
     if not intervals:
         return []
 
@@ -154,19 +203,38 @@ def merge_adjacent_same_cik_intervals(intervals: list[MembershipInterval]) -> li
         group_sorted = sorted(group, key=lambda iv: iv.start_date)
         current = group_sorted[0]
         for nxt in group_sorted[1:]:
-            if current.end_date is not None and current.end_date == nxt.start_date:
+            current_end_eff = _end_or_infinity(current.end_date)
+            if nxt.start_date <= current_end_eff:
+                is_true_overlap = nxt.start_date < current_end_eff
                 if current.cik_resolution_method != "CURATED_ALLOWLIST" and nxt.cik_resolution_method == "CURATED_ALLOWLIST":
                     current = replace(
                         current,
                         cik_resolution_method=nxt.cik_resolution_method,
                         cik_resolution_note=nxt.cik_resolution_note,
                     )
-                current = replace(
-                    current,
-                    end_date=nxt.end_date,
-                    exit_validation_status=nxt.exit_validation_status,
-                    exit_validation_day_diff=nxt.exit_validation_day_diff,
-                )
+                nxt_end_eff = _end_or_infinity(nxt.end_date)
+                if nxt_end_eff >= current_end_eff:
+                    current = replace(
+                        current,
+                        end_date=nxt.end_date,
+                        exit_validation_status=nxt.exit_validation_status,
+                        exit_validation_day_diff=nxt.exit_validation_day_diff,
+                    )
+                # Jeśli `nxt` jest w pełni zagnieżdżony (jego koniec nie jest
+                # później) -- end_date/exit_* zostają od `current`, `nxt` jest
+                # po prostu w całości "pochłonięty" bez żadnej zmiany.
+                if is_true_overlap:
+                    note = (
+                        f"company-level interval union: pochłonięto nakładający się "
+                        f"source interval [{nxt.start_date}, {nxt.end_date}) "
+                        f"-- typowo dual-class ticker tej samej spółki"
+                    )
+                    current = replace(
+                        current,
+                        overlap_merge_note=(
+                            f"{current.overlap_merge_note} | {note}" if current.overlap_merge_note else note
+                        ),
+                    )
             else:
                 merged.append(current)
                 current = nxt
