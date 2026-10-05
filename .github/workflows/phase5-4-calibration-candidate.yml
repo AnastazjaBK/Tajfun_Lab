@@ -25,6 +25,10 @@ on:
         description: "Numer rundy kalibracji (ustala rejestr kandydatow)"
         required: true
         default: "1"
+      subround:
+        description: "Wymagane dla round=2 (Faza 5.4b): a=2A SAFETY+DIVIDEND, b=2B VALUATION"
+        required: false
+        default: ""
       candidate:
         description: "Nazwa kandydata z rejestru tej rundy"
         required: true
@@ -81,6 +85,9 @@ jobs:
       - name: Kandydat kalibracji (zero sieci, okno kalibracyjne hardkodowane, holdout zablokowany)
         run: |
           ARGS="--db calibration_result.db run-calibration-candidate --round ${{ inputs.round }} --candidate ${{ inputs.candidate }}"
+          if [ -n "${{ inputs.subround }}" ]; then
+            ARGS="$ARGS --subround ${{ inputs.subround }}"
+          fi
           if [ -n "${{ inputs.sample_ciks }}" ]; then
             ARGS="$ARGS --sample ${{ inputs.sample_ciks }}"
           fi
@@ -90,6 +97,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: calibration-round${{ inputs.round }}-${{ inputs.candidate }}-db
+          name: calibration-round${{ inputs.round }}${{ inputs.subround }}-${{ inputs.candidate }}-db
           path: calibration_result.db
           retention-days: 30

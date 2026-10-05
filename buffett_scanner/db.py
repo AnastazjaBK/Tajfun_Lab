@@ -431,7 +431,20 @@ CREATE TABLE IF NOT EXISTS calibration_runs (
     metrics_json             TEXT NOT NULL,
     status                   TEXT NOT NULL DEFAULT 'candidate'
                               CHECK (status IN ('candidate', 'frozen_winner')),
-    created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at                TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Faza 5.4b: PRIMARY metric Round 2A/2B (Spearman score-vs-forward-
+    -- return) -- NULL dla Round 1 (gdzie pooled_median_excess_return_pct
+    -- powyżej pozostaje PRIMARY, bez zmian). pooled_median_excess_*
+    -- powyżej staje się DIAGNOSTIC-only w Round 2, nadal liczone/zapisane.
+    subround                 TEXT,
+    population               TEXT,
+    pooled_spearman          REAL,
+    pooled_spearman_low_sample INTEGER,
+    median_of_fold_spearman  REAL,
+    min_fold_spearman        REAL,
+    max_fold_spearman        REAL,
+    n_positive_spearman_folds INTEGER,
+    n_spearman_folds_with_data INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_runs_round ON calibration_runs(round);
 """
@@ -1095,12 +1108,17 @@ def insert_calibration_run(
     training_window_start: str,
     training_window_end: str,
     oos_fold_years: tuple[int, ...],
+    spearman_evaluation=None,
 ) -> None:
-    """`evaluation`: `calibration.CalibrationEvaluation`. NIGDY UPDATE/
-    DELETE na tej tabeli (Faza 5.4, punkt 9.5/11 protokołu —
+    """`evaluation`: `calibration.CalibrationEvaluation` (median-excess
+    metric — PRIMARY dla Round 1, DIAGNOSTIC-only dla Round 2A/2B).
+    `spearman_evaluation`: opcjonalnie `calibration.
+    SpearmanCalibrationEvaluation` (Faza 5.4b) — PRIMARY dla Round 2A/2B,
+    `None` dla Round 1 (kolumny `*_spearman*` pozostają NULL). NIGDY
+    UPDATE/DELETE na tej tabeli (Faza 5.4, punkt 9.5/11 protokołu —
     przegrywające konfiguracje zostają, audytowalność całego procesu)."""
-    metrics_json = json.dumps(
-        {
+    metrics = {
+        "median_excess_evaluation": {
             "fold_metrics": [
                 {
                     "fold_year": m.fold_year, "n": m.n, "low_sample": m.low_sample,
@@ -1120,8 +1138,32 @@ def insert_calibration_run(
                 }
                 for s in evaluation.secondary
             ],
+        },
+    }
+    if spearman_evaluation is not None:
+        metrics["spearman_evaluation"] = {
+            "fold_metrics": [
+                {
+                    "fold_year": m.fold_year, "n": m.n, "low_sample": m.low_sample,
+                    "spearman": m.spearman,
+                }
+                for m in spearman_evaluation.fold_metrics
+            ],
         }
+    metrics_json = json.dumps(metrics)
+
+    subround = getattr(spearman_evaluation, "subround", None)
+    population = getattr(spearman_evaluation, "population", None)
+    pooled_spearman = getattr(spearman_evaluation, "pooled_spearman", None)
+    pooled_spearman_low_sample = (
+        int(spearman_evaluation.pooled_low_sample) if spearman_evaluation is not None else None
     )
+    median_of_fold_spearman = getattr(spearman_evaluation, "median_of_fold_spearman", None)
+    min_fold_spearman = getattr(spearman_evaluation, "min_fold_spearman", None)
+    max_fold_spearman = getattr(spearman_evaluation, "max_fold_spearman", None)
+    n_positive_spearman_folds = getattr(spearman_evaluation, "n_positive_folds", None)
+    n_spearman_folds_with_data = getattr(spearman_evaluation, "n_folds_with_data", None)
+
     conn.execute(
         """
         INSERT INTO calibration_runs (
@@ -1129,8 +1171,11 @@ def insert_calibration_run(
             training_window_start, training_window_end, oos_fold_years,
             n_total_candidates, pooled_n, pooled_median_excess_return_pct, pooled_low_sample,
             median_of_fold_medians_pct, min_fold_median_pct, max_fold_median_pct,
-            n_positive_folds, n_folds_with_data, metrics_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            n_positive_folds, n_folds_with_data, metrics_json,
+            subround, population, pooled_spearman, pooled_spearman_low_sample,
+            median_of_fold_spearman, min_fold_spearman, max_fold_spearman,
+            n_positive_spearman_folds, n_spearman_folds_with_data
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             calibration_run_id, evaluation.round, evaluation.candidate_name, evaluation.description,
@@ -1140,6 +1185,9 @@ def insert_calibration_run(
             int(evaluation.pooled_low_sample),
             evaluation.median_of_fold_medians_pct, evaluation.min_fold_median_pct, evaluation.max_fold_median_pct,
             evaluation.n_positive_folds, evaluation.n_folds_with_data, metrics_json,
+            subround, population, pooled_spearman, pooled_spearman_low_sample,
+            median_of_fold_spearman, min_fold_spearman, max_fold_spearman,
+            n_positive_spearman_folds, n_spearman_folds_with_data,
         ),
     )
 

@@ -52,8 +52,11 @@ from buffett_scanner.calibration import (
     OOS_FOLD_YEARS,
     PRIMARY_HORIZON_MONTHS,
     evaluate_candidate_configuration,
+    evaluate_candidate_configuration_spearman,
 )
 from buffett_scanner.calibration_round1 import ROUND_1_CANDIDATES
+from buffett_scanner.calibration_round2a import ROUND_2A_CANDIDATES
+from buffett_scanner.calibration_round2b import ROUND_2B_CANDIDATES
 from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
 from buffett_scanner.db import (
     clear_universe_membership_for_rebuild,
@@ -1423,14 +1426,18 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
     return 0
 
 
-_CALIBRATION_ROUND_REGISTRIES = {1: ROUND_1_CANDIDATES}
+_CALIBRATION_ROUND_REGISTRIES = {
+    "1": ROUND_1_CANDIDATES,
+    "2a": ROUND_2A_CANDIDATES,
+    "2b": ROUND_2B_CANDIDATES,
+}
 
 
 def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
     """Faza 5.4 — protokół kalibracji zatwierdzony przez właścicielkę
     2026-10-05 (z poprawkami, patrz docs/buffett-scanner-design-review.md,
-    sekcja "Faza 5.4"). Uruchamia JEDEN kandydat konfiguracji na OKNIE
-    KALIBRACYJNYM (2012-01-01..2021-12-01) — okno jest TU ZAWSZE
+    sekcja "Faza 5.4"/"Faza 5.4b"). Uruchamia JEDEN kandydat konfiguracji
+    na OKNIE KALIBRACYJNYM (2012-01-01..2021-12-01) — okno jest TU ZAWSZE
     HARDKODOWANE z `calibration.py`, NIGDY nie brane z `--window-end`
     użytkownika — to jest fizyczne zablokowanie holdoutu 2022-2026 przed
     przypadkowym dotknięciem w trakcie kalibracji (punkt 1 protokołu).
@@ -1438,14 +1445,28 @@ def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
     WYŁĄCZNIE głęboką kopię configu w pamięci (`CandidateConfig.apply`).
     Persystuje PEŁNE wyniki (backtest_candidates/coverage/benchmark pod
     własnym `run_id=calibration_run_id`) ORAZ zagregowaną ewaluację do
-    `calibration_runs` (NIGDY nie usuwana — audytowalność, punkt 11)."""
-    registry = _CALIBRATION_ROUND_REGISTRIES.get(args.round)
+    `calibration_runs` (NIGDY nie usuwana — audytowalność, punkt 11).
+
+    Round 2 (2A/2B, Faza 5.4b) wymaga `--subround a|b` — PRIMARY metric
+    tam to Spearman(`deterministic_score_pct`, forward return 6m), NIE
+    `pooled_median_excess_return_pct` (ta jest matematycznie niezależna
+    od wag scoringu w obecnym harnessie — znalezisko zgłoszone i
+    zatwierdzone PRZED napisaniem tego kodu, patrz Faza 5.4b punkt 0);
+    stara metryka nadal liczona/zapisana jako DIAGNOSTIC."""
+    if args.round == 2:
+        if args.subround not in ("a", "b"):
+            print("BŁĄD: Round 2 wymaga --subround a|b (2A=SAFETY+DIVIDEND, 2B=VALUATION).", file=sys.stderr)
+            return 1
+        registry_key = f"2{args.subround}"
+    else:
+        registry_key = str(args.round)
+    registry = _CALIBRATION_ROUND_REGISTRIES.get(registry_key)
     if registry is None:
-        print(f"BŁĄD: nieznana runda kalibracji {args.round} (dostępne: {sorted(_CALIBRATION_ROUND_REGISTRIES)})", file=sys.stderr)
+        print(f"BŁĄD: nieznana runda kalibracji {registry_key} (dostępne: {sorted(_CALIBRATION_ROUND_REGISTRIES)})", file=sys.stderr)
         return 1
     candidate = next((c for c in registry if c.name == args.candidate), None)
     if candidate is None:
-        print(f"BŁĄD: nieznany kandydat {args.candidate!r} w rundzie {args.round} "
+        print(f"BŁĄD: nieznany kandydat {args.candidate!r} w rundzie {registry_key} "
               f"(dostępne: {[c.name for c in registry]})", file=sys.stderr)
         return 1
 
@@ -1454,13 +1475,13 @@ def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
     config_text = Path(DEFAULT_CONFIG_PATH).read_text(encoding="utf-8")
     config_hash = f"config.yaml:{hashlib.sha256(config_text.encode()).hexdigest()[:16]}"
     config_json = config.model_dump_json()
-    calibration_run_id = f"calib-r{args.round}-{candidate.name}-" + dt.datetime.utcnow().strftime("%Y-%m-%dT%H%M%SZ")
+    calibration_run_id = f"calib-r{registry_key}-{candidate.name}-" + dt.datetime.utcnow().strftime("%Y-%m-%dT%H%M%SZ")
 
     conn = init_db(args.db)
     index_name = UNIVERSE_MEMBERSHIP_INDEX_NAME
     window_start, window_end = CALIBRATION_WINDOW_START, CALIBRATION_WINDOW_END
     decision_dates = generate_rebalance_dates(window_start, window_end, "MONTHLY")
-    print(f"Round {args.round}, kandydat={candidate.name!r} — {candidate.description}")
+    print(f"Round {registry_key}, kandydat={candidate.name!r} — {candidate.description}")
     print(f"Okno kalibracyjne (HARDKODOWANE, holdout 2022-2026 zablokowany): {window_start}..{window_end}, "
           f"{len(decision_dates)} decision dates, calibration_run_id={calibration_run_id}")
 
@@ -1542,26 +1563,52 @@ def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
     print(f"Łącznie kandydatów na oknie kalibracyjnym: {len(all_candidates)}")
 
     evaluation = evaluate_candidate_configuration(
-        candidate_name=candidate.name, round=args.round, description=candidate.description,
+        candidate_name=candidate.name, round=candidate.round, description=candidate.description,
         candidates=all_candidates, benchmark_snapshots=benchmark_snapshots,
     )
+
+    spearman_evaluation = None
+    if args.round == 2:
+        spearman_evaluation = evaluate_candidate_configuration_spearman(
+            candidate_name=candidate.name, round=candidate.round, subround=registry_key,
+            description=candidate.description, candidates=all_candidates,
+            require_valuation=(args.subround == "b"),
+        )
+
     insert_calibration_run(
         conn, calibration_run_id=calibration_run_id, evaluation=evaluation,
         config_hash=config_hash, config_json=config_json,
         training_window_start=window_start, training_window_end=window_end,
-        oos_fold_years=OOS_FOLD_YEARS,
+        oos_fold_years=OOS_FOLD_YEARS, spearman_evaluation=spearman_evaluation,
     )
     conn.commit()
 
-    print(f"\n== PRIMARY metric (horyzont {PRIMARY_HORIZON_MONTHS}m, vs equal_weighted_pit_universe) ==")
-    print(f"  A. Pooled OOS: n={evaluation.pooled_n} median_excess={evaluation.pooled_median_excess_return_pct} "
-          f"low_sample={evaluation.pooled_low_sample}")
-    print(f"  B. Fold stability:")
-    for m in evaluation.fold_metrics:
-        print(f"     {m.fold_year}: n={m.n} median_excess={m.median_excess_return_pct} low_sample={m.low_sample}")
-    print(f"     median_of_fold_medians={evaluation.median_of_fold_medians_pct} "
-          f"min={evaluation.min_fold_median_pct} max={evaluation.max_fold_median_pct} "
-          f"n_positive_folds={evaluation.n_positive_folds}/{evaluation.n_folds_with_data}")
+    if spearman_evaluation is not None:
+        print(f"\n== PRIMARY metric Round {registry_key} (Faza 5.4b): Spearman(deterministic_score_pct, "
+              f"forward return {PRIMARY_HORIZON_MONTHS}m), populacja={spearman_evaluation.population} ==")
+        print(f"  A. Pooled OOS: n={spearman_evaluation.pooled_n} spearman={spearman_evaluation.pooled_spearman} "
+              f"low_sample={spearman_evaluation.pooled_low_sample}")
+        print(f"  B. Fold stability:")
+        for m in spearman_evaluation.fold_metrics:
+            print(f"     {m.fold_year}: n={m.n} spearman={m.spearman} low_sample={m.low_sample}")
+        print(f"     median_of_fold_spearman={spearman_evaluation.median_of_fold_spearman} "
+              f"min={spearman_evaluation.min_fold_spearman} max={spearman_evaluation.max_fold_spearman} "
+              f"n_positive_folds={spearman_evaluation.n_positive_folds}/{spearman_evaluation.n_folds_with_data}")
+
+        print(f"\n== DIAGNOSTIC (Round 1 primary metric, NIE decyduje w Round 2 — "
+              f"matematycznie niezależna od wag, Faza 5.4b punkt 0) ==")
+        print(f"  Pooled OOS: n={evaluation.pooled_n} median_excess={evaluation.pooled_median_excess_return_pct} "
+              f"low_sample={evaluation.pooled_low_sample}")
+    else:
+        print(f"\n== PRIMARY metric (horyzont {PRIMARY_HORIZON_MONTHS}m, vs equal_weighted_pit_universe) ==")
+        print(f"  A. Pooled OOS: n={evaluation.pooled_n} median_excess={evaluation.pooled_median_excess_return_pct} "
+              f"low_sample={evaluation.pooled_low_sample}")
+        print(f"  B. Fold stability:")
+        for m in evaluation.fold_metrics:
+            print(f"     {m.fold_year}: n={m.n} median_excess={m.median_excess_return_pct} low_sample={m.low_sample}")
+        print(f"     median_of_fold_medians={evaluation.median_of_fold_medians_pct} "
+              f"min={evaluation.min_fold_median_pct} max={evaluation.max_fold_median_pct} "
+              f"n_positive_folds={evaluation.n_positive_folds}/{evaluation.n_folds_with_data}")
 
     print(f"\n== SECONDARY diagnostics (nigdy nie decydują o wyborze) ==")
     for s in evaluation.secondary:
@@ -1687,6 +1734,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_calibration.add_argument(
         "--candidate", required=True,
         help="Nazwa kandydata z rejestru tej rundy (patrz calibration_round<N>.py).",
+    )
+    p_calibration.add_argument(
+        "--subround", choices=("a", "b"), default=None,
+        help="Wymagane dla --round 2 (Faza 5.4b): a=2A SAFETY+DIVIDEND, b=2B VALUATION.",
     )
     p_calibration.add_argument(
         "--sample", default=None,

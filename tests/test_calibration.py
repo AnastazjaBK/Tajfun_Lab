@@ -12,12 +12,17 @@ from buffett_scanner.calibration import (
     LOW_SAMPLE_THRESHOLD,
     OOS_FOLD_YEARS,
     derive_practical_tie_epsilon,
+    derive_practical_tie_epsilon_spearman,
     evaluate_candidate_configuration,
+    evaluate_candidate_configuration_spearman,
     practical_tie,
 )
 
 
-def _candidate(decision_date: str, *, return_6m=None, return_1m=None, score_pct=None, cik="1") -> BacktestCandidate:
+def _candidate(
+    decision_date: str, *, return_6m=None, return_1m=None, score_pct=None, cik="1",
+    margin_of_safety_base_pct=None,
+) -> BacktestCandidate:
     return BacktestCandidate(
         run_id="test", decision_date=decision_date, cik=cik, ticker_as_of_date=cik,
         decision_price=10.0, decline_flags={"daily_decline": True},
@@ -26,7 +31,7 @@ def _candidate(decision_date: str, *, return_6m=None, return_1m=None, score_pct=
         dividend_score=2.0, full_score=None, deterministic_partial_score=7.0,
         deterministic_score_pct=score_pct, available_components=("safety", "dividend"),
         missing_components=("business_quality", "fear", "valuation"),
-        hard_gate_passed=True, hard_gate_triggered=(), margin_of_safety_base_pct=None,
+        hard_gate_passed=True, hard_gate_triggered=(), margin_of_safety_base_pct=margin_of_safety_base_pct,
         config_version="test", scoring_version="test", universe_provenance="test",
         forward_returns=ForwardReturns(
             return_1m_pct=return_1m, return_3m_pct=None, return_6m_pct=return_6m, return_12m_pct=None,
@@ -185,3 +190,129 @@ def test_practical_tie_rule():
     assert practical_tie(10.0, 10.5, epsilon=1.0) is True
     assert practical_tie(10.0, 12.0, epsilon=1.0) is False
     assert practical_tie(None, 10.0, epsilon=1.0) is False
+
+
+# ---------------------------------------------------------------------------
+# PRIMARY metric Round 2A/2B (Faza 5.4b): Spearman(score, forward return),
+# zastępuje pooled_median_excess_return_pct WYŁĄCZNIE w tych podrundach.
+# ---------------------------------------------------------------------------
+
+
+def test_spearman_evaluation_excludes_warmup_2012_2015():
+    candidates = [
+        _candidate("2013-06-01", score_pct=10.0, return_6m=1.0, cik="1"),
+        _candidate("2013-07-01", score_pct=50.0, return_6m=5.0, cik="2"),
+        _candidate("2013-08-01", score_pct=90.0, return_6m=9.0, cik="3"),
+    ]
+    evaluation = evaluate_candidate_configuration_spearman(
+        candidate_name="x", round=2, subround="2a", description="d",
+        candidates=candidates, require_valuation=False,
+    )
+    assert evaluation.pooled_n == 0
+    assert evaluation.pooled_spearman is None
+    assert evaluation.population == "FULL_PARTIAL_MODEL"
+
+
+def test_spearman_evaluation_perfect_positive_correlation_pooled():
+    candidates = [
+        _candidate("2016-06-01", score_pct=10.0, return_6m=1.0, cik="1"),
+        _candidate("2016-07-01", score_pct=50.0, return_6m=5.0, cik="2"),
+        _candidate("2016-08-01", score_pct=90.0, return_6m=9.0, cik="3"),
+    ]
+    evaluation = evaluate_candidate_configuration_spearman(
+        candidate_name="x", round=2, subround="2a", description="d",
+        candidates=candidates, require_valuation=False,
+    )
+    assert evaluation.pooled_n == 3
+    assert evaluation.pooled_spearman == pytest.approx(1.0)
+    by_year = {m.fold_year: m for m in evaluation.fold_metrics}
+    assert by_year[2016].spearman == pytest.approx(1.0)
+    assert by_year[2016].n == 3
+    # lata bez danych nadal obecne w raporcie, ale z rho=None (nie 0 -- brak
+    # korelacji policzalnej to nie to samo co korelacja zerowa):
+    assert by_year[2017].n == 0
+    assert by_year[2017].spearman is None
+    assert set(by_year) == set(OOS_FOLD_YEARS)
+    assert evaluation.n_folds_with_data == 1
+    assert evaluation.n_positive_folds == 1
+
+
+def test_spearman_evaluation_fewer_than_3_points_in_fold_gives_none_not_zero():
+    candidates = [
+        _candidate("2016-06-01", score_pct=10.0, return_6m=1.0, cik="1"),
+        _candidate("2016-07-01", score_pct=50.0, return_6m=5.0, cik="2"),
+    ]
+    evaluation = evaluate_candidate_configuration_spearman(
+        candidate_name="x", round=2, subround="2a", description="d",
+        candidates=candidates, require_valuation=False,
+    )
+    by_year = {m.fold_year: m for m in evaluation.fold_metrics}
+    assert by_year[2016].n == 2
+    assert by_year[2016].spearman is None
+    assert evaluation.pooled_spearman is None  # pooled też <3 punktów
+
+
+def test_spearman_evaluation_require_valuation_filters_to_complete_valuation_subset():
+    candidates = [
+        _candidate("2016-06-01", score_pct=10.0, return_6m=1.0, cik="1", margin_of_safety_base_pct=None),
+        _candidate("2016-07-01", score_pct=50.0, return_6m=5.0, cik="2", margin_of_safety_base_pct=12.0),
+        _candidate("2016-08-01", score_pct=90.0, return_6m=9.0, cik="3", margin_of_safety_base_pct=-3.0),
+        _candidate("2016-09-01", score_pct=30.0, return_6m=3.0, cik="4", margin_of_safety_base_pct=0.0),
+    ]
+    evaluation = evaluate_candidate_configuration_spearman(
+        candidate_name="x", round=2, subround="2b", description="d",
+        candidates=candidates, require_valuation=True,
+    )
+    # kandydat "1" (margin_of_safety_base_pct=None) wykluczony -- dostępność
+    # wyceny jest własnością danych, nie wagi (Faza 5.4b punkt 0/4).
+    assert evaluation.pooled_n == 3
+    assert evaluation.population == "COMPLETE_VALUATION_SUBSET"
+
+
+def test_spearman_evaluation_low_sample_flag_does_not_remove_fold():
+    candidates = [
+        _candidate("2016-06-01", score_pct=10.0, return_6m=1.0, cik="1"),
+        _candidate("2016-07-01", score_pct=50.0, return_6m=5.0, cik="2"),
+        _candidate("2016-08-01", score_pct=90.0, return_6m=9.0, cik="3"),
+    ]
+    evaluation = evaluate_candidate_configuration_spearman(
+        candidate_name="x", round=2, subround="2a", description="d",
+        candidates=candidates, require_valuation=False,
+    )
+    fold_2016 = next(m for m in evaluation.fold_metrics if m.fold_year == 2016)
+    assert fold_2016.n == 3 < LOW_SAMPLE_THRESHOLD
+    assert fold_2016.low_sample is True
+    assert fold_2016.spearman is not None  # nie usunięte, tylko oflagowane
+    assert evaluation.pooled_low_sample is True
+
+
+def test_derive_practical_tie_epsilon_spearman_is_fold_spearman_population_stdev():
+    candidates = [
+        _candidate("2016-06-01", score_pct=10.0, return_6m=1.0, cik="1"),
+        _candidate("2016-07-01", score_pct=50.0, return_6m=5.0, cik="2"),
+        _candidate("2016-08-01", score_pct=90.0, return_6m=9.0, cik="3"),
+        _candidate("2017-06-01", score_pct=10.0, return_6m=9.0, cik="4"),
+        _candidate("2017-07-01", score_pct=50.0, return_6m=5.0, cik="5"),
+        _candidate("2017-08-01", score_pct=90.0, return_6m=1.0, cik="6"),
+    ]
+    default = evaluate_candidate_configuration_spearman(
+        candidate_name="2a_default", round=2, subround="2a", description="d",
+        candidates=candidates, require_valuation=False,
+    )
+    # fold 2016 -> rho=+1.0 (monotonicznie rosnący), fold 2017 -> rho=-1.0
+    # (monotonicznie opadający) -- pstdev([1.0, -1.0]) = 1.0.
+    epsilon = derive_practical_tie_epsilon_spearman(default)
+    assert epsilon == pytest.approx(1.0)
+
+
+def test_derive_practical_tie_epsilon_spearman_none_with_insufficient_folds():
+    candidates = [
+        _candidate("2016-06-01", score_pct=10.0, return_6m=1.0, cik="1"),
+        _candidate("2016-07-01", score_pct=50.0, return_6m=5.0, cik="2"),
+        _candidate("2016-08-01", score_pct=90.0, return_6m=9.0, cik="3"),
+    ]
+    default = evaluate_candidate_configuration_spearman(
+        candidate_name="2a_default", round=2, subround="2a", description="d",
+        candidates=candidates, require_valuation=False,
+    )
+    assert derive_practical_tie_epsilon_spearman(default) is None

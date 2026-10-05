@@ -249,6 +249,150 @@ def evaluate_candidate_configuration(
     )
 
 
+def _score_return_triples(
+    candidates: list[BacktestCandidate],
+    horizon: int,
+    *,
+    oos_only: bool,
+    require_valuation: bool,
+) -> list[tuple[int, float, float]]:
+    """(fold_year, deterministic_score_pct, forward_return_pct) dla
+    kandydatów z dostępnym score i forward return. `require_valuation=True`
+    -> COMPLETE-VALUATION SUBSET (Round 2B, punkt 4 Faza 5.4b): filtr na
+    `margin_of_safety_base_pct is not None` -- własność DANYCH (czy
+    wycena się policzyła), nie wagi (`valuation_weight` skaluje wynik,
+    nigdy nie bramkuje jego dostępności, zweryfikowane empirycznie przed
+    Round 2A/2B -- patrz Faza 5.4b punkt 0). Filtr jest więc identyczny
+    dla każdego kandydata wag w tej podrundzie, z konstrukcji."""
+    horizon_attr = f"return_{horizon}m_pct"
+    out: list[tuple[int, float, float]] = []
+    for c in candidates:
+        year = _year(c.decision_date)
+        if oos_only and year not in OOS_FOLD_YEARS:
+            continue
+        if require_valuation and c.margin_of_safety_base_pct is None:
+            continue
+        if c.deterministic_score_pct is None:
+            continue
+        if c.forward_returns is None:
+            continue
+        ret = getattr(c.forward_returns, horizon_attr)
+        if ret is None:
+            continue
+        out.append((year, c.deterministic_score_pct, ret))
+    return out
+
+
+@dataclass(frozen=True)
+class SpearmanFoldMetric:
+    fold_year: int
+    n: int
+    low_sample: bool
+    spearman: float | None
+
+
+@dataclass(frozen=True)
+class SpearmanCalibrationEvaluation:
+    """PRIMARY metric dla Round 2A/2B (Faza 5.4b) -- Spearman correlation
+    `deterministic_score_pct` vs forward excess return (PRIMARY_HORIZON_MONTHS,
+    vs equal_weighted_pit_universe BENCHMARK pośrednio -- tu liczymy
+    korelację rang score-vs-RAW forward return, nie score-vs-excess, bo
+    ranking kandydatów w danym decision_date jest wystarczający do pytania
+    "czy wyższy score -> wyższy późniejszy wynik"; benchmark w tym samym
+    dniu jest stały dla wszystkich kandydatów tej daty, więc nie zmienia
+    RANGU różnic między nimi w ramach dnia -- Spearman jest niezmienny
+    na przesunięcie o stałą w ramach tej samej daty decyzji)."""
+
+    candidate_name: str
+    round: int
+    subround: str  # "2a" | "2b"
+    description: str
+    population: str  # "FULL_PARTIAL_MODEL" | "COMPLETE_VALUATION_SUBSET"
+    n_total_candidates: int
+    pooled_n: int
+    pooled_spearman: float | None
+    pooled_low_sample: bool
+    fold_metrics: tuple[SpearmanFoldMetric, ...]
+    median_of_fold_spearman: float | None
+    min_fold_spearman: float | None
+    max_fold_spearman: float | None
+    n_positive_folds: int
+    n_folds_with_data: int
+
+
+def evaluate_candidate_configuration_spearman(
+    *,
+    candidate_name: str,
+    round: int,
+    subround: str,
+    description: str,
+    candidates: list[BacktestCandidate],
+    require_valuation: bool,
+) -> SpearmanCalibrationEvaluation:
+    """PRIMARY metric Round 2A/2B (Faza 5.4b) -- zastępuje
+    `pooled_median_excess_return_pct` WYŁĄCZNIE dla tych podrund (Round 1
+    primary metric bez zmian, reagowała poprawnie na testowane parametry).
+    `require_valuation=True` -> Round 2B (COMPLETE-VALUATION SUBSET),
+    `False` -> Round 2A (pełny partial model, jak Round 1)."""
+    triples = _score_return_triples(
+        candidates, PRIMARY_HORIZON_MONTHS, oos_only=True, require_valuation=require_valuation,
+    )
+    pooled_n = len(triples)
+    pooled_rho = (
+        _spearman_rho([t[1] for t in triples], [t[2] for t in triples]) if pooled_n >= 3 else None
+    )
+
+    fold_metrics: list[SpearmanFoldMetric] = []
+    fold_rhos: list[float] = []
+    for year in OOS_FOLD_YEARS:
+        year_triples = [t for t in triples if t[0] == year]
+        n = len(year_triples)
+        rho = (
+            _spearman_rho([t[1] for t in year_triples], [t[2] for t in year_triples])
+            if n >= 3
+            else None
+        )
+        if rho is not None:
+            fold_rhos.append(rho)
+        fold_metrics.append(
+            SpearmanFoldMetric(fold_year=year, n=n, low_sample=n < LOW_SAMPLE_THRESHOLD, spearman=rho)
+        )
+
+    return SpearmanCalibrationEvaluation(
+        candidate_name=candidate_name,
+        round=round,
+        subround=subround,
+        description=description,
+        population="COMPLETE_VALUATION_SUBSET" if require_valuation else "FULL_PARTIAL_MODEL",
+        n_total_candidates=len(candidates),
+        pooled_n=pooled_n,
+        pooled_spearman=pooled_rho,
+        pooled_low_sample=pooled_n < LOW_SAMPLE_THRESHOLD,
+        fold_metrics=tuple(fold_metrics),
+        median_of_fold_spearman=statistics.median(fold_rhos) if fold_rhos else None,
+        min_fold_spearman=min(fold_rhos) if fold_rhos else None,
+        max_fold_spearman=max(fold_rhos) if fold_rhos else None,
+        n_positive_folds=sum(1 for r in fold_rhos if r > 0),
+        n_folds_with_data=len(fold_rhos),
+    )
+
+
+def derive_practical_tie_epsilon_spearman(
+    default_evaluation: SpearmanCalibrationEvaluation,
+) -> float | None:
+    """Epsilon "practical tie rule" dla skali Spearman (Faza 5.4b punkt 2)
+    -- population stdev Spearman-ów z 6 foldów OOS kandydata `default`
+    DANEJ PODRUNDY (2a_default lub 2b_default), policzony PRZED
+    porównaniem jakiegokolwiek innego kandydata tej podrundy. Epsilon
+    Round 1 (skala median excess return, pp) NIE jest tu przenoszony --
+    inna metryka, inna skala (wymóg właścicielki, Faza 5.4b punkt 2).
+    None, jeśli `default` ma <2 foldy z danymi."""
+    fold_rhos = [m.spearman for m in default_evaluation.fold_metrics if m.spearman is not None]
+    if len(fold_rhos) < 2:
+        return None
+    return statistics.pstdev(fold_rhos)
+
+
 def derive_practical_tie_epsilon(baseline_evaluation: CalibrationEvaluation) -> float | None:
     """Epsilon "practical tie rule" (punkt 9.7 protokołu) -- population
     stdev fold-median-ów BASELINE (nieskalibrowanego configu) na tych

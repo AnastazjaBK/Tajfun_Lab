@@ -111,3 +111,77 @@ def test_run_calibration_candidate_baseline_smoke_test_on_empty_db(tmp_path, cap
     assert len(rows) == 1
     assert rows[0]["candidate_name"] == "baseline"
     assert rows[0]["training_window_end"] == "2021-12-01"
+    assert rows[0]["pooled_spearman"] is None  # Round 1: PRIMARY pozostaje median excess, Spearman kolumny NULL
+
+
+# ---------------------------------------------------------------------------
+# run-calibration-candidate Round 2A/2B (Faza 5.4b, korekta metodologii
+# zatwierdzona 2026-10-05) -- wymagają --subround.
+# ---------------------------------------------------------------------------
+
+
+def test_run_calibration_candidate_round_2_without_subround_is_an_error(tmp_path, capsys):
+    db_path = tmp_path / "test.db"
+    init_db(db_path).close()
+    exit_code = cli.main([
+        "--db", str(db_path), "run-calibration-candidate", "--round", "2", "--candidate", "2a_default",
+    ])
+    assert exit_code == 1
+    assert "--subround" in capsys.readouterr().err
+
+
+def test_run_calibration_candidate_round_2a_unknown_candidate_is_an_error(tmp_path, capsys):
+    db_path = tmp_path / "test.db"
+    init_db(db_path).close()
+    exit_code = cli.main([
+        "--db", str(db_path), "run-calibration-candidate", "--round", "2", "--subround", "a", "--candidate", "nope",
+    ])
+    assert exit_code == 1
+    assert "nieznany kandydat" in capsys.readouterr().err
+
+
+def test_run_calibration_candidate_round_2a_smoke_test_on_empty_db(tmp_path, capsys):
+    """Round 2A (SAFETY+DIVIDEND) -- PRIMARY metric to Spearman, nie
+    median excess (Faza 5.4b). Smoke test na pustej bazie: pipeline musi
+    przejść od początku do końca i zapisać kolumny spearman_*."""
+    db_path = tmp_path / "test.db"
+    init_db(db_path).close()
+    exit_code = cli.main([
+        "--db", str(db_path), "run-calibration-candidate",
+        "--round", "2", "--subround", "a", "--candidate", "2a_default",
+    ])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "PRIMARY metric Round 2a (Faza 5.4b): Spearman" in out
+    assert "DIAGNOSTIC (Round 1 primary metric" in out
+
+    from buffett_scanner.db import connect, get_calibration_runs
+
+    conn = connect(db_path)
+    rows = get_calibration_runs(conn, round=2)
+    assert len(rows) == 1
+    assert rows[0]["candidate_name"] == "2a_default"
+    assert rows[0]["subround"] == "2a"
+    assert rows[0]["population"] == "FULL_PARTIAL_MODEL"
+    assert rows[0]["pooled_n"] == 0  # pusta baza
+    assert rows[0]["pooled_spearman"] is None
+
+
+def test_run_calibration_candidate_round_2b_smoke_test_on_empty_db(tmp_path, capsys):
+    """Round 2B (VALUATION) -- wyłącznie complete-valuation subset."""
+    db_path = tmp_path / "test.db"
+    init_db(db_path).close()
+    exit_code = cli.main([
+        "--db", str(db_path), "run-calibration-candidate",
+        "--round", "2", "--subround", "b", "--candidate", "2b_valuation_0",
+    ])
+    assert exit_code == 0
+
+    from buffett_scanner.db import connect, get_calibration_runs
+
+    conn = connect(db_path)
+    rows = get_calibration_runs(conn, round=2)
+    assert len(rows) == 1
+    assert rows[0]["candidate_name"] == "2b_valuation_0"
+    assert rows[0]["subround"] == "2b"
+    assert rows[0]["population"] == "COMPLETE_VALUATION_SUBSET"
