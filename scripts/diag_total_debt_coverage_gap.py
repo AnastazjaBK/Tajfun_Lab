@@ -284,6 +284,31 @@ def main() -> None:
     print(f"RECOVERABLE_VIA_JOINT_SELECTION (istnieje wspólny end w eligible): {recoverable_count} ({recoverable_count/len(diffs)*100:.1f}%)" if diffs else "n/a")
     print(f"TRUE_MISMATCH (żaden wspólny end nie istnieje nawet w pełnej eligible historii): {true_mismatch_count} ({true_mismatch_count/len(diffs)*100:.1f}%)" if diffs else "n/a")
 
+    staleness_all = [case["staleness_days"] for case in end_mismatch_cases if case.get("recoverable")]
+    staleness_by_year: dict[str, list[int]] = defaultdict(list)
+    for case in end_mismatch_cases:
+        if case.get("recoverable"):
+            staleness_by_year[case["date"][:4]].append(case["staleness_days"])
+
+    print(f"\n-- KLUCZOWE: staleness_dni = (decision_date - wspólny_end_użyty_do_odzyskania) --")
+    print("   Im wyższe, tym 'odzyskany' total_debt odpowiada STARSZEJ dacie bilansowej")
+    print("   niż to, co resolver indywidualnie wybrałby dla KAŻDEGO z dwóch tagów osobno.")
+    if staleness_all:
+        qs = statistics.quantiles(staleness_all, n=100, method="inclusive")
+        print(f"   n={len(staleness_all)}, min={min(staleness_all)}, max={max(staleness_all)}")
+        for p in (10, 25, 50, 75, 90, 95, 99):
+            print(f"   p{p}: {qs[p-1]:.0f} dni")
+        under_365 = sum(1 for s in staleness_all if s <= 365)
+        under_730 = sum(1 for s in staleness_all if s <= 730)
+        print(f"   <=365 dni (<=1 rok stale): {under_365} ({under_365/len(staleness_all)*100:.1f}%)")
+        print(f"   <=730 dni (<=2 lata stale): {under_730} ({under_730/len(staleness_all)*100:.1f}%)")
+        print(f"   >730 dni (>2 lata stale): {len(staleness_all)-under_730} ({(len(staleness_all)-under_730)/len(staleness_all)*100:.1f}%)")
+
+    print("\n   Mediana staleness per rok decision_date (trend w czasie):")
+    for year in sorted(staleness_by_year):
+        vals = staleness_by_year[year]
+        print(f"     {year}: n={len(vals)} median={statistics.median(vals):.0f} dni, p90={statistics.quantiles(vals, n=10, method='inclusive')[8]:.0f} dni" if len(vals) >= 2 else f"     {year}: n={len(vals)} vals={vals}")
+
     print("\nPrzykłady RECOVERABLE (cik, date, current.end wybrany, noncurrent.end wybrany, wspólny_end_istniejący, staleness_dni):")
     for ex in recoverable_examples:
         print(f"  {ex}")
