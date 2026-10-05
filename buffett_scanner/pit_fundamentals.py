@@ -66,12 +66,20 @@ Zasady (zatwierdzone przez właścicielkę 2026-10-02):
      automatycznie (ryzyko double counting, gdyby więcej niż jeden tag
      faktycznie reprezentował tę samą wielkość u danej spółki).
 
-`total_debt` POZOSTAJE jawnie `None` na tym etapie — w SEC XBRL nie ma
-jednego uniwersalnego tagu "total debt" (spółki różnie dzielą
-current/noncurrent/short-term borrowings), złożenie kompozytu
-analogicznego do EBITDA wymaga osobnej decyzji właścicielki (zgłoszone
-w audycie 2026-10-02, jeszcze nierozstrzygnięte) — fabrykowanie go teraz
-byłoby zgadywaniem zakresu wielkości, niedopuszczalnym wg §24."""
+`total_debt` (Faza 5.3f, Decyzje właścicielki 2026-10-04/05, po
+diagnostyce v1.46 + diagnostyce coverage gap 2026-10-05) jest KOMPOZYTEM
+policzonym przez `total_debt.compute_total_debt_as_of`, WYŁĄCZNIE z
+`target_end=end` (ta sama "kotwica" co pozostałe pola) — total_debt
+dla KONKRETNEGO rocznego okresu MUSI dotyczyć balance-sheet instant
+TEGO okresu, nigdy "najnowszego dostępnego" niezależnie od `end` (ta
+sama zasada "ten sam instant", która już chroni EBITDA, zasada 3
+niżej). Zaakceptowana hierarchia (patrz `total_debt.py`, docstring
+modułu, dla pełnej decyzji): Tier 1
+(CURRENT_PLUS_NONCURRENT/NOTES_PAYABLE_ONLY) + Tier 2
+(NONCURRENT_PLUS_DEBTCURRENT_SYNONYM, wyłącznie dla spółek, które NIGDY
+nie raportowały LongTermDebtCurrent). Tier 2a ("joint stale instant")
+jest ODRZUCONY (Decyzja F) — NIE istnieje w kodzie. `total_debt=None`,
+gdy żaden wariant nie daje bezpiecznego wyniku — NIGDY zero/imputacja."""
 
 from __future__ import annotations
 
@@ -79,6 +87,7 @@ import datetime as dt
 
 from buffett_scanner.fundamentals import FundamentalsPeriod
 from buffett_scanner.point_in_time import PitFact, find_first_matching_tag, value_as_of
+from buffett_scanner.total_debt import compute_total_debt_as_of
 
 # Koncepty "duration" — wymagają walidacji rzeczywistego czasu trwania
 # (patrz docstring modułu). Kolejność nieistotna (każdy traktowany
@@ -170,8 +179,9 @@ def build_annual_fundamentals_periods_as_of(
     jeśli złożono ją on/before `as_of_date`, nigdy przyszłą.
     `filed_date` okresu to NAJPÓŹNIEJSZA z dat `filed` użytych pól
     (konserwatywnie: okres jest "w pełni znany" dopiero, gdy WSZYSTKIE
-    jego użyte pola są znane). `total_debt` jest jawnie `None` (patrz
-    docstring modułu — decyzja o kompozycie jeszcze nierozstrzygnięta).
+    jego użyte pola są znane). `total_debt` jest kompozytem policzonym
+    przez `total_debt.compute_total_debt_as_of(..., target_end=end)` —
+    patrz docstring modułu (sekcja total_debt) i `total_debt.py`.
     `ebitda` jest kompozytem dwóch faktów (zasady 1-5, docstring modułu).
     Rok bez ŻADNEJ wartości `net_income`/`revenue` jest pomijany, nie
     generuje pustego wiersza. Posortowane rosnąco po `period_end_date`."""
@@ -216,6 +226,18 @@ def build_annual_fundamentals_periods_as_of(
             else None
         )
 
+        # total_debt: KOMPOZYT z `total_debt.py`, ZAWSZE `target_end=end`
+        # -- total_debt tego konkretnego rocznego okresu musi dotyczyć
+        # JEGO balance-sheet instant, nigdy "najnowszego dostępnego"
+        # niezależnie od `end` (ta sama zasada "ten sam instant" co
+        # EBITDA, zasada 3 wyżej). Komponentów użytych do total_debt
+        # `filed` wchodzi do `filed_dates` okresu -- okres jest "w pełni
+        # znany" dopiero, gdy WSZYSTKIE jego użyte pola (total_debt też)
+        # są znane.
+        total_debt_result = compute_total_debt_as_of(company_facts, as_of_date, target_end=end)
+        if total_debt_result.value is not None:
+            filed_dates.extend(p["filed"] for p in total_debt_result.component_provenance.values())
+
         periods.append(
             FundamentalsPeriod(
                 fiscal_period=f"FY{end[:4]}",
@@ -226,13 +248,15 @@ def build_annual_fundamentals_periods_as_of(
                 ebitda=ebitda,
                 operating_cash_flow=values.get("operating_cash_flow"),
                 capital_expenditure=values.get("capital_expenditure"),
-                total_debt=None,
+                total_debt=total_debt_result.value,
                 cash_and_equivalents=values.get("cash_and_equivalents"),
                 total_current_assets=values.get("total_current_assets"),
                 total_current_liabilities=values.get("total_current_liabilities"),
                 dividends_paid=values.get("dividends_paid"),
                 share_buybacks=values.get("share_buybacks"),
                 diluted_shares_outstanding=values.get("diluted_shares_outstanding"),
+                total_debt_resolution_method=total_debt_result.debt_resolution_method,
+                total_debt_confidence_tier=total_debt_result.confidence_tier,
             )
         )
     periods.sort(key=lambda p: p.period_end_date)

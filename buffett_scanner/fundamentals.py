@@ -38,6 +38,14 @@ class FundamentalsPeriod:
     dividends_paid: float | None = None  # konwencja: dodatnia kwota wypłacona
     share_buybacks: float | None = None  # konwencja: dodatnia kwota wydana na skup
     diluted_shares_outstanding: float | None = None
+    # Faza 5.3f — provenance `total_debt` (patrz total_debt.py, docstring
+    # modułu): jaki wariant hierarchii dał `total_debt` (albo None, jeśli
+    # total_debt is None) i jaki confidence tier. Pełna provenance per-
+    # komponent (component_tags/values/filed) zostaje w `TotalDebtResult`
+    # zwróconym przez `pit_fundamentals.py` do raportowania/audytu —
+    # tutaj tylko podsumowanie potrzebne do agregacji coverage w walk-forward.
+    total_debt_resolution_method: str | None = None
+    total_debt_confidence_tier: str | None = None
 
 
 def free_cash_flow(period: FundamentalsPeriod) -> float | None:

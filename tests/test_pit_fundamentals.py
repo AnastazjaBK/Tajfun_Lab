@@ -8,7 +8,8 @@ rzeczywistego czasu trwania faktu — filtr musi liczyć `end - start`.
 Rozszerzone (Faza 5.3b, dependency audit 2026-10-01/02): pokrycie
 12 pól FundamentalsPeriod, rozróżnienie duration/instant, kompozyt
 EBITDA (zasady 1-5 zatwierdzone przez właścicielkę 2026-10-02),
-total_debt pozostaje jawnie None (decyzja jeszcze nierozstrzygnięta)."""
+total_debt (Faza 5.3f) jest kompozytem z total_debt.py, zakotwiczonym
+do balance-sheet instant KAŻDEGO okresu (`target_end=end`)."""
 
 from __future__ import annotations
 
@@ -135,17 +136,64 @@ def test_build_annual_periods_uses_restatement_known_before_as_of_date():
     assert after_restatement[0].filed_date == "2024-11-01"
 
 
-def test_build_annual_periods_total_debt_always_none_decision_not_yet_made():
-    """total_debt jest jawnie None na tym etapie -- SEC XBRL nie ma
-    jednego uniwersalnego tagu, decyzja o kompozycie (current+noncurrent)
-    nie jest jeszcze podjęta (dependency audit 2026-10-02). Nigdy
-    fabrykowane, nawet gdyby jakiś tag przypadkiem pasował."""
+def test_build_annual_periods_total_debt_none_when_only_one_component_present():
+    """total_debt (Faza 5.3f, total_debt.py) jest None, gdy tylko jeden
+    z LongTermDebtCurrent/Noncurrent jest obecny i spółka nie kwalifikuje
+    się do żadnego fallbacku -- nigdy fabrykowane, nawet gdyby jakiś tag
+    przypadkiem pasował."""
     facts = make_company_facts({
         "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
         "LongTermDebtNoncurrent": [{"end": "2023-12-31", "val": 500.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
     })
     periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
     assert periods[0].total_debt is None
+    assert periods[0].total_debt_resolution_method == "INSUFFICIENT_DATA"
+    assert periods[0].total_debt_confidence_tier is None
+
+
+def test_build_annual_periods_total_debt_tier1_current_plus_noncurrent_anchored_to_period_end():
+    """total_debt MUSI dotyczyć balance-sheet instant TEGO konkretnego
+    rocznego okresu (`target_end=end`), nie "najnowszego dostępnego"
+    niezależnie od `end` -- ta sama zasada "ten sam instant", która już
+    chroni EBITDA. Spółka ma DWA roczne okresy; każdy dostaje total_debt
+    WŁASNEGO roku, nie zawsze najnowszego."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [
+            {"start": "2022-01-01", "end": "2022-12-31", "val": 80.0, "filed": "2023-02-01", "fy": 2022, "fp": "FY"},
+            {"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "LongTermDebtCurrent": [
+            {"end": "2022-12-31", "val": 10.0, "filed": "2023-02-01", "fy": 2022, "fp": "FY"},
+            {"end": "2023-12-31", "val": 20.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+        "LongTermDebtNoncurrent": [
+            {"end": "2022-12-31", "val": 400.0, "filed": "2023-02-01", "fy": 2022, "fp": "FY"},
+            {"end": "2023-12-31", "val": 500.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"},
+        ],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].period_end_date == "2022-12-31"
+    assert periods[0].total_debt == 410.0
+    assert periods[0].total_debt_resolution_method == "CURRENT_PLUS_NONCURRENT"
+    assert periods[0].total_debt_confidence_tier == "TIER_1"
+    assert periods[1].period_end_date == "2023-12-31"
+    assert periods[1].total_debt == 520.0
+
+
+def test_build_annual_periods_total_debt_tier2_synonym_when_never_reports_ltd_current():
+    """Faza 5.3f, Tier 2 NONCURRENT_PLUS_DEBTCURRENT_SYNONYM -- spółka
+    (wzorzec Realty Income-podobny, ale z noncurrent, nie NotesPayable
+    jako całość) nigdy nie raportuje LongTermDebtCurrent, tylko
+    DebtCurrent dla tego samego instant co LongTermDebtNoncurrent."""
+    facts = make_company_facts({
+        "NetIncomeLoss": [{"start": "2023-01-01", "end": "2023-12-31", "val": 90.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "LongTermDebtNoncurrent": [{"end": "2023-12-31", "val": 900.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+        "DebtCurrent": [{"end": "2023-12-31", "val": 100.0, "filed": "2024-02-01", "fy": 2023, "fp": "FY"}],
+    })
+    periods = build_annual_fundamentals_periods_as_of(facts, "2025-01-01")
+    assert periods[0].total_debt == 1000.0
+    assert periods[0].total_debt_resolution_method == "NONCURRENT_PLUS_DEBTCURRENT_SYNONYM"
+    assert periods[0].total_debt_confidence_tier == "TIER_2"
 
 
 def test_build_annual_periods_empty_company_facts_returns_empty_list():

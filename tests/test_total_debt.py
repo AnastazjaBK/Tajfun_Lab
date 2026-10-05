@@ -1,16 +1,18 @@
-"""Testy `total_debt` z SEC XBRL (Faza 5.3d/5.3e, Decyzja właścicielki
-2026-10-04, po diagnostyce v1.46). Scenariusze odtwarzają DOKŁADNIE
-przypadki znalezione na realnych danych 10 spółek (AAPL/MSFT/KO/
-TERADYNE/JABIL/PG&E/Constellation Energy/EQT/Realty Income/DOW),
-zgodnie z wymaganiem właścicielki "testy regresyjne na dokładnie tych
-przypadkach"."""
+"""Testy `total_debt` z SEC XBRL (Faza 5.3d/5.3e/5.3f, Decyzje
+właścicielki 2026-10-04/05). Scenariusze odtwarzają DOKŁADNIE przypadki
+znalezione na realnych danych 10 spółek (AAPL/MSFT/KO/TERADYNE/JABIL/
+PG&E/Constellation Energy/EQT/Realty Income/DOW), zgodnie z wymaganiem
+właścicielki "testy regresyjne na dokładnie tych przypadkach"."""
 
 from __future__ import annotations
 
 from buffett_scanner.total_debt import (
     CURRENT_PLUS_NONCURRENT,
     INSUFFICIENT_DATA,
+    NONCURRENT_PLUS_DEBTCURRENT_SYNONYM,
     NOTES_PAYABLE_ONLY,
+    TIER_1,
+    TIER_2,
     compute_total_debt_as_of,
 )
 
@@ -38,14 +40,21 @@ def test_current_plus_noncurrent_exact_identity_like_eqt():
     LongTermDebtCurrent(507,119,000) + LongTermDebtNoncurrent(7,293,209,000)
     -- zweryfikowana w diagnostyce v1.46."""
     facts = _facts({
-        "LongTermDebtCurrent": [_fact("2025-12-31", 507_119_000, "2026-02-18")],
-        "LongTermDebtNoncurrent": [_fact("2025-12-31", 7_293_209_000, "2026-02-18")],
+        "LongTermDebtCurrent": [_fact("2025-12-31", 507_119_000, "2026-02-18", form="10-K", accn="x", fy=2025, fp="FY")],
+        "LongTermDebtNoncurrent": [_fact("2025-12-31", 7_293_209_000, "2026-02-18", form="10-K", accn="x", fy=2025, fp="FY")],
     })
     result = compute_total_debt_as_of(facts, "2026-06-01")
     assert result.value == 7_800_328_000
-    assert result.variant == CURRENT_PLUS_NONCURRENT
-    assert result.as_of_end_date == "2025-12-31"
+    assert result.debt_resolution_method == CURRENT_PLUS_NONCURRENT
+    assert result.confidence_tier == TIER_1
+    assert result.balance_sheet_instant == "2025-12-31"
     assert result.reason is None
+    assert result.component_tags == ("LongTermDebtCurrent", "LongTermDebtNoncurrent")
+    assert result.component_values == {
+        "LongTermDebtCurrent": 507_119_000, "LongTermDebtNoncurrent": 7_293_209_000,
+    }
+    assert result.component_provenance["LongTermDebtCurrent"]["filed"] == "2026-02-18"
+    assert result.component_provenance["LongTermDebtCurrent"]["form"] == "10-K"
 
 
 def test_current_plus_noncurrent_is_pit_correct():
@@ -79,7 +88,8 @@ def test_missing_current_component_is_none_not_zero():
     })
     result = compute_total_debt_as_of(facts, "2025-06-01")
     assert result.value is None
-    assert result.variant == INSUFFICIENT_DATA
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
+    assert result.confidence_tier is None
     assert "LongTermDebtCurrent" in result.reason
 
 
@@ -93,7 +103,7 @@ def test_bare_long_term_debt_never_used_even_when_it_is_the_only_tag():
     })
     result = compute_total_debt_as_of(facts, "2026-06-01")
     assert result.value is None
-    assert result.variant == INSUFFICIENT_DATA
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
 
 
 def test_pge_like_scenario_long_term_debt_equals_noncurrent_only():
@@ -109,7 +119,8 @@ def test_pge_like_scenario_long_term_debt_equals_noncurrent_only():
     })
     result = compute_total_debt_as_of(facts, "2026-06-01")
     assert result.value == 58_208_000_000
-    assert result.variant == CURRENT_PLUS_NONCURRENT
+    assert result.debt_resolution_method == CURRENT_PLUS_NONCURRENT
+    assert result.confidence_tier == TIER_1
 
 
 def test_end_date_mismatch_between_current_and_noncurrent_is_none():
@@ -123,7 +134,8 @@ def test_end_date_mismatch_between_current_and_noncurrent_is_none():
     })
     result = compute_total_debt_as_of(facts, "2026-06-01")
     assert result.value is None
-    assert result.variant == INSUFFICIENT_DATA
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
+    assert result.confidence_tier is None
     assert "balance-sheet instant" in result.reason
 
 
@@ -141,7 +153,9 @@ def test_notes_payable_fallback_for_reit_like_company_never_using_ltd_family():
     })
     result = compute_total_debt_as_of(facts, "2026-06-01")
     assert result.value == 25_031_947_000
-    assert result.variant == NOTES_PAYABLE_ONLY
+    assert result.debt_resolution_method == NOTES_PAYABLE_ONLY
+    assert result.confidence_tier == TIER_1
+    assert result.component_tags == ("NotesPayable",)
     # Diagnostyczne, nigdy dodane do value:
     assert result.finance_lease_liability_supplemental == 121_434_000
     assert result.short_term_borrowings_supplemental == 516_800_000
@@ -159,7 +173,7 @@ def test_notes_payable_fallback_blocked_when_ltd_family_exists_elsewhere_eqt_tra
     })
     result = compute_total_debt_as_of(facts, "2020-06-01")
     assert result.value is None
-    assert result.variant == INSUFFICIENT_DATA
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
     assert "EQT" in result.reason or "NotesPayable-fallback" in result.reason
 
 
@@ -167,7 +181,8 @@ def test_notes_payable_absent_and_ltd_family_entirely_absent_is_none():
     facts = _facts({})
     result = compute_total_debt_as_of(facts, "2020-06-01")
     assert result.value is None
-    assert result.variant == INSUFFICIENT_DATA
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
+    assert result.confidence_tier is None
 
 
 # ---------------------------------------------------------------------------
@@ -189,7 +204,7 @@ def test_and_capital_lease_obligations_combined_tag_never_used_dow_like():
     })
     result = compute_total_debt_as_of(facts, "2026-06-01")
     assert result.value is None
-    assert result.variant == INSUFFICIENT_DATA
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
     # Diagnostyczne pole leasingu MUSI byc policzone (current+noncurrent,
     # ten sam end_date), ale nigdy wplywa na `value`.
     assert result.finance_lease_liability_supplemental == 804_000_000
@@ -214,4 +229,106 @@ def test_debt_instrument_carrying_amount_never_used_as_total():
     })
     result = compute_total_debt_as_of(facts, "2026-06-01")
     assert result.value is None
-    assert result.variant == INSUFFICIENT_DATA
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
+
+
+# ---------------------------------------------------------------------------
+# Decyzja F (2026-10-05): Tier 2 NONCURRENT_PLUS_DEBTCURRENT_SYNONYM --
+# wylacznie gdy spolka NIGDY (cala historia) nie raportowala
+# LongTermDebtCurrent. Tier 2a (joint stale instant) ODRZUCONY -- nie
+# implementowany w ogole, zero testu "na to", bo nie istnieje w kodzie.
+# ---------------------------------------------------------------------------
+
+
+def test_tier2_synonym_fires_when_company_never_reports_ltd_current_anywhere():
+    facts = _facts({
+        "LongTermDebtNoncurrent": [_fact("2024-12-31", 900.0, "2025-02-01")],
+        "DebtCurrent": [_fact("2024-12-31", 100.0, "2025-02-01")],
+    })
+    result = compute_total_debt_as_of(facts, "2025-06-01")
+    assert result.value == 1000.0
+    assert result.debt_resolution_method == NONCURRENT_PLUS_DEBTCURRENT_SYNONYM
+    assert result.confidence_tier == TIER_2
+    assert result.balance_sheet_instant == "2024-12-31"
+    assert result.component_tags == ("LongTermDebtNoncurrent", "DebtCurrent")
+    assert result.component_values == {"LongTermDebtNoncurrent": 900.0, "DebtCurrent": 100.0}
+
+
+def test_tier2_synonym_blocked_when_company_reports_ltd_current_in_any_other_period():
+    """Nawet jesli LongTermDebtCurrent akurat brakuje NA TA date, warunek
+    wylacznosci dotyczy CALEJ historii -- jesli spolka kiedykolwiek go
+    uzyla (inny rok), DebtCurrent MOZE byc jego aliasem u tej spolki,
+    wiec Tier 2 MUSI byc zablokowany."""
+    facts = _facts({
+        "LongTermDebtNoncurrent": [_fact("2024-12-31", 900.0, "2025-02-01")],
+        "DebtCurrent": [_fact("2024-12-31", 100.0, "2025-02-01")],
+        # LongTermDebtCurrent zglaszany w INNYM roku -- blokuje wylacznosc:
+        "LongTermDebtCurrent": [_fact("2020-12-31", 50.0, "2021-02-01")],
+    })
+    result = compute_total_debt_as_of(facts, "2025-06-01")
+    assert result.value is None
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
+    assert result.confidence_tier is None
+
+
+def test_tier2_synonym_requires_same_instant_as_noncurrent():
+    """DebtCurrent istnieje, ale dla INNEGO balance-sheet instant niz
+    LongTermDebtNoncurrent -- Tier 2 MUSI byc None, nigdy zsumowane
+    przez przypadek dwoch roznych dat."""
+    facts = _facts({
+        "LongTermDebtNoncurrent": [_fact("2024-12-31", 900.0, "2025-02-01")],
+        "DebtCurrent": [_fact("2023-12-31", 100.0, "2024-02-01")],
+    })
+    result = compute_total_debt_as_of(facts, "2025-06-01")
+    assert result.value is None
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
+
+
+def test_tier2_synonym_not_used_when_noncurrent_also_missing():
+    """Current i noncurrent oba None -- to jest domena NotesPayable-
+    fallbacku (Tier 1b) albo NO_FAMILY, nigdy Tier 2 (Tier 2 wymaga
+    noncurrent PRESENT)."""
+    facts = _facts({
+        "DebtCurrent": [_fact("2024-12-31", 100.0, "2025-02-01")],
+    })
+    result = compute_total_debt_as_of(facts, "2025-06-01")
+    assert result.value is None
+    assert result.debt_resolution_method == INSUFFICIENT_DATA
+
+
+# ---------------------------------------------------------------------------
+# `target_end` (Faza 5.3f) -- filtruje wszystkie komponenty do konkretnego
+# balance-sheet instant, wymagane do poprawnego wpiecia per-FundamentalsPeriod.
+# ---------------------------------------------------------------------------
+
+
+def test_target_end_restricts_to_specific_instant_ignoring_newer_data():
+    """Spolka ma dwa roczne instanty; target_end=starszy MUSI zwrocic
+    total_debt TEGO roku, nie najnowszego, nawet gdy najnowszy jest PIT-
+    dostepny na as_of_date."""
+    facts = _facts({
+        "LongTermDebtCurrent": [
+            _fact("2023-12-31", 50.0, "2024-02-01"),
+            _fact("2024-12-31", 60.0, "2025-02-01"),
+        ],
+        "LongTermDebtNoncurrent": [
+            _fact("2023-12-31", 500.0, "2024-02-01"),
+            _fact("2024-12-31", 600.0, "2025-02-01"),
+        ],
+    })
+    result = compute_total_debt_as_of(facts, "2025-06-01", target_end="2023-12-31")
+    assert result.value == 550.0
+    assert result.balance_sheet_instant == "2023-12-31"
+
+
+def test_target_end_missing_component_for_that_instant_is_none_not_fallback_to_other_year():
+    facts = _facts({
+        "LongTermDebtCurrent": [_fact("2024-12-31", 60.0, "2025-02-01")],
+        "LongTermDebtNoncurrent": [
+            _fact("2023-12-31", 500.0, "2024-02-01"),
+            _fact("2024-12-31", 600.0, "2025-02-01"),
+        ],
+    })
+    result = compute_total_debt_as_of(facts, "2025-06-01", target_end="2023-12-31")
+    assert result.value is None
+    assert result.debt_resolution_method == INSUFFICIENT_DATA

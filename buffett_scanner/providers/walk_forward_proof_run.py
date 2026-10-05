@@ -20,13 +20,18 @@ Sprawdza WPROST (nie tylko przez brak wyjątku):
   5. pełny decision snapshot + run_id + wersje configu/scoringu.
 
 ROZSZERZONY ZAKRES DANYCH FUNDAMENTALNYCH (Faza 5.3b, dependency audit
-2026-10-01/02, patrz `pit_fundamentals.py`): 11 z 12 wymaganych pól z
+2026-10-01/02, patrz `pit_fundamentals.py`): 12 z 12 wymaganych pól z
 rocznych (10-K) faktów SEC XBRL, włącznie z kompozytem EBITDA
 (OperatingIncomeLoss + D&A, zasady 1-5 zatwierdzone przez właścicielkę
-2026-10-02). `total_debt` jest jawnie None (brak jednego uniwersalnego
-tagu SEC XBRL — decyzja o kompozycie current/noncurrent jeszcze
-nierozstrzygnięta) — to NIE jest ocena jakości tych spółek, tylko znana
-granica tego etapu.
+2026-10-02) i `total_debt` (Faza 5.3f, Decyzje właścicielki 2026-10-04/
+05 po diagnostyce v1.46 + diagnostyce coverage gap — Tier 1
+CURRENT_PLUS_NONCURRENT/NOTES_PAYABLE_ONLY + Tier 2
+NONCURRENT_PLUS_DEBTCURRENT_SYNONYM, patrz `total_debt.py`). AAPL/MSFT/
+KO są wszystkie GENERAL i raportują current+noncurrent -- oczekiwane
+Tier 1 u wszystkich trzech, to NIE jest reprezentatywne dla całego
+universe (patrz diagnostyka coverage gap 2026-10-05: 38.71%/40.90%
+overall), tylko potwierdzenie, że ścieżka Tier 1 działa na realnych
+danych przed pełnym baseline.
 
 WYŁĄCZNIE DIAGNOSTYCZNE — nic nie zapisuje do bazy.
 
@@ -55,10 +60,11 @@ from buffett_scanner.providers.fmp import FMPClient, FMPError
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
 from buffett_scanner.point_in_time import CANDIDATE_TAGS, find_first_matching_tag, value_as_of
 from buffett_scanner.scanner import PriceBar
+from buffett_scanner.total_debt import compute_total_debt_as_of
 
 # 12 pol FundamentalsPeriod wymaganych przez istniejacy deterministic
-# pipeline (dependency audit 2026-10-01/02) -- total_debt swiadomie
-# wylaczone z tej listy, patrz komentarz w _diagnose_fields_for_period.
+# pipeline (dependency audit 2026-10-01/02) -- total_debt diagnozowany
+# osobno (kompozyt, nie prosty tag-lookup), patrz _diagnose_fields_for_period.
 SIMPLE_FIELD_CONCEPTS = DURATION_CONCEPTS + INSTANT_CONCEPTS
 
 SAMPLE_TICKERS = ("AAPL", "MSFT", "KO")
@@ -173,12 +179,15 @@ def _diagnose_fields_for_period(company_facts: dict, *, period_end: str, as_of_d
         _print_field_row(_diagnose_one_concept(company_facts, concept, period_end=period_end, as_of_date=as_of_date, is_instant=False))
     for concept in INSTANT_CONCEPTS:
         _print_field_row(_diagnose_one_concept(company_facts, concept, period_end=period_end, as_of_date=as_of_date, is_instant=True))
-    print(
-        "      total_debt                   tag=N/A — NOT_IMPLEMENTED: SEC XBRL nie ma jednego "
-        "uniwersalnego tagu total debt (current/noncurrent/short-term borrowings dzielone różnie "
-        "między spółkami); kompozyt wymaga osobnej decyzji właścicielki (dependency audit "
-        "2026-10-02, jeszcze nierozstrzygnięte) — jawnie None, nigdy zgadywane."
-    )
+    total_debt_result = compute_total_debt_as_of(company_facts, as_of_date, target_end=period_end)
+    if total_debt_result.value is not None:
+        print(
+            f"      total_debt                   method={total_debt_result.debt_resolution_method} "
+            f"tier={total_debt_result.confidence_tier} value={total_debt_result.value} "
+            f"components={total_debt_result.component_values}"
+        )
+    else:
+        print(f"      total_debt                   value=None reason={total_debt_result.reason!r}")
     print("      -- składniki EBITDA (kompozyt, zasady 1-5) --")
     component_rows = {}
     for concept in EBITDA_COMPONENT_CONCEPTS:
@@ -378,15 +387,16 @@ def main() -> int:
             )
 
         print(
-            "\nUWAGA: deterministic_score w tym Proof Run pokrywa 11 z 12 wymaganych pól "
+            "\nUWAGA: deterministic_score w tym Proof Run pokrywa 12 z 12 wymaganych pól "
             "(dependency audit 2026-10-01/02) — PIT z SEC XBRL rocznych 10-K, włącznie z "
-            "kompozytem EBITDA (OperatingIncomeLoss + D&A). `total_debt` jest jawnie None "
-            "(brak jednego uniwersalnego tagu SEC XBRL — decyzja o kompozycie current/noncurrent "
-            "jeszcze nierozstrzygnięta), co obniża net_debt_to_ebitda/net_debt do None tam, gdzie "
-            "total_debt byłby potrzebny. Scores mogą być niższe niż po ostatecznym rozstrzygnięciu "
-            "total_debt; to znana granica tego etapu, nie ocena jakości tych spółek. full_score "
-            "jest zawsze None (brak historycznego LLM, zgodnie z decyzją właścicielki) — nigdy nie "
-            "prezentować jako pełnego wyniku."
+            "kompozytem EBITDA (OperatingIncomeLoss + D&A) i total_debt (Faza 5.3f, Tier 1/2, "
+            "patrz total_debt.py). total_debt/valuation są None tam, gdzie żaden wariant "
+            "hierarchii nie daje bezpiecznego wyniku (nigdy zero/imputacja) — AAPL/MSFT/KO "
+            "oczekiwane Tier 1 (wszystkie raportują current+noncurrent), ale to nie jest "
+            "reprezentatywne dla całego universe (diagnostyka coverage gap 2026-10-05: "
+            "38.71%/40.90% overall high-confidence coverage). full_score jest zawsze None "
+            "(brak historycznego LLM, zgodnie z decyzją właścicielki) — nigdy nie prezentować "
+            "jako pełnego wyniku."
         )
 
     return 0
