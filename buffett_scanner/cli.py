@@ -595,6 +595,15 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
     thresholds = config.decline_scanner.thresholds
     run_date = dt.date.today().isoformat()
 
+    upsert_scoring_model_version(
+        conn,
+        version=config.scoring.version,
+        description=f"status={config.scoring.status}",
+        weights_json=json.dumps(config.scoring.weights.model_dump()),
+        gates_json=json.dumps(config.hard_gates.model_dump()),
+    )
+    conn.commit()
+
     if not args.skip_universe_refresh:
         with FMPClient(fmp_key) as client:
             try:
