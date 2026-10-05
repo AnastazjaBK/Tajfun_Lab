@@ -565,6 +565,18 @@ def get_cik_for_active_ticker(conn: sqlite3.Connection, ticker: str) -> str | No
     return rows[0]["cik"]
 
 
+def list_active_tickers(conn: sqlite3.Connection) -> list[str]:
+    """Wszystkie tickery aktualnie (`end_date IS NULL`) aktywne w
+    `ticker_history` — "aktualne uniwersum" dla Fazy 6 (live end-to-end
+    run na całym rynku, nie na jawnie podanej liście tickerów jak
+    `scan`/`score`/`analyze`). Alfabetycznie, dla deterministycznego
+    porządku przetwarzania/raportu."""
+    rows = conn.execute(
+        "SELECT ticker FROM ticker_history WHERE end_date IS NULL ORDER BY ticker"
+    ).fetchall()
+    return [r["ticker"] for r in rows]
+
+
 def insert_price_rows(conn: sqlite3.Connection, cik: str, source: str, rows: list[dict]) -> int:
     """rows: [{date, open, high, low, close, adj_close, volume}, ...]. Zwraca
     liczbę wstawionych/zaktualizowanych wierszy."""

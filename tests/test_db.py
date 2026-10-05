@@ -15,6 +15,7 @@ from buffett_scanner.db import (
     insert_price_rows,
     insert_unresolved_ticker,
     insert_universe_membership_conflict,
+    list_active_tickers,
     upsert_company,
     upsert_derived_metric,
     upsert_scoring_model_version,
@@ -167,6 +168,31 @@ def test_get_cik_for_active_ticker_none_when_unresolved(conn):
     from buffett_scanner.db import get_cik_for_active_ticker
 
     assert get_cik_for_active_ticker(conn, "SPY") is None
+
+
+def test_list_active_tickers_excludes_closed_entries_alphabetically(conn):
+    """Faza 6 (live end-to-end run na CAŁYM aktualnym uniwersum) --
+    `list_active_tickers` jest jedyne miejsce, które zwraca "aktualne
+    uniwersum" bez wymagania jawnej listy tickerów od wołającego (w
+    przeciwieństwie do `scan`/`score`/`analyze`)."""
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_company(conn, cik="0000789019", name="Microsoft Corp.")
+    upsert_company(conn, cik="0000111111", name="Recycled Ticker Co (closed).")
+    upsert_ticker_history(conn, cik="0000320193", ticker="AAPL", start_date="2012-01-01")
+    upsert_ticker_history(conn, cik="0000789019", ticker="MSFT", start_date="2012-01-01")
+    # Ten sam ticker, zamknięty wpis (end_date ustawione ręcznie) -- nie
+    # powinien się pojawić, nawet gdyby istniał wcześniejszy nowszy wpis.
+    upsert_ticker_history(conn, cik="0000111111", ticker="OLD", start_date="2010-01-01")
+    conn.execute(
+        "UPDATE ticker_history SET end_date = ? WHERE ticker = ?", ("2015-01-01", "OLD")
+    )
+    conn.commit()
+
+    assert list_active_tickers(conn) == ["AAPL", "MSFT"]
+
+
+def test_list_active_tickers_empty_db_returns_empty_list(conn):
+    assert list_active_tickers(conn) == []
 
 
 def test_get_cik_for_active_ticker_raises_on_ambiguous_recycled_ticker(conn):

@@ -18,6 +18,8 @@
     python -m buffett_scanner.cli fetch-spy-benchmark-prices [--cutoff YYYY-MM-DD]
     python -m buffett_scanner.cli run-baseline-walk-forward [--window-start YYYY-MM-DD]
         [--window-end YYYY-MM-DD] [--sample CIK1,CIK2,...]
+    python -m buffett_scanner.cli run-live-scan [--limit N] [--price-days N]
+        [--sample TICK1,TICK2,...] [--skip-universe-refresh] [--markdown-out DIR]
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -77,6 +79,7 @@ from buffett_scanner.db import (
     insert_price_rows,
     insert_unresolved_ticker,
     insert_universe_membership_conflict,
+    list_active_tickers,
     list_universe_membership_ciks,
     update_company_sector_profile,
     upsert_company,
@@ -95,6 +98,7 @@ from buffett_scanner.fmp_sp500_events import (
     resolve_fmp_tickers,
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
+from buffett_scanner.live_scan import LiveCandidate, rank_candidates, render_live_scan_report
 from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_as_of
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
 from buffett_scanner.price_history_plan import build_price_fetch_plan
@@ -556,13 +560,216 @@ def cmd_score(args: argparse.Namespace) -> int:
 
             report = render_markdown_report(
                 ticker=ticker, cik=cik, run_date=run_date, current_price=current_price,
-                analysis=analysis, score=score, config=config,
+                analysis=analysis, score=score, config=config, source_packet=packet,
             )
             print(f"\n{report}")
             if markdown_dir:
                 out_path = markdown_dir / f"{ticker}_{run_date}.md"
                 out_path.write_text(report, encoding="utf-8")
                 print(f"(zapisano raport: {out_path})")
+    return 0
+
+
+def cmd_run_live_scan(args: argparse.Namespace) -> int:
+    """Faza 6 — LIVE END-TO-END RUN na aktualnym rynku (domknięcie MVP
+    V0, Decyzja właścicielki 2026-10-05, po formalnym zamknięciu Fazy
+    5.4/5.6). CURRENT MARKET -> current universe -> fundamentals ->
+    decline/opportunity screening -> deterministic scoring + hard
+    gates -> valuation -> Claude qualitative analysis ->
+    anti-confirmation-bias layer -> source assembly/validation ->
+    final candidate report (0-5 kandydatów, "No qualifying
+    opportunities today" jest prawidłowym wynikiem).
+
+    W przeciwieństwie do `scan`/`score`/`analyze` (jawna lista
+    tickerów) ten command operuje na CAŁYM aktualnym uniwersum S&P 500
+    automatycznie — `--sample` ogranicza zakres tylko do małego testu.
+    Ten live run jest testem operacyjnym MVP, NIE kolejną rundą
+    kalibracji — wynik nigdy nie zmienia `config/config.yaml` ani
+    metodologii scoringu/wyceny/hard gates/prefiltra/decline
+    thresholds."""
+    config = load_config()
+    fmp_key = config.data_provider.resolve_api_key()
+    user_agent = config.sources.sec_edgar.resolve_user_agent()
+    claude_key = config.llm.resolve_api_key()
+    conn = init_db(args.db)
+    thresholds = config.decline_scanner.thresholds
+    run_date = dt.date.today().isoformat()
+
+    if not args.skip_universe_refresh:
+        with FMPClient(fmp_key) as client:
+            try:
+                constituents = client.get_sp500_constituents()
+            except FMPError as exc:
+                print(f"BŁĄD pobierania uniwersum: {exc}", file=sys.stderr)
+                return 1
+        for row in constituents:
+            cik, symbol, name = row.get("cik"), row.get("symbol"), row.get("name")
+            if not cik or not symbol or not name:
+                continue
+            upsert_company(conn, cik=cik, name=name, sector=row.get("sector"), sub_industry=row.get("subSector"))
+            upsert_ticker_history(conn, cik=cik, ticker=symbol, start_date=run_date)
+        conn.commit()
+
+    tickers = list_active_tickers(conn)
+    if args.sample:
+        sample = {t.strip().upper() for t in args.sample.split(",")}
+        tickers = [t for t in tickers if t in sample]
+    print(f"Uniwersum: {len(tickers)} tickerów.")
+
+    to_date = dt.date.today()
+    from_date = to_date - dt.timedelta(days=args.price_days)
+
+    surfaced: list[tuple[str, str, object, dict[str, bool]]] = []
+    with FMPClient(fmp_key) as client:
+        for ticker in tickers:
+            cik = _resolve_cik(conn, ticker)
+            if cik is None:
+                continue
+            try:
+                rows = client.get_historical_prices(
+                    ticker, from_date=from_date.isoformat(), to_date=to_date.isoformat()
+                )
+            except FMPError as exc:
+                print(f"{ticker}: BŁĄD pobierania cen: {exc}", file=sys.stderr)
+                continue
+            if not rows:
+                continue
+            insert_price_rows(conn, cik, source="fmp", rows=rows)
+            conn.commit()
+            price_rows = get_price_series(conn, cik)
+            if not price_rows:
+                continue
+            bars = [
+                PriceBar(
+                    date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                    close=r["close"], adj_close=r["adj_close"], volume=r["volume"],
+                )
+                for r in price_rows
+            ]
+            snapshot = compute_price_changes(bars)
+            flags = evaluate_decline_flags(snapshot, thresholds)
+            if any(flags.values()):
+                surfaced.append((ticker, cik, snapshot, flags))
+                print(f"  WYTYPOWANO {ticker}: {[k for k, v in flags.items() if v]}")
+
+    print(f"Decline/opportunity screening: {len(surfaced)}/{len(tickers)} wytypowanych.")
+
+    prefilter_excluded = 0
+    survivors: list[tuple[str, str, object, dict[str, bool]]] = []
+    with FMPClient(fmp_key) as client:
+        for ticker, cik, snapshot, flags in surfaced:
+            try:
+                income = client.get_income_statement(ticker)
+                balance = client.get_balance_sheet_statement(ticker)
+                cashflow = client.get_cash_flow_statement(ticker)
+            except FMPError as exc:
+                print(f"{ticker}: BŁĄD pobierania fundamentów: {exc}", file=sys.stderr)
+                continue
+            fund_rows = normalize_fundamentals_rows(income, balance, cashflow)
+            if not fund_rows:
+                continue
+            insert_fundamentals_rows(conn, cik, source="fmp", rows=fund_rows)
+            conn.commit()
+            periods = get_fundamentals_periods(conn, cik)
+            if not periods:
+                continue
+            metrics = compute_metrics(periods)
+            prefilter_result = evaluate_prefilter(metrics, config.prefilter)
+            if prefilter_result.excludes:
+                prefilter_excluded += 1
+                print(f"  WYKLUCZONO {ticker} (prefilter): {prefilter_result.excludes}")
+                continue
+            survivors.append((ticker, cik, snapshot, flags))
+
+    print(f"Prefilter: {len(survivors)} przeszło, {prefilter_excluded} wykluczonych.")
+
+    candidates: list[LiveCandidate] = []
+    analysis_failed = 0
+    with SecEdgarClient(user_agent) as edgar_client, ClaudeClient(
+        claude_key, model=config.llm.model, max_output_tokens=config.llm.max_output_tokens,
+    ) as claude_client:
+        for ticker, cik, snapshot, flags in survivors:
+            periods = get_fundamentals_periods(conn, cik)
+            outcome = _run_llm_analysis(
+                conn, edgar_client, claude_client, config, cik=cik, ticker=ticker, periods=periods,
+            )
+            if outcome is None:
+                analysis_failed += 1
+                continue
+            analysis, packet = outcome
+
+            price_rows = get_price_series(conn, cik)
+            current_price = price_rows[-1]["close"]
+
+            company_row = conn.execute(
+                "SELECT sector_profile FROM companies WHERE cik = ?", (cik,)
+            ).fetchone()
+            sector_profile = company_row["sector_profile"] if company_row else "GENERAL"
+
+            score = compute_score(
+                analysis=analysis, periods=periods, sector_profile=sector_profile,
+                current_price=current_price, config=config,
+            )
+
+            base_scenario = (
+                score.valuation_result.scenarios.get("base") if score.valuation_result.implemented else None
+            )
+            bear_scenario = (
+                score.valuation_result.scenarios.get("bear") if score.valuation_result.implemented else None
+            )
+            bull_scenario = (
+                score.valuation_result.scenarios.get("bull") if score.valuation_result.implemented else None
+            )
+
+            analysis_id = insert_analysis(
+                conn,
+                cik=cik, run_date=run_date, price_at_analysis=current_price,
+                scoring_model_version=config.scoring.version,
+                business_quality_score=score.business_quality_score,
+                moat_score=score.moat_score,
+                financial_quality_score=score.financial_quality_score,
+                management_score=score.management_score,
+                safety_score=score.safety_score,
+                valuation_score=score.valuation_score,
+                fear_score=score.fear_score,
+                dividend_score=score.dividend_score,
+                total_score=score.total_score,
+                hard_flags=json.dumps(score.hard_gate_result.triggered),
+                hard_gates_passed=int(score.hard_gate_result.passed),
+                valuation_range_low=bear_scenario.intrinsic_value_per_share if bear_scenario else None,
+                valuation_range_base=base_scenario.intrinsic_value_per_share if base_scenario else None,
+                valuation_range_high=bull_scenario.intrinsic_value_per_share if bull_scenario else None,
+                margin_of_safety_pct=base_scenario.margin_of_safety_pct if base_scenario else None,
+                margin_of_safety_bear_pct=bear_scenario.margin_of_safety_pct if bear_scenario else None,
+                margin_of_safety_bull_pct=bull_scenario.margin_of_safety_pct if bull_scenario else None,
+                fear_classification=analysis.fear_analysis.classification,
+                fear_confidence=analysis.fear_analysis.confidence,
+                llm_model_id=config.llm.model,
+                llm_schema_version=analysis.schema_version,
+                llm_raw_output=json.dumps(analysis.model_dump()),
+            )
+            insert_analysis_sources(conn, analysis_id, packet)
+            conn.commit()
+
+            candidates.append(LiveCandidate(
+                ticker=ticker, cik=cik, run_date=run_date, current_price=current_price,
+                decline_snapshot=snapshot, triggered_decline_flags=flags,
+                analysis=analysis, score=score, source_packet=packet,
+            ))
+
+    ranked = rank_candidates(candidates, limit=args.limit)
+    report = render_live_scan_report(
+        run_date=run_date, universe_size=len(tickers), decline_surfaced=len(surfaced),
+        prefilter_excluded=prefilter_excluded, analysis_failed=analysis_failed,
+        candidates=ranked, config=config,
+    )
+    print(f"\n{report}")
+    if args.markdown_out:
+        out_dir = Path(args.markdown_out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"live_scan_{run_date}.md"
+        out_path.write_text(report, encoding="utf-8")
+        print(f"(zapisano raport: {out_path})")
     return 0
 
 
@@ -1660,6 +1867,24 @@ def build_parser() -> argparse.ArgumentParser:
     p_score.add_argument("tickers", nargs="+")
     p_score.add_argument("--markdown-out", default=None, help="Katalog na raporty .md")
     p_score.set_defaults(func=cmd_score)
+
+    p_live_scan = sub.add_parser("run-live-scan")
+    p_live_scan.add_argument(
+        "--limit", type=int, default=5, help="Maks. liczba finalnych kandydatów (domyślnie 5).",
+    )
+    p_live_scan.add_argument(
+        "--price-days", type=int, default=400, help="Okno historii cen do decline scanningu (domyślnie 400).",
+    )
+    p_live_scan.add_argument(
+        "--sample", default=None,
+        help="Lista tickerów po przecinku — ogranicza zakres (mały test przed pełnym runem na całym S&P 500).",
+    )
+    p_live_scan.add_argument(
+        "--skip-universe-refresh", action="store_true",
+        help="Nie odpytuj FMP o aktualne S&P 500 — użyj już zapisanego ticker_history.",
+    )
+    p_live_scan.add_argument("--markdown-out", default=None, help="Katalog na finalny raport .md")
+    p_live_scan.set_defaults(func=cmd_run_live_scan)
 
     p_pit = sub.add_parser("pit-prototype")
     p_pit.add_argument("tickers", nargs="+")

@@ -1,4 +1,5 @@
-"""Budowa promptu — Faza 3 (sekcja 15, punkt 3.2).
+"""Budowa promptu — Faza 3 (sekcja 15, punkt 3.2) + Faza 6 (anti-
+confirmation-bias layer, instrukcje jawne).
 
 Łączy deterministyczne wskaźniki (Faza 1: `fundamentals.compute_metrics`
 + `evaluate_prefilter`) i source packet (Faza 2: `sources.
@@ -10,6 +11,18 @@ sekcja 9: "Claude cytuje wyłącznie po source_id z dostarczonej listy").
 `source_id` przydzielany tu jest lokalny dla jednego wywołania promptu
 (sekwencyjny `src-1`, `src-2`, ...) — nie jest to jeszcze DB PK
 `analysis_sources.source_id`, którego jeszcze nie ma (patrz sources.py).
+
+ANTI-CONFIRMATION-BIAS LAYER (Faza 6, domknięcie MVP V0): `AnalysisOutput`
+(analysis_schema.py) wymusza KSZTAŁT pól bull_case/bear_case/
+why_market_may_be_right/why_this_may_not_be_a_bargain/biggest_unknown/
+thesis_invalidation/verification_items od początku Fazy 3 — ale sam
+`output_format` Claude API gwarantuje tylko poprawny JSON, nie TREŚĆ.
+Do Fazy 6 prompt nie instruował modelu, czym te pola są i czego od nich
+wymagamy — gap zgłoszony i naprawiony w ramach GAP ANALYSIS V0 (nie
+zmiana schematu, tylko instrukcji tekstowych). Wymóg: bear_case/
+why_market_may_be_right/why_this_may_not_be_a_bargain muszą być tak
+samo rygorystyczne jak bull_case — model ma AKTYWNIE argumentować
+PRZECIW własnej tezie inwestycyjnej, nie tylko wymienić formalności.
 """
 
 from __future__ import annotations
@@ -48,6 +61,24 @@ def build_analysis_prompt(
         "`page: null` dla wszystkich verification_items w tej analizie.",
         "- Jeśli czegoś nie wiesz z dostarczonych danych, napisz to wprost "
         "(niska pewność / biggest_unknown) zamiast zgadywać albo dopowiadać.",
+        "",
+        "ANTI-CONFIRMATION-BIAS (nieprzekraczalne — nie formalność, realny wymóg treści):",
+        "- `bull_case`: konkretne, uzasadnione dowodami argumenty ZA tezą inwestycyjną.",
+        "- `bear_case`: TAK SAMO rygorystyczne argumenty PRZECIW tezie — nie wolno "
+        "ograniczyć się do ogólników ('ryzyko rynkowe'); szukaj najsilniejszego "
+        "kontrargumentu, jaki uczciwy sceptyk by przedstawił.",
+        "- `why_market_may_be_right`: napisz, dlaczego spadek ceny/wycena rynkowa MOŻE "
+        "być racjonalna i uzasadniona, a nie błędem rynku do wykorzystania. Jeśli nie "
+        "widzisz dobrego argumentu, napisz to wprost — nie wymyślaj słabego na siłę.",
+        "- `why_this_may_not_be_a_bargain`: napisz, dlaczego obecna cena może NIE być "
+        "okazją (np. wycena już uwzględnia realne ryzyko, margin of safety jest iluzoryczny "
+        "z powodu niepewnych założeń).",
+        "- `thesis_invalidation`: konkretne, obserwowalne warunki/zdarzenia, które "
+        "obaliłyby tezę inwestycyjną (nie ogólne 'jeśli sytuacja się pogorszy').",
+        "- `biggest_unknown`: najważniejsza rzecz, której NIE wiesz z dostarczonych danych "
+        "i źródeł, a która mogłaby zmienić ocenę.",
+        "- Te pola mają równą wagę z bull_case — ocena, która nie potrafi uczciwie "
+        "argumentować przeciw samej sobie, jest bezużyteczna.",
         "",
         "DETERMINISTYCZNE WSKAŹNIKI FINANSOWE (policzone przez kod, nie przez Ciebie):",
     ]

@@ -63,6 +63,23 @@ def test_prompt_with_no_sources_instructs_empty_verification_items():
     assert "verification_items musi być puste" in prompt
 
 
+def test_prompt_includes_anti_confirmation_bias_instructions():
+    """Faza 6 GAP ANALYSIS: `AnalysisOutput` wymusza KSZTAŁT bull_case/
+    bear_case/why_market_may_be_right/why_this_may_not_be_a_bargain/
+    thesis_invalidation/biggest_unknown od Fazy 3, ale prompt nigdy nie
+    instruował modelu, czym te pola są i czego wymagamy -- tylko
+    poprawny JSON (output_format), nie treść. Ten test pilnuje, żeby
+    instrukcje jawnie wymagały argumentowania PRZECIW własnej tezie,
+    nie tylko wypełnienia pól formalnie."""
+    prompt, _ = build_analysis_prompt(ticker="AAPL", metrics={}, prefilter_flags=[], sources=[])
+    assert "bear_case" in prompt
+    assert "why_market_may_be_right" in prompt
+    assert "why_this_may_not_be_a_bargain" in prompt
+    assert "thesis_invalidation" in prompt
+    assert "biggest_unknown" in prompt
+    assert "PRZECIW" in prompt
+
+
 def test_prompt_includes_metric_values():
     prompt, _ = build_analysis_prompt(
         ticker="AAPL", metrics={"fcf_ttm": 12345.0, "current_ratio": None},

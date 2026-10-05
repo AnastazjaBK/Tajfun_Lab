@@ -1,0 +1,88 @@
+name: Phase 6 Live End-to-End Scan (CURRENT MARKET, domkniecie MVP V0)
+
+# Reczne uruchomienie z przegladarki. Jedyny workflow, ktory uruchamia
+# `run-live-scan` -- CURRENT MARKET -> current universe (aktualne S&P
+# 500 z FMP) -> fundamentals -> decline/opportunity screening ->
+# deterministic scoring + hard gates -> valuation -> Claude qualitative
+# analysis -> anti-confirmation-bias layer -> source assembly/
+# validation -> final candidate report (0-N kandydatow, "No qualifying
+# opportunities today" jest prawidlowym wynikiem). Decyzja wlascicielki
+# 2026-10-05 (po formalnym zamknieciu Fazy 5.4/5.6): live run jest
+# testem operacyjnym MVP, NIE kolejna runda kalibracji -- wynik NIE
+# zmienia config/config.yaml ani metodologii.
+#
+# W przeciwienstwie do Fazy 5 (kalibracja/backtest, zero sieci po
+# jednorazowym backfillu) ten workflow robi REALNE zapytania do FMP
+# (ceny+fundamenty calego uniwersum), SEC EDGAR (source packet) i
+# Claude API (jakosciowa analiza + anti-bias) dla kazdego kandydata,
+# ktory przejdzie decline screening + prefilter. `sample` pozwala na
+# maly test (kilka tickerow) przed pelnym runem na calym S&P 500.
+
+on:
+  workflow_dispatch:
+    inputs:
+      sample:
+        description: >
+          Lista tickerow po przecinku (puste = pelne aktualne S&P 500).
+          Uzyj malej próbki (np. "AAPL,KO,INTC") na pierwszy test --
+          kazdy kandydat, ktory przejdzie decline screening + prefilter,
+          kosztuje realne wywolanie Claude API.
+        required: false
+        default: ""
+      limit:
+        description: "Maks. liczba finalnych kandydatow w raporcie"
+        required: false
+        default: "5"
+      price_days:
+        description: "Okno historii cen do decline scanningu (dni)"
+        required: false
+        default: "400"
+      skip_universe_refresh:
+        description: "true = nie odpytuj FMP o aktualne S&P 500, uzyj juz zapisanego ticker_history"
+        required: false
+        default: "false"
+
+jobs:
+  live-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe (pelny zestaw przed live runem)
+        run: python -m pytest -q
+
+      - name: init-db
+        run: python -m buffett_scanner.cli --db live_scan_result.db init-db
+
+      - name: LIVE END-TO-END RUN (CURRENT MARKET)
+        run: |
+          ARGS="--db live_scan_result.db run-live-scan --limit ${{ inputs.limit }} --price-days ${{ inputs.price_days }} --markdown-out reports"
+          if [ -n "${{ inputs.sample }}" ]; then
+            ARGS="$ARGS --sample ${{ inputs.sample }}"
+          fi
+          if [ "${{ inputs.skip_universe_refresh }}" = "true" ]; then
+            ARGS="$ARGS --skip-universe-refresh"
+          fi
+          python -m buffett_scanner.cli $ARGS
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Upload finalnego raportu i bazy
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: |
+            reports/
+            live_scan_result.db
+          if-no-files-found: warn
+          retention-days: 30

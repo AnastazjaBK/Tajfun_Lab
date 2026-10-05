@@ -1,15 +1,91 @@
-"""Generator raportu — Faza 4, punkt 4.3 (sekcja 15 design review).
+"""Generator raportu — Faza 4, punkt 4.3 (sekcja 15 design review) +
+Faza 6 (decline trigger / anti-confirmation-bias / źródła, domknięcie
+MVP V0).
 
 Czysta funkcja formatująca `scoring.ScoreResult` do Markdown. Zero I/O —
 wołający (cli.py) decyduje, czy wypisać na stdout, zapisać do pliku,
 czy oba naraz.
-"""
+
+Faza 6 GAP ANALYSIS: `AnalysisOutput` (Faza 3) od początku ma pola
+bull_case/bear_case/why_market_may_be_right/why_this_may_not_be_a_bargain/
+thesis_invalidation/verification_items, a `score`/`analyze` (Faza 4) od
+początku liczy decline snapshot (`scanner.py`) i source packet
+(`sources.py`) — ale `render_markdown_report` nigdy ich nie wypisywał.
+`decline_snapshot`/`triggered_decline_flags`/`source_packet` są
+OPCJONALNE (domyślnie `None`), żeby nie zepsuć istniejących callerów —
+gdy podane, dodają sekcje "Dlaczego spółka została wytypowana", "Analiza
+jakościowa — anti-confirmation-bias" i "Źródła" (z jawnym `SOURCE NOT
+VERIFIED` dla niezweryfikowanych)."""
 
 from __future__ import annotations
 
 from buffett_scanner.analysis_schema import AnalysisOutput
 from buffett_scanner.config import AppConfig
+from buffett_scanner.scanner import PriceChangeSnapshot
 from buffett_scanner.scoring import ScoreResult
+from buffett_scanner.sources import VerifiedSource
+
+
+def _render_decline_trigger(
+    decline_snapshot: PriceChangeSnapshot | None,
+    triggered_decline_flags: dict[str, bool] | None,
+) -> list[str]:
+    if decline_snapshot is None:
+        return []
+    lines = ["", "## Dlaczego spółka została wytypowana (decline trigger)", ""]
+    lines.append(f"- Data snapshotu cenowego: {decline_snapshot.as_of_date}")
+    lines.append(f"- 1D: {decline_snapshot.daily_pct}%  |  1T: {decline_snapshot.week_pct}%  "
+                 f"|  1M: {decline_snapshot.month_pct}%  |  1Q: {decline_snapshot.quarter_pct}%")
+    lines.append(f"- YTD: {decline_snapshot.ytd_pct}%  |  1R: {decline_snapshot.year_pct}%  "
+                 f"|  Drawdown od 52w high: {decline_snapshot.drawdown_from_52w_high_pct}%  "
+                 f"|  Wolumen względny: {decline_snapshot.relative_volume}")
+    if triggered_decline_flags:
+        triggered = [k for k, v in triggered_decline_flags.items() if v]
+        lines.append(f"- Przekroczone progi (UNCALIBRATED): {', '.join(triggered) if triggered else '(brak)'}")
+    return lines
+
+
+def _render_anti_bias_section(analysis: AnalysisOutput) -> list[str]:
+    lines = ["", "## Analiza jakościowa — anti-confirmation-bias (Claude API)", ""]
+
+    def _bullets(title: str, items: list[str]) -> None:
+        lines.append(f"**{title}:**")
+        if items:
+            for item in items:
+                lines.append(f"- {item}")
+        else:
+            lines.append("- (brak — model nie podał)")
+        lines.append("")
+
+    _bullets("Bull Case", analysis.bull_case)
+    _bullets("Bear Case", analysis.bear_case)
+    _bullets("Why Market May Be Right", analysis.why_market_may_be_right)
+    _bullets("Why Current Price May NOT Be an Opportunity", analysis.why_this_may_not_be_a_bargain)
+    _bullets("Thesis Invalidation Conditions", analysis.thesis_invalidation)
+    lines.append(f"**Biggest Unknown:** {analysis.biggest_unknown}")
+    if analysis.verification_items:
+        lines.append("")
+        lines.append("**Do ręcznej weryfikacji (verification_items):**")
+        for item in analysis.verification_items:
+            where = " / ".join(p for p in (item.document, item.section) if p)
+            page = f", str. {item.page}" if item.page is not None else ""
+            lines.append(f"- [{item.source_id}] {where}{page} — {item.question or item.reason}")
+    return lines
+
+
+def _render_sources_section(source_packet: list[VerifiedSource] | None) -> list[str]:
+    if source_packet is None:
+        return []
+    lines = ["", "## Źródła", ""]
+    if not source_packet:
+        lines.append("(brak źródeł w source packet)")
+        return lines
+    for s in source_packet:
+        if s.verified:
+            lines.append(f"- [OK] {s.title} — {s.url} (hash={s.content_hash[:16] if s.content_hash else '?'}...)")
+        else:
+            lines.append(f"- **SOURCE NOT VERIFIED**: {s.title} — {s.reason}")
+    return lines
 
 
 def render_markdown_report(
@@ -21,6 +97,9 @@ def render_markdown_report(
     analysis: AnalysisOutput,
     score: ScoreResult,
     config: AppConfig,
+    decline_snapshot: PriceChangeSnapshot | None = None,
+    triggered_decline_flags: dict[str, bool] | None = None,
+    source_packet: list[VerifiedSource] | None = None,
 ) -> str:
     w = config.scoring.weights
     lines = [
@@ -30,6 +109,9 @@ def render_markdown_report(
         f"**Wersja modelu scoringu:** {config.scoring.version} "
         f"(`status: {config.scoring.status}` — nie traktować jako reguły inwestycyjnej "
         "przed backtestingiem, Faza 5)",
+    ]
+    lines += _render_decline_trigger(decline_snapshot, triggered_decline_flags)
+    lines += [
         "",
         "## Wynik",
         "",
@@ -97,14 +179,15 @@ def render_markdown_report(
     lines.append(f"**Fear classification:** {analysis.fear_analysis.classification} "
                  f"({analysis.fear_analysis.confidence}) — {analysis.fear_analysis.trigger}")
     lines.append("")
-    lines.append(f"**Biggest unknown:** {analysis.biggest_unknown}")
-    lines.append("")
     lines.append(f"**Dividend trap alert:** {analysis.dividend_trap_alert.triggered}")
     if analysis.hard_flag_candidates:
         lines.append("")
         lines.append("**Hard flag candidates (do ręcznej weryfikacji):**")
         for flag in analysis.hard_flag_candidates:
             lines.append(f"- {flag.type}: {flag.quoted_text}")
+
+    lines += _render_anti_bias_section(analysis)
+    lines += _render_sources_section(source_packet)
 
     lines += ["", "*Progi/wagi tego raportu są `UNCALIBRATED` do czasu backtestingu (Faza 5) — "
               "nie traktować total_score jako gotowej rekomendacji inwestycyjnej.*"]
