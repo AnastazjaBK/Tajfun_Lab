@@ -71,3 +71,5 @@ jobs:
             ARGS="$ARGS --sample ${{ inputs.sample_ciks }}"
           fi
           python scripts/diag_round3_valuation_sensitivity.py $ARGS
+        env:
+          PYTHONPATH: .
