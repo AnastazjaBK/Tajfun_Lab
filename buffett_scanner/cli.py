@@ -46,6 +46,14 @@ from buffett_scanner.backtest_harness import (
     generate_rebalance_dates,
 )
 from buffett_scanner.benchmark import compute_benchmark_snapshot
+from buffett_scanner.calibration import (
+    CALIBRATION_WINDOW_END,
+    CALIBRATION_WINDOW_START,
+    OOS_FOLD_YEARS,
+    PRIMARY_HORIZON_MONTHS,
+    evaluate_candidate_configuration,
+)
+from buffett_scanner.calibration_round1 import ROUND_1_CANDIDATES
 from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
 from buffett_scanner.db import (
     clear_universe_membership_for_rebuild,
@@ -61,6 +69,7 @@ from buffett_scanner.db import (
     insert_backtest_benchmark,
     insert_backtest_candidate,
     insert_backtest_coverage,
+    insert_calibration_run,
     insert_fundamentals_rows,
     insert_price_rows,
     insert_unresolved_ticker,
@@ -1414,6 +1423,156 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
     return 0
 
 
+_CALIBRATION_ROUND_REGISTRIES = {1: ROUND_1_CANDIDATES}
+
+
+def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
+    """Faza 5.4 — protokół kalibracji zatwierdzony przez właścicielkę
+    2026-10-05 (z poprawkami, patrz docs/buffett-scanner-design-review.md,
+    sekcja "Faza 5.4"). Uruchamia JEDEN kandydat konfiguracji na OKNIE
+    KALIBRACYJNYM (2012-01-01..2021-12-01) — okno jest TU ZAWSZE
+    HARDKODOWANE z `calibration.py`, NIGDY nie brane z `--window-end`
+    użytkownika — to jest fizyczne zablokowanie holdoutu 2022-2026 przed
+    przypadkowym dotknięciem w trakcie kalibracji (punkt 1 protokołu).
+    Zero zmiany `config/config.yaml` na dysku — kandydat modyfikuje
+    WYŁĄCZNIE głęboką kopię configu w pamięci (`CandidateConfig.apply`).
+    Persystuje PEŁNE wyniki (backtest_candidates/coverage/benchmark pod
+    własnym `run_id=calibration_run_id`) ORAZ zagregowaną ewaluację do
+    `calibration_runs` (NIGDY nie usuwana — audytowalność, punkt 11)."""
+    registry = _CALIBRATION_ROUND_REGISTRIES.get(args.round)
+    if registry is None:
+        print(f"BŁĄD: nieznana runda kalibracji {args.round} (dostępne: {sorted(_CALIBRATION_ROUND_REGISTRIES)})", file=sys.stderr)
+        return 1
+    candidate = next((c for c in registry if c.name == args.candidate), None)
+    if candidate is None:
+        print(f"BŁĄD: nieznany kandydat {args.candidate!r} w rundzie {args.round} "
+              f"(dostępne: {[c.name for c in registry]})", file=sys.stderr)
+        return 1
+
+    base_config = load_config()
+    config = candidate.apply(base_config)
+    config_text = Path(DEFAULT_CONFIG_PATH).read_text(encoding="utf-8")
+    config_hash = f"config.yaml:{hashlib.sha256(config_text.encode()).hexdigest()[:16]}"
+    config_json = config.model_dump_json()
+    calibration_run_id = f"calib-r{args.round}-{candidate.name}-" + dt.datetime.utcnow().strftime("%Y-%m-%dT%H%M%SZ")
+
+    conn = init_db(args.db)
+    index_name = UNIVERSE_MEMBERSHIP_INDEX_NAME
+    window_start, window_end = CALIBRATION_WINDOW_START, CALIBRATION_WINDOW_END
+    decision_dates = generate_rebalance_dates(window_start, window_end, "MONTHLY")
+    print(f"Round {args.round}, kandydat={candidate.name!r} — {candidate.description}")
+    print(f"Okno kalibracyjne (HARDKODOWANE, holdout 2022-2026 zablokowany): {window_start}..{window_end}, "
+          f"{len(decision_dates)} decision dates, calibration_run_id={calibration_run_id}")
+
+    all_ciks = list_universe_membership_ciks(conn, index_name)
+    if args.sample:
+        sample_set = {c.strip() for c in args.sample.split(",") if c.strip()}
+        all_ciks = [c for c in all_ciks if c in sample_set]
+        print(f"  --sample ograniczenie: {len(all_ciks)} CIK.")
+    sector_profiles = get_companies_sector_profiles(conn)
+    price_bars_by_cik: dict[str, list[PriceBar]] = {}
+    company_facts_by_cik: dict[str, dict] = {}
+    for cik in all_ciks:
+        rows = get_price_series(conn, cik)
+        price_bars_by_cik[cik] = [
+            PriceBar(date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                      close=r["close"], adj_close=r["adj_close"], volume=r["volume"])
+            for r in rows
+        ]
+        cf = get_sec_company_facts_cache(conn, cik)
+        if cf is not None:
+            company_facts_by_cik[cik] = cf
+
+    spy_cik = get_cik_for_active_ticker(conn, "SPY")
+    spy_bars: list[PriceBar] | None = None
+    if spy_cik is not None:
+        spy_rows = get_price_series(conn, spy_cik)
+        spy_bars = [
+            PriceBar(date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                      close=r["close"], adj_close=r["adj_close"], volume=r["volume"])
+            for r in spy_rows
+        ]
+
+    all_candidates: list = []
+    benchmark_snapshots = []
+    for d_idx, decision_date in enumerate(decision_dates, 1):
+        pit_ciks = get_universe_membership_as_of(conn, index_name, decision_date)
+        if len(pit_ciks) != len(set(pit_ciks)):
+            dupes = sorted({c for c in pit_ciks if pit_ciks.count(c) > 1})
+            raise RuntimeError(f"FAIL FAST: universe_membership_as_of({decision_date!r}) zwróciło duplikat CIK {dupes}")
+        if args.sample:
+            pit_ciks = [c for c in pit_ciks if c in all_ciks]
+
+        stage_counts = {"NO_DECLINE_SIGNAL": 0, "EXCLUDED_BY_PREFILTER": 0, "HARD_GATE_FAILED": 0, "CANDIDATE": 0}
+        pit_ciks_with_sufficient_price: list[str] = []
+        for cik in pit_ciks:
+            full_bars = price_bars_by_cik.get(cik, [])
+            bars = [b for b in full_bars if b.date <= decision_date]
+            cf = company_facts_by_cik.get(cik)
+            periods = build_annual_fundamentals_periods_as_of(cf, decision_date) if cf is not None else []
+            has_price, has_fund = classify_data_sufficiency(bars=bars, periods=periods)
+            if has_price:
+                pit_ciks_with_sufficient_price.append(cik)
+            if not (has_price and has_fund):
+                continue
+            result = evaluate_candidate_at_date(
+                cik=cik, ticker_as_of_date=cik, decision_date=decision_date,
+                bars=bars, periods=periods, sector_profile=sector_profiles.get(cik, "GENERAL"),
+                config=config, run_id=calibration_run_id, config_version=config_hash,
+                universe_provenance="calibration",
+            )
+            if result.stage in stage_counts:
+                stage_counts[result.stage] += 1
+            if result.stage == "CANDIDATE":
+                cwf = attach_forward_returns(result.candidate, full_bars)
+                insert_backtest_candidate(conn, run_id=calibration_run_id, candidate=cwf)
+                all_candidates.append(cwf)
+
+        benchmark_snapshot = compute_benchmark_snapshot(
+            decision_date=decision_date, pit_universe_ciks_with_sufficient_price=pit_ciks_with_sufficient_price,
+            price_bars_by_cik=price_bars_by_cik, spy_bars=spy_bars,
+        )
+        benchmark_snapshots.append(benchmark_snapshot)
+        insert_backtest_benchmark(conn, run_id=calibration_run_id, snapshot=benchmark_snapshot)
+        if d_idx % 24 == 0 or d_idx == len(decision_dates):
+            conn.commit()
+            print(f"  [{d_idx}/{len(decision_dates)}] {decision_date}: candidates_total={len(all_candidates)}")
+
+    conn.commit()
+    print(f"Łącznie kandydatów na oknie kalibracyjnym: {len(all_candidates)}")
+
+    evaluation = evaluate_candidate_configuration(
+        candidate_name=candidate.name, round=args.round, description=candidate.description,
+        candidates=all_candidates, benchmark_snapshots=benchmark_snapshots,
+    )
+    insert_calibration_run(
+        conn, calibration_run_id=calibration_run_id, evaluation=evaluation,
+        config_hash=config_hash, config_json=config_json,
+        training_window_start=window_start, training_window_end=window_end,
+        oos_fold_years=OOS_FOLD_YEARS,
+    )
+    conn.commit()
+
+    print(f"\n== PRIMARY metric (horyzont {PRIMARY_HORIZON_MONTHS}m, vs equal_weighted_pit_universe) ==")
+    print(f"  A. Pooled OOS: n={evaluation.pooled_n} median_excess={evaluation.pooled_median_excess_return_pct} "
+          f"low_sample={evaluation.pooled_low_sample}")
+    print(f"  B. Fold stability:")
+    for m in evaluation.fold_metrics:
+        print(f"     {m.fold_year}: n={m.n} median_excess={m.median_excess_return_pct} low_sample={m.low_sample}")
+    print(f"     median_of_fold_medians={evaluation.median_of_fold_medians_pct} "
+          f"min={evaluation.min_fold_median_pct} max={evaluation.max_fold_median_pct} "
+          f"n_positive_folds={evaluation.n_positive_folds}/{evaluation.n_folds_with_data}")
+
+    print(f"\n== SECONDARY diagnostics (nigdy nie decydują o wyborze) ==")
+    for s in evaluation.secondary:
+        print(f"  {s.horizon_months}m: hit_rate_vs_ew={s.hit_rate_vs_ew_pct} hit_rate_vs_spy={s.hit_rate_vs_spy_pct} "
+              f"median_excess_vs_ew={s.median_excess_vs_ew_pct} median_excess_vs_spy={s.median_excess_vs_spy_pct} "
+              f"spearman={s.spearman_score_vs_return} n={s.n_vs_ew} low_sample={s.low_sample}")
+
+    print(f"\ncalibration_run_id={calibration_run_id} — zapisane w calibration_runs, status='candidate' ({args.db}).")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -1519,6 +1678,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lista CIK po przecinku — ogranicza zakres (np. mały test przed pełnym runem).",
     )
     p_baseline.set_defaults(func=cmd_run_baseline_walk_forward)
+
+    p_calibration = sub.add_parser("run-calibration-candidate")
+    p_calibration.add_argument(
+        "--round", type=int, required=True,
+        help="Numer rundy kalibracji (Faza 5.4) — ustala rejestr dostępnych kandydatów.",
+    )
+    p_calibration.add_argument(
+        "--candidate", required=True,
+        help="Nazwa kandydata z rejestru tej rundy (patrz calibration_round<N>.py).",
+    )
+    p_calibration.add_argument(
+        "--sample", default=None,
+        help="Lista CIK po przecinku — ogranicza zakres (mały test przed pełnym kandydatem).",
+    )
+    p_calibration.set_defaults(func=cmd_run_calibration_candidate)
 
     return parser
 

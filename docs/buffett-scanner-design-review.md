@@ -1438,79 +1438,99 @@ Poniższe trzy punkty **nie wymagają dalszej dyskusji** — decyzje przyjęte i
 
 ---
 
-## Faza 5.4 — PROJEKT protokołu kalibracji (PROPOSED, 2026-10-05, nie zatwierdzony, nie uruchomiony)
+## Faza 5.4 — Protokół kalibracji (ZATWIERDZONY WARUNKOWO, Decyzja właścicielki 2026-10-05, z poprawkami wbudowanymi niżej)
 
-Przedstawiony do zatwierdzenia przed jakąkolwiek zmianą scoring weights/thresholds/hard gates/decline thresholds/valuation assumptions. **Żaden parametr nie został jeszcze zmieniony, żadna optymalizacja nie została uruchomiona.** Holdout NIE jest używany do wyboru parametrów — tylko do jednorazowej, finalnej walidacji.
+Zatwierdzony z poprawkami. Zero zmian parametrów przed zamrożeniem `practical tie rule` (punkt 9) — od momentu zamrożenia, ROUND 1 rusza bez dodatkowego pytania o zgodę, ale holdout 2022–2026 pozostaje zablokowany aż do punktu 10.
 
-### 1. Train/calibration period vs holdout/validation period
+### 1. Train/calibration period vs FINAL holdout (nie "holdout per runda")
 
-**Calibration window: 2012-01-01 → 2021-12-01** (120 decision dates, ~10 lat). **Holdout window: 2022-01-01 → 2026-10-01** (58 decision dates, ~4,75 roku), **nietknięty aż do finalnej, jednorazowej walidacji**.
+**Calibration window: 2012-01-01 → 2021-12-01** (120 decision dates). **Holdout: 2022-01-01 → 2026-10-01** (58 decision dates), fizycznie/logicznie niedostępny dla procesu wyboru parametrów przez CAŁY proces kalibracji (Round 1–3), nie "raz na rundę".
 
-Granica = koniec 2021 — czysty rocznik, nie środek żadnego reżimu rynkowego. Holdout zawiera bessę 2022 ORAZ odbicie 2023–2026 — nie jest "łatwym" wycinkiem. Z logów v1.48: `candidates_total` na koniec 2021-12 = 7847, na koniec runu = 15 656 → holdout ma **7809 kandydatów (49,9%)**, mimo że to tylko 33% dat — gęstość kandydatów rośnie w czasie (większe universe, więcej zdarzeń spadkowych), więc holdout ma realną moc statystyczną pomimo krótszego okna. Rozkład complete-valuation subset (18,5% kandydatów) między oknami nie jest jeszcze zmierzony dokładnie — do zweryfikowania na starcie kalibracji, nie szacowane na pamięć.
+**Zasada sztywna (poprawka właścicielki):** holdout używany dokładnie RAZ, dopiero po zakończeniu WSZYSTKICH rund, wyborze finalnej konfiguracji i jej zamrożeniu. Po zobaczeniu wyniku holdoutu NIE WOLNO: zmienić parametrów, zmienić metryki, zmienić progów, wybrać innej konfiguracji, rozpocząć kolejnej rundy kalibracji na podstawie wyniku holdoutu. Słaby wynik holdoutu jest raportowany jako słaby wynik — nie jest powodem powrotu do 2012–2021.
 
-**Egzekwowanie:** calibration uruchamiane WYŁĄCZNIE z `--window-end 2021-12-01`; holdout to OSOBNY, pojedynczy run z `--window-start 2022-01-01`, wykonany raz, po zamrożeniu parametrów.
+Z logów v1.48: `candidates_total` na koniec 2021-12 = 7847, na koniec runu = 15 656 → holdout ma 7809 kandydatów (49,9%) mimo 33% dat — realna moc statystyczna. Rozkład complete-valuation subset między oknami zmierzony dokładnie przy starcie Round 1, nie szacowany.
 
 ### 2. Walk-forward / out-of-sample evaluation WEWNĄTRZ okna kalibracyjnego
 
-Żeby uniknąć dopasowania do jednej, statycznej próbki 10 lat: **expanding-window nested CV** wewnątrz 2012–2021, roczne kroki:
-- fold 1: fit/ocena na 2012–2015 → test na 2016
-- fold 2: fit/ocena na 2012–2016 → test na 2017
-- ... aż do fold 6: fit na 2012–2020 → test na 2021
+Expanding-window, roczne kroki: 2012–2015→OOS 2016; 2012–2016→OOS 2017; ...; 2012–2020→OOS 2021. Każdy rok testowy jest OOS względem konfiguracji wybieranej na wcześniejszych latach. **Wyniki każdego foldu zachowywane osobno** (nie tylko zagregowane) — persystowane w `calibration_runs` per kandydat.
 
-Parametr wybierany na podstawie **uśrednionej** metryki po wszystkich foldach testowych (2016–2021), nie pojedynczego dopasowania do całej dekady. Redukuje ryzyko, że kalibracja złapie jeden konkretny reżim rynkowy (np. byczy rynek 2012–2019) i nie uogólni się.
+Operacjonalizacja (bo nie ma tu literalnego "fitowania" na danych, tylko wybór dyskretnych wartości parametrów): KAŻDY kandydat konfiguracji jest uruchamiany JEDNYM pełnym walk-forward na 2012–2021 (harness już jest PIT-poprawny z konstrukcji — "expanding window" nie zmienia tego, co widzi silnik, tylko jak dzielimy OUTCOME na foldy raportowania). Kandydaci 2012–2015 nigdy nie są rokiem testowym żadnego foldu — służą wyłącznie jako historia/rozgrzewka (CAGR, decline lookback), nie wchodzą do primary metric.
 
 ### 3. Benchmarki
 
-Oba już istniejące, bez zmian: PRIMARY `equal_weighted_pit_universe`, SECONDARY `SPY`. Każda metryka liczona względem obu, nigdy tylko jednego.
+PRIMARY `equal_weighted_pit_universe`, SECONDARY `SPY` — bez zmian.
 
-### 4. Primary evaluation metric (PROPOZYCJA do Twojej decyzji)
+### 4. Primary evaluation metric (ZATWIERDZONA)
 
-**Proponowana PRIMARY metryka: mediana excess return (kandydat − equal_weighted_pit_universe) na horyzoncie 6m**, na complete-valuation subset I na pełnym (partial) secie osobno. Uzasadnienie wyboru 6m: wystarczająco dużo obserwacji z dostępnym forward return (krótsze horyzonty bardziej szumowe, dłuższe silniej obcinają próbkę), mediana zamiast średniej — odporność na grube ogony (spółki w głębokim spadku). **SECONDARY/raportowane, nigdy nie optymalizowane**: hit rate per horyzont, excess vs SPY, Spearman correlation(score, forward_return) per horyzont, 1m/3m/12m dla kontekstu. Metryka PRIMARY musi być zamrożona PRZED pierwszym uruchomieniem kalibracji — zero "metric shopping" po zobaczeniu wyników.
+**Primary: mediana 6m excess return (kandydat − equal_weighted_pit_universe).** Raportowana DWOMA sposobami (poprawka właścicielki — żeby jeden wyjątkowo dobry rok nie decydował):
+- **A. Pooled OOS** — mediana wszystkich OOS candidate excess returns ze WSZYSTKICH foldów razem (2016–2021 połączone).
+- **B. Fold stability** — mediana osobno per rok (2016, 2017, ..., 2021), plus: mediana z 6 fold-medians, min/max fold median, liczba foldów z dodatnią medianą, sample size per fold.
+
+SECONDARY (raportowane, NIGDY nie wybierają konfiguracji): hit rate per horyzont, excess vs SPY, Spearman(score, forward_return) per horyzont, 1m/3m/12m.
 
 ### 5. Miesiące z zero kandydatów
 
-Nie są cicho pomijane z coverage reportingu (liczone i raportowane jawnie, tak jak dotychczas w `backtest_coverage`). Dla metryk wydajności: **pooling na poziomie pojedynczej obserwacji kandydata** (nie "średnia z średnich per miesiąc") jako metoda PRIMARY — większa moc statystyczna, miesiąc z 0 kandydatów wnosi 0 obserwacji, nie zniekształca wyniku. Dodatkowo, jako metryka DIAGNOSTYCZNA (nie optymalizowana): equal-weighted-per-month agregacja, żeby zobaczyć, czy wynik nie jest zdominowany przez kilka miesięcy o wysokiej liczbie kandydatów.
+Liczone i raportowane jawnie (nigdy ukryte), wnoszą 0 obserwacji do poolingu na poziomie kandydata (metoda PRIMARY). Equal-weighted-per-month jako diagnostyka dodatkowa, nie optymalizowana.
 
-### 6. Minimalne sample sizes
+### 6. Sample size — LOW_SAMPLE flag, bez automatycznego odrzucania
 
-Metryka z foldu/okna z **n < 30 obserwacji na danym horyzoncie** jest raportowana, ale NIGDY nie decyduje samodzielnie o akceptacji/odrzuceniu parametru (zbyt niestabilna). Dla complete-valuation subset (mniejsza populacja, ~18,5%) próg ten może eliminować niektóre wczesne foldy z nested CV — to raportowane jawnie, nie ukrywane.
+Fold/horyzont z **n < 30** oznaczany jawnie jako `LOW_SAMPLE` w raporcie. **Pozostaje w raporcie, nie jest usuwany, nie przesądza samodzielnie o wyborze konfiguracji.** Brak dodatkowego arbitralnego progu do automatycznego odrzucania — liczebność i stabilność są pokazywane, nie optymalizowane.
 
-### 7. Które parametry wolno kalibrować
+### 7. Które parametry wolno kalibrować — PODZIELONE NA 3 SEKWENCYJNE RUNDY
 
-- `scoring.weights.financial_safety` / `.valuation` / `.dividend_shareholder_return` (nie `business_quality`/`fear_opportunity` — wymagają LLM, nieobecnego w backteście).
-- `hard_gates.min_financial_safety`, `hard_gates.min_margin_of_safety_pct` (obecnie `null`, status UNCALIBRATED).
-- `decline_scanner.thresholds` (daily/week/month/quarter/drawdown/volume).
-- `prefilter` rules/thresholds.
-- `dcf_owner_earnings.mos_pct_for_full_score`, `.max_projected_growth_rate_pct`, `.min_projected_growth_rate_pct` (mechanika scoringu wyceny).
+**ROUND 1 — SELECTION MECHANICS** (cel: czy scanner sensownie zawęża universe; wagi = default, valuation mechanics zamrożone):
+- `decline_scanner.thresholds`
+- `prefilter` rules/thresholds
+- `hard_gates` (obecnie wszystkie `null`, status UNCALIBRATED)
 
-### 8. Które zasady pozostają metodologicznie ZAMROŻONE (nie podlegają kalibracji)
+**ROUND 2 — COMPONENT WEIGHTS** (dopiero po zamrożeniu Round 1):
+- `scoring.weights.financial_safety`
+- `scoring.weights.dividend_shareholder_return`
+- `scoring.weights.valuation` — testowane OSOBNO na complete-valuation subset (nie na całym universe — tam większość obserwacji i tak nie ma valuation)
+- Zmiany wag NIE MOGĄ kompensować złych gates/prefilteru z Round 1 — Round 1 pozostaje zamrożony podczas Round 2.
 
-- Cała hierarchia `total_debt` (Tier 1/Tier 2, Decyzja F 2026-10-05) — nie podnosimy już coverage.
-- Mechanizm PIT (`value_as_of`, `filed<=as_of_date`) i cała dyscyplina "nigdy nie zgaduj/imputuj".
+**ROUND 3 — VALUATION SENSITIVITY** (dopiero po zamrożeniu Round 1–2):
+- `dcf_owner_earnings.mos_pct_for_full_score`
+- `dcf_owner_earnings.max_projected_growth_rate_pct` / `.min_projected_growth_rate_pct`
+- Mała, jawna siatka ekonomicznie sensownych wartości — NIE continuous parameter search.
+
+Po każdej rundzie: wybór i zamrożenie zwycięskiej konfiguracji PRZED przejściem do następnej rundy, używając wyłącznie calibration data 2012–2021 + wewnętrznych OOS foldów 2016–2021.
+
+### 8. Które zasady pozostają metodologicznie ZAMROŻONE (nigdy nie podlegają kalibracji)
+
+- Cała hierarchia `total_debt` (Tier 1/Tier 2, Decyzja F 2026-10-05).
+- Mechanizm PIT (`value_as_of`, `filed<=as_of_date`) i dyscyplina "nigdy nie zgaduj/imputuj".
 - Konstrukcja `universe_membership` (w tym allowlista rename).
 - Definicja kompozytu EBITDA.
-- Architektura modelu DCF (formuła Gordona/perpetuity) — jej PARAMETRY są kalibrowalne (punkt 7), sama STRUKTURA nie.
-- `dcf_owner_earnings.discount_rate_pct` / `.terminal_growth_rate_pct` — to założenia inwestora z definicji niewyprowadzalne z danych (`valuation.py`, docstring modułu) — pozostają poza kalibracją empiryczną, zmieniane wyłącznie Twoją jawną decyzją inwestycyjną, nie optymalizacją.
+- Architektura modelu DCF (formuła Gordona/perpetuity) — PARAMETRY kalibrowalne w Round 3, STRUKTURA nie.
+- **`dcf_owner_earnings.discount_rate_pct` / `.terminal_growth_rate_pct`** — założenia inwestora/modelu wyceny, NIE parametry predykcyjne do data-miningu na historycznych returns. Zmieniane wyłącznie jawną decyzją inwestycyjną właścicielki, nigdy optymalizacją.
 - Definicje benchmarków i konwencja `forward_return_pct` (bez dywidend, baza = decision_price).
 - Routing `sector_profile` (GENERAL jedyny zaimplementowany — Decyzja D7, Faza 10).
 - `deterministic_score_pct` — normalizacja tylko po DOSTĘPNYCH komponentach (architektura, nie parametr).
 
-### 9. Zabezpieczenia przed overfittingiem
+### 9. Zabezpieczenia przed overfittingiem + PRACTICAL TIE RULE (zamrożona PRZED pierwszym search runem)
 
-1. Holdout fizycznie nietknięty do czasu finalnej walidacji (osobny run, osobny `--window-end`/`--window-start`).
-2. Nested expanding-window CV wewnątrz calibration window (punkt 2) — nie pojedyncze dopasowanie do całej dekady.
-3. Mała liczba jednocześnie kalibrowanych parametrów na rundę (2–4 o najwyższym oczekiwanym wpływie), nie jednoczesny grid search po wszystkim.
-4. PRIMARY metryka zamrożona przed startem (punkt 4) — zero wyboru metryki post-hoc.
-5. Każda przetestowana konfiguracja parametrów logowana i raportowana (nie tylko zwycięzca) — audytowalność, zero cichego cherry-pickingu.
-6. Sanity bounds: żaden skalibrowany parametr nie może wyjść poza ekonomicznie sensowny zakres (np. gate nie może efektywnie wykluczać >90% universe bez jawnego uzasadnienia).
-7. Finalna walidacja na holdout = PORÓWNANIE do obecnego, nieskalibrowanego baseline (v1.49) na TYM SAMYM holdout, nie ocena w próżni.
-8. Holdout używany RAZ per runda kalibracji. Jeśli wynik niesatysfakcjonujący — nie wraca się do tego samego holdout po poprawkach (staje się wtedy kolejnym zbiorem treningowym) — wymaga nowego, przesuniętego w czasie okna walidacyjnego.
+1. Holdout fizycznie nietknięty do finalnej walidacji (punkt 1 i 10).
+2. Nested expanding-window CV (punkt 2), raportowanie pooled + per-fold (punkt 4).
+3. Sekwencyjne rundy (punkt 7) — max 2–3 parametry naraz, zamrożenie przed następną rundą.
+4. Primary metric zamrożona (punkt 4) — zero metric shopping.
+5. KAŻDA przetestowana konfiguracja logowana w `calibration_runs` i raportowana, przegrywające NIE są usuwane.
+6. Sanity bounds: żaden parametr nie wychodzi poza ekonomicznie sensowny zakres (np. gate nie wyklucza >90% universe bez jawnego uzasadnienia).
+7. **Practical tie rule (ZAMROŻONA, patrz wyprowadzenie liczby w Faza 5.4a niżej):** Konfiguracja B nie jest uznana za lepszą od A wyłącznie dlatego, że jej pooled-OOS primary metric jest wyższa o mniej niż epsilon. Epsilon wyprowadzony z WŁASNEJ zmienności fold-to-fold baseline (nieskalibrowanego configu) na tych samych 6 foldach — czyli z poziomu szumu, jaki system ma i bez żadnej kalibracji — zmierzony RAZ, PRZED pierwszym kandydatem w Round 1, i zamrożony. Gdy różnica < epsilon → remis praktyczny → wybierana PROSTSZA konfiguracja (mniej zmienionych parametrów względem obecnego default/UNCALIBRATED stanu).
+8. Finalna walidacja na holdout = porównanie do ORIGINAL UNCALIBRATED BASELINE + obu benchmarków, nie ocena w próżni.
+9. Holdout użyty RAZ, po wszystkich rundach (nie raz na rundę — poprawka punktu 1).
 
 ### 10. Porównanie partial (pełny funnel) vs complete-valuation subset
 
-Ta sama metodologia paired WITH/WITHOUT valuation co w raporcie POST-DEBT (Część 3) — powtórzona NA OKNIE KALIBRACYJNYM (diagnostycznie, do decyzji o wadze `valuation` w scoringu), i RAZ JESZCZE na holdout przy finalnej walidacji (nigdy w trakcie strojenia, żeby nie cherry-pickować na podstawie holdout).
+Populacje NIE są mieszane. **FULL/PARTIAL MODEL:** cały dostępny GENERAL universe, z jawnie brakującymi komponentami (jak dotychczas, `available_components`/`missing_components`). **COMPLETE-VALUATION SUBSET:** osobna analiza, tylko obserwacje z pełnym valuation. Wpływ valuation oceniany WYŁĄCZNIE przez paired comparison (te same company-date observations, WITHOUT vs WITH valuation — metodologia z raportu POST-DEBT, Część 3), nigdy przez porównanie całego universe z subsetem (to by pomieszało wpływ valuation z selection/coverage bias).
 
-**Status: projekt do zatwierdzenia. Nie uruchamiam żadnej kalibracji/optymalizacji, dopóki nie potwierdzisz tego protokołu (lub nie zlecisz zmian).**
+### 11. Auditability
+
+Każda próba kalibracyjna (`calibration_runs`, patrz `db.py`) zapisuje: config (JSON), config hash, calibration round, candidate name, training window, OOS fold lata, sample size (pooled + per fold), primary metric (pooled + per-fold + fold-stability), secondary metrics, timestamp/run_id. Proces odtwarzalny — żadna przegrywająca konfiguracja nie jest usuwana.
+
+### 12. Status
+
+Protokół zatwierdzony z poprawkami wbudowanymi wyżej. `practical tie rule` — metodologia zamrożona w punkcie 9.7, KONKRETNA liczba epsilon wyprowadzona i zamrożona w Faza 5.4a (pomiar szumu baseline) PRZED pierwszym kandydatem Round 1. Po zamrożeniu epsilon, ROUND 1 rusza bez dodatkowego pytania o zgodę. Holdout 2022–2026 pozostaje zablokowany.
 
 ---
 

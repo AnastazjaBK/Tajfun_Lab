@@ -400,6 +400,40 @@ CREATE TABLE IF NOT EXISTS backtest_benchmark (
     created_at                    TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (run_id, decision_date)
 );
+
+-- Faza 5.4 (protokol kalibracji, Decyzja wlascicielki 2026-10-05) --
+-- jeden wiersz per (calibration_run_id) = jeden przetestowany kandydat
+-- konfiguracji. NIGDY usuwane (punkt 11/9.5 protokolu: przegrywajace
+-- konfiguracje zostaja, audytowalnosc). `metrics_json` niesie caly
+-- CalibrationEvaluation (pooled + per-fold + secondary) -- jedna
+-- kolumna TEXT/JSON, zeby nie przebudowywac schematu przy kazdej nowej
+-- metryce diagnostycznej; pola uzywane do filtrowania/sortowania (round,
+-- candidate_name, pooled primary metric) sa tez osobnymi kolumnami.
+CREATE TABLE IF NOT EXISTS calibration_runs (
+    calibration_run_id      TEXT NOT NULL PRIMARY KEY,
+    round                    INTEGER NOT NULL,
+    candidate_name           TEXT NOT NULL,
+    description              TEXT NOT NULL,
+    config_hash              TEXT NOT NULL,
+    config_json              TEXT NOT NULL,
+    training_window_start    TEXT NOT NULL,
+    training_window_end      TEXT NOT NULL,
+    oos_fold_years           TEXT NOT NULL,
+    n_total_candidates       INTEGER NOT NULL,
+    pooled_n                 INTEGER NOT NULL,
+    pooled_median_excess_return_pct REAL,
+    pooled_low_sample        INTEGER NOT NULL,
+    median_of_fold_medians_pct REAL,
+    min_fold_median_pct      REAL,
+    max_fold_median_pct      REAL,
+    n_positive_folds         INTEGER NOT NULL,
+    n_folds_with_data        INTEGER NOT NULL,
+    metrics_json             TEXT NOT NULL,
+    status                   TEXT NOT NULL DEFAULT 'candidate'
+                              CHECK (status IN ('candidate', 'frozen_winner')),
+    created_at                TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_calibration_runs_round ON calibration_runs(round);
 """
 
 
@@ -1049,3 +1083,80 @@ def get_companies_sector_profiles(conn: sqlite3.Connection) -> dict[str, str]:
     sektorowa nie była jeszcze wykonana — patrz raport Fazy 5.3c)."""
     rows = conn.execute("SELECT cik, sector_profile FROM companies").fetchall()
     return {r["cik"]: r["sector_profile"] for r in rows}
+
+
+def insert_calibration_run(
+    conn: sqlite3.Connection,
+    *,
+    calibration_run_id: str,
+    evaluation,
+    config_hash: str,
+    config_json: str,
+    training_window_start: str,
+    training_window_end: str,
+    oos_fold_years: tuple[int, ...],
+) -> None:
+    """`evaluation`: `calibration.CalibrationEvaluation`. NIGDY UPDATE/
+    DELETE na tej tabeli (Faza 5.4, punkt 9.5/11 protokołu —
+    przegrywające konfiguracje zostają, audytowalność całego procesu)."""
+    metrics_json = json.dumps(
+        {
+            "fold_metrics": [
+                {
+                    "fold_year": m.fold_year, "n": m.n, "low_sample": m.low_sample,
+                    "median_excess_return_pct": m.median_excess_return_pct,
+                }
+                for m in evaluation.fold_metrics
+            ],
+            "secondary": [
+                {
+                    "horizon_months": s.horizon_months,
+                    "n_vs_ew": s.n_vs_ew, "n_vs_spy": s.n_vs_spy,
+                    "hit_rate_vs_ew_pct": s.hit_rate_vs_ew_pct, "hit_rate_vs_spy_pct": s.hit_rate_vs_spy_pct,
+                    "median_excess_vs_ew_pct": s.median_excess_vs_ew_pct,
+                    "median_excess_vs_spy_pct": s.median_excess_vs_spy_pct,
+                    "spearman_score_vs_return": s.spearman_score_vs_return,
+                    "low_sample": s.low_sample,
+                }
+                for s in evaluation.secondary
+            ],
+        }
+    )
+    conn.execute(
+        """
+        INSERT INTO calibration_runs (
+            calibration_run_id, round, candidate_name, description, config_hash, config_json,
+            training_window_start, training_window_end, oos_fold_years,
+            n_total_candidates, pooled_n, pooled_median_excess_return_pct, pooled_low_sample,
+            median_of_fold_medians_pct, min_fold_median_pct, max_fold_median_pct,
+            n_positive_folds, n_folds_with_data, metrics_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            calibration_run_id, evaluation.round, evaluation.candidate_name, evaluation.description,
+            config_hash, config_json, training_window_start, training_window_end,
+            json.dumps(list(oos_fold_years)),
+            evaluation.n_total_candidates, evaluation.pooled_n, evaluation.pooled_median_excess_return_pct,
+            int(evaluation.pooled_low_sample),
+            evaluation.median_of_fold_medians_pct, evaluation.min_fold_median_pct, evaluation.max_fold_median_pct,
+            evaluation.n_positive_folds, evaluation.n_folds_with_data, metrics_json,
+        ),
+    )
+
+
+def get_calibration_runs(conn: sqlite3.Connection, *, round: int | None = None) -> list[sqlite3.Row]:
+    if round is None:
+        return conn.execute("SELECT * FROM calibration_runs ORDER BY round, created_at").fetchall()
+    return conn.execute(
+        "SELECT * FROM calibration_runs WHERE round = ? ORDER BY created_at", (round,)
+    ).fetchall()
+
+
+def mark_calibration_winner(conn: sqlite3.Connection, calibration_run_id: str) -> None:
+    """Oznacza jeden wiersz jako `frozen_winner` TEJ rundy — nie usuwa
+    przegrywających, tylko dodaje status (punkt 7 protokołu: zwycięzca
+    rundy musi być zamrożony przed przejściem do następnej)."""
+    conn.execute(
+        "UPDATE calibration_runs SET status = 'frozen_winner' WHERE calibration_run_id = ?",
+        (calibration_run_id,),
+    )
