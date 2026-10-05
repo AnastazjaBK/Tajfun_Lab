@@ -1,0 +1,95 @@
+name: Phase 5.4 Calibration Candidate (SELECTION MECHANICS / COMPONENT WEIGHTS / VALUATION SENSITIVITY)
+
+# Reczne uruchomienie z przegladarki. Protokol kalibracji zatwierdzony
+# przez wlascicielke 2026-10-05 (docs/buffett-scanner-design-review.md,
+# sekcja "Faza 5.4"). Uruchamia JEDEN kandydat konfiguracji na OKNIE
+# KALIBRACYJNYM (2012-01-01..2021-12-01) -- okno jest HARDKODOWANE w
+# buffett_scanner/calibration.py, nigdy brane z inputu tego workflow --
+# fizyczna blokada holdoutu 2022-2026 przed przypadkowym dotknieciem w
+# trakcie kalibracji. Config kandydata modyfikuje WYLACZNIE glebia
+# kopie w pamieci (CandidateConfig.apply) -- config/config.yaml nigdy
+# nie jest zmieniany na dysku.
+#
+# Wymaga artefaktu z "Phase 5.3b Backfill Walk-Forward Data" (ten sam,
+# co baseline walk-forward -- sec cache/ceny/universe_membership sa
+# wspolne dla wszystkich kandydatow kalibracyjnych, nic nowego nie jest
+# pobierane z sieci).
+
+on:
+  workflow_dispatch:
+    inputs:
+      backfill_run_id:
+        description: "ID uruchomienia 'Phase 5.3b Backfill Walk-Forward Data'"
+        required: true
+      round:
+        description: "Numer rundy kalibracji (ustala rejestr kandydatow)"
+        required: true
+        default: "1"
+      candidate:
+        description: "Nazwa kandydata z rejestru tej rundy"
+        required: true
+      sample_ciks:
+        description: >
+          Lista CIK po przecinku (bez wiodacych zer) -- ogranicza zakres
+          do malego testu przed pelnym kandydatem. Puste = pelne universe.
+        required: false
+        default: ""
+
+jobs:
+  calibration-candidate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe (pelny zestaw przed runem)
+        run: python -m pytest -q
+
+      - name: Pobranie bazy z backfillu (Faza 5.3b)
+        uses: actions/download-artifact@v4
+        with:
+          name: backfill-walk-forward-db
+          run-id: ${{ inputs.backfill_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Kopia bazy przed kalibracja (backfill_walk_forward.db zostaje nietkniety jako source data)
+        run: cp backfill_walk_forward.db calibration_result.db
+
+      - name: Przebudowa universe_membership (ta sama naprawa co w baseline walk-forward)
+        run: python -m buffett_scanner.cli --db calibration_result.db build-universe-membership --cutoff 2012-01-01
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+
+      - name: Klasyfikacja sector_profile z SIC
+        run: python -m buffett_scanner.cli --db calibration_result.db classify-sector-profiles
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+
+      - name: Pobranie cen SPY -- SECONDARY benchmark
+        run: python -m buffett_scanner.cli --db calibration_result.db fetch-spy-benchmark-prices --cutoff 2012-01-01
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+
+      - name: Kandydat kalibracji (zero sieci, okno kalibracyjne hardkodowane, holdout zablokowany)
+        run: |
+          ARGS="--db calibration_result.db run-calibration-candidate --round ${{ inputs.round }} --candidate ${{ inputs.candidate }}"
+          if [ -n "${{ inputs.sample_ciks }}" ]; then
+            ARGS="$ARGS --sample ${{ inputs.sample_ciks }}"
+          fi
+          python -m buffett_scanner.cli $ARGS
+
+      - name: Upload wyniku jako artefakt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-round${{ inputs.round }}-${{ inputs.candidate }}-db
+          path: calibration_result.db
+          retention-days: 30
