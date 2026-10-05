@@ -213,6 +213,36 @@ def test_compute_valuation_subtracts_net_debt():
     assert base.intrinsic_value_per_share == pytest.approx(8.0)
 
 
+def test_compute_valuation_implemented_true_but_base_margin_of_safety_none_when_negative_equity():
+    """Regresja (Faza 5.3g, 2026-10-05 -- wyjaśnienie 189 "rozbieżności"
+    w diagnostyce POST-DEBT baseline): `implemented=True` NIE gwarantuje
+    `margin_of_safety_pct is not None` dla scenariusza BASE. Gdy net_debt
+    jest na tyle duży, że equity_value <= 0 (intrinsic_value_per_share
+    <= 0), ScenarioValuation.margin_of_safety_pct jest jawnie None
+    (patrz docstring pola) -- DCF "zaimplementowany" (policzony dla
+    wszystkich 3 scenariuszy), ale margin of safety niezdefiniowany, bo
+    ujemna wycena equity nie ma sensownego "marginesu bezpieczeństwa".
+    Każdy kod analityczny MUSI traktować `implemented` i "ma użyteczny
+    score" jako DWIE różne rzeczy -- nigdy nie zgadywać `valuation_score`
+    z samego `implemented`, zawsze iść przez `compute_deterministic_score`
+    (patrz test_backtest_harness.py, test analogiczny)."""
+    config = _flat_growth_config()
+    periods = [
+        make_period("FY2023", operating_cash_flow=100.0, capital_expenditure=0.0,
+                    total_debt=2000.0, cash_and_equivalents=0.0, diluted_shares_outstanding=100.0),
+        make_period("FY2024", operating_cash_flow=100.0, capital_expenditure=0.0,
+                    total_debt=2000.0, cash_and_equivalents=0.0, diluted_shares_outstanding=100.0),
+    ]
+    result = compute_valuation("GENERAL", periods, current_price=5.0, config=config)
+
+    assert result.implemented is True
+    assert result.reason is None
+    # enterprise_value = 100/0.10 = 1000; equity = 1000 - 2000 (net_debt) = -1000 -> ujemne
+    base = result.scenarios["base"]
+    assert base.intrinsic_value_per_share == pytest.approx(-10.0)
+    assert base.margin_of_safety_pct is None
+
+
 def test_compute_valuation_growth_rate_is_capped_by_config():
     """Ograniczenie sufitem/podłogą z configu, nie tylko wzięte z CAGR
     wprost — sprawdzone przez skrajnie wysoką historyczną CAGR."""

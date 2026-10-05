@@ -264,6 +264,42 @@ def test_compute_deterministic_score_valuation_unavailable_excluded_from_both_si
     assert result.deterministic_score_pct == pytest.approx(expected_points / expected_max * 100)
 
 
+def test_compute_deterministic_score_implemented_true_but_valuation_score_none_on_negative_equity():
+    """Regresja (Faza 5.3g, 2026-10-05 -- wyjaśnienie 189 "rozbieżności"
+    w diagnostyce POST-DEBT baseline, patrz test_valuation.py test
+    analogiczny na niższym poziomie): `ValuationResult.implemented=True`
+    NIE implikuje `valuation_score is not None` -- gdy net_debt jest na
+    tyle duży, że equity_value (a więc intrinsic_value_per_share dla
+    scenariusza BASE) jest <= 0, `margin_of_safety_pct` tego scenariusza
+    jest jawnie None (DCF policzony, ale "margines bezpieczeństwa"
+    niezdefiniowany dla ujemnej wyceny equity), więc `mos_base=None`
+    i `valuation_score=None` -- mimo że `implemented=True`. Każdy kod
+    analityczny (raporty, diagnostyka) MUSI iść przez tę funkcję (albo
+    replikować dokładnie tę logikę), NIGDY nie wnioskować valuation_score
+    z samego `ValuationResult.implemented`."""
+    config = _config()
+    periods = [
+        _period("FY2023", "2023-12-31", "2024-02-01",
+                operating_cash_flow=150.0, capital_expenditure=20.0,
+                total_debt=5000.0, cash_and_equivalents=0.0, diluted_shares_outstanding=100.0),
+        _period("FY2024", "2024-12-31", "2025-02-01",
+                operating_cash_flow=150.0, capital_expenditure=20.0,
+                total_debt=5000.0, cash_and_equivalents=0.0, diluted_shares_outstanding=100.0),
+    ]
+    result = compute_deterministic_score(
+        periods=periods, sector_profile="GENERAL", current_price=5.0, config=config,
+    )
+    assert result.valuation_result.implemented is True
+    assert result.valuation_result.reason is None
+    # enterprise_value = 130(FCF)/0.10 = 1300; equity = 1300 - 5000(net_debt) = -3700 -> ujemne
+    assert result.valuation_result.scenarios["base"].intrinsic_value_per_share < 0
+    assert result.valuation_result.scenarios["base"].margin_of_safety_pct is None
+    assert result.margin_of_safety_base_pct is None
+    assert result.valuation_score is None
+    assert "valuation" in result.missing_components
+    assert "valuation" not in result.available_components
+
+
 # ---------------------------------------------------------------------------
 # evaluate_deterministic_hard_gates
 # ---------------------------------------------------------------------------
