@@ -25,11 +25,22 @@ import os
 
 import streamlit as st
 
-from buffett_scanner.db import connect, create_user, get_users
+from buffett_scanner.db import connect, create_user, get_latest_user_decision, get_users, insert_user_decision
 from buffett_scanner.ui.labels import (
     METHODOLOGY_DISCLAIMER,
     analysis_status_label,
+    decision_status_label,
     decline_flags_label,
+)
+
+# Sekcja 16 specyfikacji: mapowanie przycisków UI na istniejący enum
+# `user_decisions.status` (sekcja 1.1/16 design review) -- NIE
+# wymyślamy nowego modelu statusów.
+_DECISION_BUTTONS = (
+    ("REJECT", "Odrzucam"),
+    ("WATCH", "Obserwuję"),
+    ("SNOOZE", "Sprawdzam"),
+    ("BOUGHT", "Kupiłam/Kupiłem"),
 )
 from buffett_scanner.ui.portfolio import compute_portfolio_bar_summary
 from buffett_scanner.ui.queries import (
@@ -188,12 +199,29 @@ def _render_valuation_section(valuation_result, current_price: float) -> None:
         )
 
 
-def _render_candidate_card(conn, run_id: str, cik: str) -> None:
+def _render_decision_buttons(conn, *, user_id: int, cik: str) -> None:
+    """Sekcja 16 specyfikacji: decyzja jest USER-SPECIFIC (`user_decisions`,
+    append-only) -- Anastazja i mąż mogą mieć RÓŻNY status dla tej samej
+    spółki, kliknięcie jednego usera nigdy nie zmienia SHARED analizy."""
+    current = get_latest_user_decision(conn, user_id=user_id, cik=cik)
+    if current is not None:
+        st.caption(f"Twoja ostatnia decyzja: **{decision_status_label(current['status'])}**")
+
+    cols = st.columns(4)
+    for col, (status, label) in zip(cols, _DECISION_BUTTONS):
+        if col.button(label, key=f"decision_{cik}_{status}"):
+            insert_user_decision(conn, user_id=user_id, cik=cik, status=status)
+            conn.commit()
+            st.rerun()
+
+
+def _render_candidate_card(conn, run_id: str, cik: str, *, user_id: int) -> None:
     """Sekcja 15 specyfikacji UI -- pełna karta kandydata PO POLSKU.
     Deterministyczne sekcje (decline/wycena) zawsze renderowane; sekcje
     zależne od analizy LLM (`analysis`) pokazują jawnie "Analiza
     jakościowa niekompletna", gdy `llm_status != COMPLETE` -- nigdy nie
-    ukrywają reszty karty."""
+    ukrywają reszty karty ani przycisków decyzji (sekcja 16: decyzja
+    musi być możliwa NIEZALEŻNIE od kompletności analizy jakościowej)."""
     detail = get_candidate_detail(conn, run_id, cik)
     analysis = detail["analysis"]
 
@@ -225,38 +253,40 @@ def _render_candidate_card(conn, run_id: str, cik: str) -> None:
 
     _render_valuation_section(detail["valuation_result"], detail["current_price"])
 
+    st.markdown("#### Co muszę sprawdzić przed zakupem?")
     if analysis is None:
-        st.markdown("#### Co muszę sprawdzić przed zakupem?")
         st.warning(
             "Analiza jakościowa niekompletna — pełna lista rzeczy do sprawdzenia nie jest dziś "
             "dostępna dla tej spółki. Cena i wycena powyżej są dostępne niezależnie."
         )
-        return
-
-    st.markdown("#### Co muszę sprawdzić przed zakupem?")
-    st.write(f"**Największa niewiadoma:** {analysis.biggest_unknown}")
-    st.write("**Co obaliłoby tezę inwestycyjną:**")
-    for item in analysis.thesis_invalidation:
-        st.write(f"- {item}")
-    if analysis.verification_items:
-        st.write("**Do zweryfikowania przed decyzją:**")
-        for vi in analysis.verification_items:
-            st.write(f"- {vi.question or vi.reason}")
-
-    st.markdown("#### Dlaczego rynek może mieć rację?")
-    for item in analysis.why_market_may_be_right:
-        st.write(f"- {item}")
-
-    st.markdown("#### Dlaczego ta przecena może NIE być okazją?")
-    for item in analysis.why_this_may_not_be_a_bargain:
-        st.write(f"- {item}")
-
-    st.markdown("#### Źródła")
-    if detail["analysis_sources"]:
-        for source in detail["analysis_sources"]:
-            st.markdown(f"- [{source.title}]({source.url}) — {source.issuer}")
     else:
-        st.caption("Brak zweryfikowanych źródeł dla tej analizy.")
+        st.write(f"**Największa niewiadoma:** {analysis.biggest_unknown}")
+        st.write("**Co obaliłoby tezę inwestycyjną:**")
+        for item in analysis.thesis_invalidation:
+            st.write(f"- {item}")
+        if analysis.verification_items:
+            st.write("**Do zweryfikowania przed decyzją:**")
+            for vi in analysis.verification_items:
+                st.write(f"- {vi.question or vi.reason}")
+
+        st.markdown("#### Dlaczego rynek może mieć rację?")
+        for item in analysis.why_market_may_be_right:
+            st.write(f"- {item}")
+
+        st.markdown("#### Dlaczego ta przecena może NIE być okazją?")
+        for item in analysis.why_this_may_not_be_a_bargain:
+            st.write(f"- {item}")
+
+        st.markdown("#### Źródła")
+        if detail["analysis_sources"]:
+            for source in detail["analysis_sources"]:
+                st.markdown(f"- [{source.title}]({source.url}) — {source.issuer}")
+        else:
+            st.caption("Brak zweryfikowanych źródeł dla tej analizy.")
+
+    st.markdown("---")
+    st.markdown("#### Twoja decyzja")
+    _render_decision_buttons(conn, user_id=user_id, cik=cik)
 
 
 def main() -> None:
@@ -287,7 +317,7 @@ def main() -> None:
 
     for tab, row in zip(tabs[1:], synthesis_rows):
         with tab:
-            _render_candidate_card(conn, run_id=latest_run_id, cik=row["cik"])
+            _render_candidate_card(conn, run_id=latest_run_id, cik=row["cik"], user_id=user["user_id"])
 
 
 if __name__ == "__main__":

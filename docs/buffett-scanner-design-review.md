@@ -2445,6 +2445,12 @@ Nowe tabele `user_decisions`/`positions`/`purchase_transactions`/`sale_transacti
 
 2 nowe testy (`test_ui_queries.py`). Pełny zestaw: **711 passed, 1 skipped** (było 709).
 
+### KROK 5 — przyciski decyzji (zrobiony)
+
+Cztery przyciski na karcie kandydata (ODRZUCAM/OBSERWUJĘ/SPRAWDZAM/KUPIŁAM-KUPIŁEM), mapowane 1:1 na istniejący enum `user_decisions.status` (REJECT/WATCH/SNOOZE/BOUGHT, sekcja 1.1/16 design review) — zero nowego modelu statusów. Decyzja jest USER-SPECIFIC (append-only `insert_user_decision`), renderowana NIEZALEŻNIE od kompletności analizy LLM (przeniesiona poza wcześniejszy wczesny `return` dla FAILED, który by ją ukrył — złapane przy pisaniu, nie przy weryfikacji).
+
+**Weryfikacja empiryczna z realnymi dwoma userami** (ten sam wzorzec Playwright co KROK 0/3/4): Anastazja klika "Obserwuję" na CBOE, przełączenie na usera "Mąż" pokazuje ZERO śladu decyzji Anastazji (żadnej "Twoja ostatnia decyzja"), Mąż klika "Odrzucam". Bezpośrednia weryfikacja `user_decisions` po teście: dwa niezależne wiersze, `user_id=1/status=WATCH` i `user_id=2/status=REJECT`, ten sam `cik` — dokładnie scenariusz z sekcji 16 specyfikacji ("Anastazja może mieć OBSERVING a Mąż REJECTED dla tej samej spółki"). Zero nowych testów pytest (logika `insert_user_decision`/`get_latest_user_decision` już w pełni pokryta w KROK 1 — tu weryfikowane tylko samo okablowanie UI, nie da się tego sensownie zrobić bez frameworka testowego Streamlit). Pełny zestaw bez zmian: **711 passed, 1 skipped**.
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.
