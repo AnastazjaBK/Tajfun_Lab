@@ -3,7 +3,7 @@ V0 OUTPUT CONTRACT: kontekst ceny/wyceny/decline przekazywany Claude)."""
 
 from __future__ import annotations
 
-from buffett_scanner.prompt import build_analysis_prompt
+from buffett_scanner.prompt import build_analysis_prompt, build_thesis_invalidation_repair_prompt
 from buffett_scanner.scanner import PriceChangeSnapshot
 from buffett_scanner.sources import VerifiedSource
 from buffett_scanner.valuation import ScenarioValuation, ValuationResult
@@ -215,3 +215,66 @@ def test_prompt_handles_decline_snapshot_fields_that_are_none():
     assert "1D=N/A" in prompt
     assert "1M=-5.00%" in prompt
     assert "Wolumen względny=N/A" in prompt
+
+
+# ---------------------------------------------------------------------------
+# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06) -- `build_thesis_invalidation_
+# repair_prompt`. Zastępuje full-response retry (Faza 6f/6g) dla
+# empirycznie potwierdzonego przypadku: reszta analizy poprawna, zawodzi
+# WYŁĄCZNIE thesis_invalidation.
+# ---------------------------------------------------------------------------
+
+
+def test_repair_prompt_includes_existing_analysis_context_and_cardinality_requirement():
+    prompt = build_thesis_invalidation_repair_prompt(
+        ticker="INTU",
+        bull_case=["Silny moat oparty na efektach sieciowych."],
+        bear_case=["Rosnąca konkurencja regulacyjna."],
+        biggest_unknown="Nie wiadomo, czy spadek marży jest trwały czy cykliczny.",
+        why_market_may_be_right=["Spadek może odzwierciedlać trwałe spowolnienie."],
+        why_this_may_not_be_a_bargain=["Wycena może już uwzględniać ryzyko regulacyjne."],
+        metrics={"fcf_ttm": 100.0},
+        current_price=284.68,
+        decline_snapshot=_decline_snapshot(),
+        valuation_result=_valuation_result(),
+    )
+    # Ten sam jawny wymóg kardynalności co w pełnym prompcie (Faza 6g) --
+    # współdzielony przez stałą modułową, nigdy dwie niezależne kopie.
+    assert "MUSISZ podać co najmniej JEDEN" in prompt
+    assert "TO POLE NIE MOŻE BYĆ PUSTE" in prompt
+    assert "bez wymyślonego progu" in prompt
+    # Istniejąca treść analizy jest przekazana jako kontekst.
+    assert "Silny moat oparty na efektach sieciowych." in prompt
+    assert "Rosnąca konkurencja regulacyjna." in prompt
+    assert "Nie wiadomo, czy spadek marży jest trwały czy cykliczny." in prompt
+    # Te same deterministyczne dane cenowe/wyceny co pełny prompt (Faza 6f).
+    assert "Aktualna cena: 284.68" in prompt
+    assert "BASE: intrinsic value/akcję=1817.83, Margin of Safety=84.3%" in prompt
+    # Zakaz wymyślania nowych faktów nieobecnych w kontekście (specyfikacja
+    # właścicielki, punkt 8).
+    assert "nie wymyślaj nowych faktów" in prompt
+
+
+def test_repair_prompt_never_includes_sources_or_citation_instructions():
+    """`ThesisInvalidationRepair` nie ma `verification_items`/
+    `cited_source_ids` -- repair prompt nie ma powodu wspominać o
+    źródłach/cytowaniu w ogóle (specyfikacja właścicielki, punkt 6: "nie
+    wysyłaj ponownie całego niepotrzebnego promptu/source payload")."""
+    prompt = build_thesis_invalidation_repair_prompt(
+        ticker="AAPL", bull_case=["x"], bear_case=["y"], biggest_unknown="z",
+        why_market_may_be_right=["a"], why_this_may_not_be_a_bargain=["b"],
+        metrics={},
+    )
+    assert "ŹRÓDŁA" not in prompt
+    assert "cited_source_ids" not in prompt
+    assert "verification_items" not in prompt
+
+
+def test_repair_prompt_marks_price_and_valuation_unavailable_when_not_given():
+    prompt = build_thesis_invalidation_repair_prompt(
+        ticker="AAPL", bull_case=["x"], bear_case=["y"], biggest_unknown="z",
+        why_market_may_be_right=["a"], why_this_may_not_be_a_bargain=["b"],
+        metrics={},
+    )
+    assert "Aktualna cena: NIEDOSTĘPNA w tym wywołaniu" in prompt
+    assert "Wycena DCF: NIEDOSTĘPNA w tym wywołaniu" in prompt

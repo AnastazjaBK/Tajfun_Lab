@@ -184,6 +184,20 @@ CREATE TABLE IF NOT EXISTS analyses (
     llm_cache_read_input_tokens     INTEGER,
     llm_thinking_tokens             INTEGER,
     llm_service_tier                TEXT,
+    -- Faza 6h (2026-10-06, TARGETED FIELD REPAIR) — usage ODRĘBNEGO,
+    -- minimalnego repair call (`repair_thesis_invalidation`), gdy pełna
+    -- analiza miała jedyny semantycznie puste `thesis_invalidation`.
+    -- NULL, gdy repair nie był potrzebny (pełna analiza przeszła od
+    -- razu) -- nigdy nie wymyślamy wartości. Odrębne od llm_* powyżej
+    -- (usage pełnego analysis call), żeby audyt mógł rozróżnić
+    -- full_analysis_call od thesis_invalidation_repair_call.
+    llm_repair_response_model              TEXT,
+    llm_repair_input_tokens                INTEGER,
+    llm_repair_output_tokens               INTEGER,
+    llm_repair_cache_creation_input_tokens INTEGER,
+    llm_repair_cache_read_input_tokens     INTEGER,
+    llm_repair_thinking_tokens             INTEGER,
+    llm_repair_service_tier                TEXT,
     created_at                TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_analyses_cik_run_date ON analyses(cik, run_date);
@@ -531,6 +545,16 @@ CREATE TABLE IF NOT EXISTS live_scan_candidates (
     llm_cache_read_input_tokens     INTEGER,
     llm_thinking_tokens             INTEGER,
     llm_service_tier                TEXT,
+    -- Faza 6h (2026-10-06, TARGETED FIELD REPAIR) — patrz komentarz przy
+    -- tych samych kolumnach w `analyses` wyżej. NULL, gdy ten kandydat
+    -- nie potrzebował repair call w TYM run_id.
+    llm_repair_response_model              TEXT,
+    llm_repair_input_tokens                INTEGER,
+    llm_repair_output_tokens               INTEGER,
+    llm_repair_cache_creation_input_tokens INTEGER,
+    llm_repair_cache_read_input_tokens     INTEGER,
+    llm_repair_thinking_tokens             INTEGER,
+    llm_repair_service_tier                TEXT,
     PRIMARY KEY (run_id, cik)
 );
 CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_run_id ON live_scan_candidates(run_id);
@@ -580,6 +604,23 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("live_scan_candidates", "llm_cache_read_input_tokens", "INTEGER"),
     ("live_scan_candidates", "llm_thinking_tokens", "INTEGER"),
     ("live_scan_candidates", "llm_service_tier", "TEXT"),
+    # Faza 6h (2026-10-06) — TARGETED FIELD REPAIR usage, dodane PO tym,
+    # jak `analyses`/`live_scan_candidates` mogły już istnieć w plikach
+    # DB z poprzednich runów (sam wzorzec co Faza 6e powyżej).
+    ("analyses", "llm_repair_response_model", "TEXT"),
+    ("analyses", "llm_repair_input_tokens", "INTEGER"),
+    ("analyses", "llm_repair_output_tokens", "INTEGER"),
+    ("analyses", "llm_repair_cache_creation_input_tokens", "INTEGER"),
+    ("analyses", "llm_repair_cache_read_input_tokens", "INTEGER"),
+    ("analyses", "llm_repair_thinking_tokens", "INTEGER"),
+    ("analyses", "llm_repair_service_tier", "TEXT"),
+    ("live_scan_candidates", "llm_repair_response_model", "TEXT"),
+    ("live_scan_candidates", "llm_repair_input_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_repair_output_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_repair_cache_creation_input_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_repair_cache_read_input_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_repair_thinking_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_repair_service_tier", "TEXT"),
 )
 
 
@@ -1479,20 +1520,34 @@ def update_live_scan_candidate_llm_status(
     cache_key: str | None = None,
     analysis_id: int | None = None,
     usage: ClaudeUsage | None = None,
+    repair_usage: ClaudeUsage | None = None,
 ) -> None:
     """`usage` (Faza 6e): realny `ClaudeUsage` gdy API faktycznie
     odpowiedziało w TYM wywołaniu (sukces, albo FAILED przez refusal/
     nie-sparsowalny JSON) — `None` gdy nie było żadnej odpowiedzi do
     zmierzenia (błąd API bez `response`, brak fundamentals/źródeł) albo
     gdy to CACHE HIT (zero nowego wywołania, więc zero nowego kosztu w
-    TYM run_id). Nigdy nie wymyślamy wartości zamiast `None`."""
+    TYM run_id). Nigdy nie wymyślamy wartości zamiast `None`.
+
+    `repair_usage` (Faza 6h, TARGETED FIELD REPAIR): usage ODRĘBNEGO
+    minimalnego repair call (`repair_thesis_invalidation`) — `None`, gdy
+    ten kandydat nie potrzebował repair w TYM wywołaniu (pełna analiza
+    przeszła od razu, albo repair nie był zasadny). Zapisywany w
+    osobnych kolumnach `llm_repair_*`, NIE sumowany z `usage` w bazie —
+    audyt/telemetria musi móc rozróżnić full_analysis_call od
+    thesis_invalidation_repair_call (specyfikacja właścicielki, Faza 6h,
+    punkt 3)."""
     conn.execute(
         """
         UPDATE live_scan_candidates
         SET llm_status = ?, llm_error = ?, cache_key = ?, analysis_id = ?,
             llm_response_model = ?, llm_input_tokens = ?, llm_output_tokens = ?,
             llm_cache_creation_input_tokens = ?, llm_cache_read_input_tokens = ?,
-            llm_thinking_tokens = ?, llm_service_tier = ?
+            llm_thinking_tokens = ?, llm_service_tier = ?,
+            llm_repair_response_model = ?, llm_repair_input_tokens = ?,
+            llm_repair_output_tokens = ?, llm_repair_cache_creation_input_tokens = ?,
+            llm_repair_cache_read_input_tokens = ?, llm_repair_thinking_tokens = ?,
+            llm_repair_service_tier = ?
         WHERE run_id = ? AND cik = ?
         """,
         (
@@ -1504,6 +1559,13 @@ def update_live_scan_candidate_llm_status(
             usage.cache_read_input_tokens if usage else None,
             usage.thinking_tokens if usage else None,
             usage.service_tier if usage else None,
+            repair_usage.model if repair_usage else None,
+            repair_usage.input_tokens if repair_usage else None,
+            repair_usage.output_tokens if repair_usage else None,
+            repair_usage.cache_creation_input_tokens if repair_usage else None,
+            repair_usage.cache_read_input_tokens if repair_usage else None,
+            repair_usage.thinking_tokens if repair_usage else None,
+            repair_usage.service_tier if repair_usage else None,
             run_id, cik,
         ),
     )
@@ -1520,7 +1582,13 @@ def get_live_scan_run_usage_summary(conn: sqlite3.Connection, run_id: str) -> di
     `analysis_id` wskazuje na analizę policzoną w innym, wcześniejszym
     run_id). Zwraca surowe sumy tokenów/liczniki — zero wyliczonego $
     (patrz `ClaudeUsage`/COST AUDIT Faza 6d: brak zweryfikowanego
-    cennika per-token)."""
+    cennika per-token).
+
+    Faza 6h (TARGETED FIELD REPAIR): `repair_calls`/`total_repair_*`
+    liczone i sumowane ODRĘBNIE od `calls_with_usage`/`total_*` (pełny
+    analysis call) — audyt musi móc rozróżnić full_analysis_call od
+    thesis_invalidation_repair_call. `total_combined_*` sumuje oba, do
+    raportowania całkowitego kosztu bez utraty rozróżnienia."""
     row = conn.execute(
         """
         SELECT
@@ -1533,10 +1601,24 @@ def get_live_scan_run_usage_summary(conn: sqlite3.Connection, run_id: str) -> di
             SUM(llm_output_tokens) AS total_output_tokens,
             SUM(llm_cache_creation_input_tokens) AS total_cache_creation_input_tokens,
             SUM(llm_cache_read_input_tokens) AS total_cache_read_input_tokens,
-            SUM(llm_thinking_tokens) AS total_thinking_tokens
+            SUM(llm_thinking_tokens) AS total_thinking_tokens,
+            SUM(CASE WHEN llm_repair_input_tokens IS NOT NULL THEN 1 ELSE 0 END) AS repair_calls,
+            SUM(llm_repair_input_tokens) AS total_repair_input_tokens,
+            SUM(llm_repair_output_tokens) AS total_repair_output_tokens,
+            SUM(llm_repair_cache_creation_input_tokens) AS total_repair_cache_creation_input_tokens,
+            SUM(llm_repair_cache_read_input_tokens) AS total_repair_cache_read_input_tokens,
+            SUM(llm_repair_thinking_tokens) AS total_repair_thinking_tokens
         FROM live_scan_candidates
         WHERE run_id = ? AND in_shortlist = 1
         """,
         (run_id,),
     ).fetchone()
-    return dict(row) if row else {}
+    summary = dict(row) if row else {}
+    if summary:
+        summary["total_combined_input_tokens"] = (
+            (summary["total_input_tokens"] or 0) + (summary["total_repair_input_tokens"] or 0)
+        )
+        summary["total_combined_output_tokens"] = (
+            (summary["total_output_tokens"] or 0) + (summary["total_repair_output_tokens"] or 0)
+        )
+    return summary

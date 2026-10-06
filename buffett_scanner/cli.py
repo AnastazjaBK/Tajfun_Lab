@@ -38,7 +38,12 @@ import statistics
 import sys
 from pathlib import Path
 
-from buffett_scanner.analysis_schema import AnalysisOutput, AnalysisValidationError, validate_analysis_output
+from buffett_scanner.analysis_schema import (
+    AnalysisOutput,
+    AnalysisValidationError,
+    is_only_thesis_invalidation_semantically_empty,
+    validate_analysis_output,
+)
 from buffett_scanner.backfill import (
     backfill_fundamentals_for_cik,
     backfill_prices_for_cik,
@@ -127,7 +132,7 @@ from buffett_scanner.live_scan_pipeline import (
 from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_as_of
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
 from buffett_scanner.price_history_plan import build_price_fetch_plan
-from buffett_scanner.prompt import build_analysis_prompt
+from buffett_scanner.prompt import build_analysis_prompt, build_thesis_invalidation_repair_prompt
 from buffett_scanner.providers.claude import ClaudeClient, ClaudeError, ClaudeUsage
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
@@ -880,62 +885,18 @@ def cmd_analyze_live_scan_shortlist(args: argparse.Namespace) -> int:
     )
 
 
-# BUGFIX V0 OUTPUT CONTRACT (Faza 6f, 2026-10-06): bounded retry dla
-# `AnalysisValidationError` (strukturalna LUB semantic completeness —
-# patrz analysis_schema.py) w Stage 2 live-scanu. 2 CAŁKOWITE próby (1
-# oryginalna + 1 retry), nigdy nieskończona pętla. Błędy Claude API
-# (ClaudeError) NIE są tu retry'owane -- zachowują istniejące fail-fast
-# (Faza 6c: realne niepowodzenia API są systemowe/uniform, nie
-# per-próba, więc retry na nich tylko gwarantowanie powtarza porażkę).
-MAX_ANALYSIS_ATTEMPTS = 2
-
-
-def _sum_claude_usage(attempts: list) -> "ClaudeUsage | None":
-    """Sumuje `ClaudeUsage` z WSZYSTKICH realnych prób (Faza 6f retry) —
-    telemetria per-kandydat musi odzwierciedlać CAŁKOWITY koszt tego
-    kandydata w tym run_id, nie tylko ostatniej próby (inaczej retry
-    cichcem zaniżałby zapisane tokeny względem realnie wydanych).
-    `None` tylko gdy nie było żadnej realnej odpowiedzi API (lista
-    pusta) -- nigdy nie wymyślamy wartości."""
-    if not attempts:
-        return None
-
-    def _sum_optional(values):
-        present = [v for v in values if v is not None]
-        return sum(present) if present else None
-
-    return ClaudeUsage(
-        model=attempts[-1].model,
-        input_tokens=sum(a.input_tokens for a in attempts),
-        output_tokens=sum(a.output_tokens for a in attempts),
-        cache_creation_input_tokens=_sum_optional(a.cache_creation_input_tokens for a in attempts),
-        cache_read_input_tokens=_sum_optional(a.cache_read_input_tokens for a in attempts),
-        thinking_tokens=_sum_optional(a.thinking_tokens for a in attempts),
-        service_tier=attempts[-1].service_tier,
-    )
-
-
-# BUGFIX V0 OUTPUT CONTRACT (Faza 6g, 2026-10-06): ROOT CAUSE AUDIT po
-# LIVE VALIDATION TEST Fazy 6f (4/5 FAILED, identyczny powód na OBU
-# próbach: `thesis_invalidation` semantycznie pusty) ujawnił, że retry
-# wprowadzony w Fazie 6f był ŚLEPYM powtórzeniem IDENTYCZNEGO promptu —
-# zero informacji o tym, co konkretnie zawiodło, więc druga próba miała
-# szansę powodzenia tylko z czystego losu próbkowania modelu (zero
-# korekty systematycznej tendencji). Ta funkcja dołącza do promptu
-# retry KONKRETNY powód poprzedniego niepowodzenia (treść
-# `AnalysisValidationError`, która już nazywa zawodzące pole) + jawne
-# żądanie poprawionej, kompletnej odpowiedzi — żeby druga próba miała
-# realną szansę naprawić DOKŁADNIE to, co zawiodło, nie zgadywać od
-# nowa. Nie zmienia MAX_ANALYSIS_ATTEMPTS (wciąż 2) ani walidatora.
-def _append_validation_retry_feedback(prompt: str, validation_error: AnalysisValidationError) -> str:
-    return (
-        prompt
-        + "\n\nUWAGA — POPRZEDNIA ODPOWIEDŹ ODRZUCONA PRZEZ WALIDACJĘ:\n"
-        f"{validation_error}\n"
-        "Zwróć POPRAWIONĄ, kompletną odpowiedź zgodną z instrukcjami powyżej. "
-        "Pole, które zawiodło walidację, MUSI być semantycznie niepuste (nie "
-        '""/null/[]/"brak"/"N/A") i zawierać konkretną, materialną treść.'
-    )
+# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06): zastępuje full-response
+# retry z Faz 6f/6g. Dwa REALNE validation runy (validation-6f, po
+# bdfcc92 validation-6g) wykazały, że full-response retry (ślepy, i z
+# dołączonym konkretnym feedbackiem) NIE naprawiał rzetelnie pustego
+# `thesis_invalidation` -- 1/5 COMPLETE w obu runach, 10 pełnych Claude
+# calls dla 5 analiz w drugim. Wniosek architektoniczny właścicielki:
+# full-analysis retry jest niewłaściwym mechanizmem naprawczym dla
+# pojedynczego brakującego pola. Nowy flow (w `_analyze_shortlist_and_
+# report` niżej): maksymalnie 1 full analysis call + (TYLKO gdy jedynym
+# naruszeniem jest semantycznie pusty `thesis_invalidation`) 1 targeted
+# repair call -- nigdy więcej, i NIE generalizowany na inne pola (patrz
+# `is_only_thesis_invalidation_semantically_empty`, analysis_schema.py).
 
 
 def _analyze_shortlist_and_report(
@@ -1046,31 +1007,33 @@ def _analyze_shortlist_and_report(
                     decline_snapshot=decline_snapshot_ctx, valuation_result=valuation_result_for_prompt,
                 )
 
-                # BUGFIX V0 OUTPUT CONTRACT (Faza 6f): bounded retry na
-                # AnalysisValidationError (strukturalna LUB semantic
-                # completeness) -- ClaudeError (błąd API) nadal przerywa
-                # natychmiast, bez retry, zachowując istniejący fail-fast
-                # (Faza 6c). Usage WSZYSTKICH realnych prób jest sumowane
-                # (_sum_claude_usage), żeby telemetria nie zaniżała
-                # realnego kosztu tego kandydata. Faza 6g: retry NIE jest
-                # ślepym powtórzeniem -- każda próba > 1 dostaje konkretny
-                # powód poprzedniego niepowodzenia dołączony do promptu
-                # (_append_validation_retry_feedback).
+                # TARGETED FIELD REPAIR (Faza 6h): dokładnie 1 full
+                # analysis call. Jeśli przejdzie walidację od razu ->
+                # COMPLETE. Jeśli JEDYNYM naruszeniem jest semantycznie
+                # pusty `thesis_invalidation` -> dokładnie 1 dodatkowy,
+                # minimalny repair call (WYŁĄCZNIE to pole), scalony w
+                # analizę i zwalidowany PONOWNIE w całości. Każdy inny
+                # błąd walidacji (strukturalny lub inne pole semantycznie
+                # puste, w tym thesis_invalidation + inne pole naraz) ->
+                # od razu FAILED, zero repair (nie generalizujemy na
+                # przypadki, dla których nie mamy dowodu z realnych
+                # runów). ClaudeError (błąd API) -- na KTÓRYMKOLWIEK z
+                # dwóch wywołań -- zachowuje istniejący fail-fast (Faza
+                # 6c): zatrzymuje dalsze NOWE wywołania w tym przebiegu.
                 analysis = None
-                usage_attempts: list = []
                 claude_error: ClaudeError | None = None
                 validation_error: AnalysisValidationError | None = None
-                for attempt in range(1, MAX_ANALYSIS_ATTEMPTS + 1):
-                    attempt_prompt = (
-                        prompt if validation_error is None
-                        else _append_validation_retry_feedback(prompt, validation_error)
-                    )
-                    try:
-                        generated = claude_client.generate_analysis(attempt_prompt)
-                    except ClaudeError as exc:
-                        claude_error = exc
-                        break
-                    usage_attempts.append(generated.usage)
+                usage: ClaudeUsage | None = None
+                repair_usage: ClaudeUsage | None = None
+
+                try:
+                    generated = claude_client.generate_analysis(prompt)
+                except ClaudeError as exc:
+                    claude_error = exc
+                    generated = None
+
+                if generated is not None:
+                    usage = generated.usage
                     try:
                         validate_analysis_output(
                             generated.output, allowed_source_ids=set(source_id_map),
@@ -1078,21 +1041,60 @@ def _analyze_shortlist_and_report(
                         )
                     except AnalysisValidationError as exc:
                         validation_error = exc
-                        print(
-                            f"  {ticker}: próba {attempt}/{MAX_ANALYSIS_ATTEMPTS} nie przeszła "
-                            f"walidacji (strukturalnej lub semantic completeness): {exc}"
-                        )
-                        continue
-                    analysis = generated.output
-                    validation_error = None
-                    break
+                        print(f"  {ticker}: pełna analiza nie przeszła walidacji: {exc}")
+                    else:
+                        analysis = generated.output
 
-                usage = _sum_claude_usage(usage_attempts)
+                    if (
+                        analysis is None
+                        and claude_error is None
+                        and is_only_thesis_invalidation_semantically_empty(generated.output)
+                    ):
+                        repair_prompt = build_thesis_invalidation_repair_prompt(
+                            ticker=ticker,
+                            bull_case=generated.output.bull_case,
+                            bear_case=generated.output.bear_case,
+                            biggest_unknown=generated.output.biggest_unknown,
+                            why_market_may_be_right=generated.output.why_market_may_be_right,
+                            why_this_may_not_be_a_bargain=generated.output.why_this_may_not_be_a_bargain,
+                            metrics=metrics, current_price=current_price,
+                            decline_snapshot=decline_snapshot_ctx,
+                            valuation_result=valuation_result_for_prompt,
+                        )
+                        try:
+                            repaired = claude_client.repair_thesis_invalidation(repair_prompt)
+                        except ClaudeError as exc:
+                            claude_error = exc
+                        else:
+                            repair_usage = repaired.usage
+                            merged = generated.output.model_copy(
+                                update={"thesis_invalidation": repaired.output.thesis_invalidation}
+                            )
+                            try:
+                                validate_analysis_output(
+                                    merged, allowed_source_ids=set(source_id_map),
+                                    pdf_paginated_source_ids=set(),
+                                )
+                            except AnalysisValidationError as exc2:
+                                validation_error = exc2
+                                print(
+                                    f"  {ticker}: targeted repair thesis_invalidation nie "
+                                    f"naprawił walidacji (bez kolejnego repair): {exc2}"
+                                )
+                            else:
+                                analysis = merged
+                                validation_error = None
+                    elif analysis is None and claude_error is None:
+                        print(
+                            f"  {ticker}: brak targeted repair -- naruszenie walidacji nie jest "
+                            "izolowanym, pustym thesis_invalidation."
+                        )
 
                 if claude_error is not None:
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
                         llm_error=str(claude_error), cache_key=cache_key, usage=usage,
+                        repair_usage=repair_usage,
                     )
                     conn.commit()
                     print(f"  {ticker}: FAILED (Claude API error): {claude_error}")
@@ -1105,18 +1107,16 @@ def _analyze_shortlist_and_report(
                     continue
 
                 if analysis is None:
-                    # Kontrakt nie spełniony po MAX_ANALYSIS_ATTEMPTS realnych
-                    # wywołaniach -> FAILED, NIGDY COMPLETE (wymóg właścicielki,
-                    # BUGFIX V0 OUTPUT CONTRACT, punkt 3).
+                    # Kontrakt nie spełniony (walidacja i, jeśli zasadne,
+                    # targeted repair) -> FAILED, NIGDY COMPLETE (wymóg
+                    # właścicielki, BUGFIX V0 OUTPUT CONTRACT, punkt 3).
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
                         llm_error=str(validation_error), cache_key=cache_key, usage=usage,
+                        repair_usage=repair_usage,
                     )
                     conn.commit()
-                    print(
-                        f"  {ticker}: FAILED (walidacja po {MAX_ANALYSIS_ATTEMPTS} próbach): "
-                        f"{validation_error}"
-                    )
+                    print(f"  {ticker}: FAILED (walidacja): {validation_error}")
                     continue
 
                 score = compute_score(
@@ -1165,11 +1165,23 @@ def _analyze_shortlist_and_report(
                     llm_cache_read_input_tokens=usage.cache_read_input_tokens,
                     llm_thinking_tokens=usage.thinking_tokens,
                     llm_service_tier=usage.service_tier,
+                    llm_repair_response_model=repair_usage.model if repair_usage else None,
+                    llm_repair_input_tokens=repair_usage.input_tokens if repair_usage else None,
+                    llm_repair_output_tokens=repair_usage.output_tokens if repair_usage else None,
+                    llm_repair_cache_creation_input_tokens=(
+                        repair_usage.cache_creation_input_tokens if repair_usage else None
+                    ),
+                    llm_repair_cache_read_input_tokens=(
+                        repair_usage.cache_read_input_tokens if repair_usage else None
+                    ),
+                    llm_repair_thinking_tokens=repair_usage.thinking_tokens if repair_usage else None,
+                    llm_repair_service_tier=repair_usage.service_tier if repair_usage else None,
                 )
                 insert_analysis_sources(conn, analysis_id, packet)
                 update_live_scan_candidate_llm_status(
                     conn, run_id=run_id, cik=cik, llm_status="COMPLETE",
                     cache_key=cache_key, analysis_id=analysis_id, usage=usage,
+                    repair_usage=repair_usage,
                 )
                 conn.commit()
                 print(f"  {ticker}: COMPLETE (analysis_id={analysis_id})")
@@ -1189,6 +1201,12 @@ def _analyze_shortlist_and_report(
         f"cache_creation_input_tokens: {usage_summary['total_cache_creation_input_tokens']}, "
         f"cache_read_input_tokens: {usage_summary['total_cache_read_input_tokens']}, "
         f"thinking_tokens: {usage_summary['total_thinking_tokens']}\n"
+        # Faza 6h (TARGETED FIELD REPAIR) -- repair calls liczone i
+        # raportowane ODRĘBNIE od full analysis calls (specyfikacja
+        # właścicielki, punkt 3: musi być możliwe odróżnienie).
+        f"Targeted repair calls (thesis_invalidation): {usage_summary['repair_calls']}, "
+        f"repair input_tokens: {usage_summary['total_repair_input_tokens']}, "
+        f"repair output_tokens: {usage_summary['total_repair_output_tokens']}\n"
         "(Brak wyliczonego kosztu $ — brak dziś zweryfikowanego cennika per-token, "
         "patrz COST AUDIT Faza 6d; surowe tokeny powyżej są realne, nie szacowane.)"
     )

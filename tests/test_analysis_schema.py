@@ -7,6 +7,8 @@ import pytest
 from buffett_scanner.analysis_schema import (
     AnalysisOutput,
     AnalysisValidationError,
+    ThesisInvalidationRepair,
+    is_only_thesis_invalidation_semantically_empty,
     validate_analysis_output,
 )
 
@@ -217,6 +219,61 @@ def test_validate_accepts_concrete_honest_unknown_statement():
     validate_analysis_output(
         result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
     )  # nie rzuca
+
+
+# ---------------------------------------------------------------------------
+# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06) -- `is_only_thesis_invalidation_
+# semantically_empty` decyduje, czy targeted repair jest WOGÓLE zasadny.
+# Specyfikacja właścicielki, punkt 2: "jeżeli brakuje/inwalidne jest [inne
+# pole] ... zachowaj bezpieczny FAILED" -- repair NIGDY nie jest próbowany,
+# gdy zawodzi więcej niż jedno pole.
+# ---------------------------------------------------------------------------
+
+
+def test_is_only_thesis_invalidation_semantically_empty_true_when_isolated():
+    """Test B (specyfikacja właścicielki): wszystkie pozostałe wymagane
+    pola są semantycznie niepuste, zawodzi WYŁĄCZNIE thesis_invalidation
+    -- jak CBOE/DECK/INTU/ACN w realnym live runie."""
+    result = make_valid_output(thesis_invalidation=[])
+    assert is_only_thesis_invalidation_semantically_empty(result) is True
+
+
+def test_is_only_thesis_invalidation_semantically_empty_false_when_already_valid():
+    result = make_valid_output()
+    assert is_only_thesis_invalidation_semantically_empty(result) is False
+
+
+@pytest.mark.parametrize(
+    "field_name", ["bull_case", "bear_case", "why_market_may_be_right", "why_this_may_not_be_a_bargain"]
+)
+def test_is_only_thesis_invalidation_semantically_empty_false_when_other_list_field_also_empty(field_name):
+    """Test D (specyfikacja właścicielki): thesis_invalidation ORAZ inne
+    wymagane pole są puste -> NIE jest to "wyłącznie thesis_invalidation",
+    więc targeted repair nie może być próbowany (musi iść do FAILED)."""
+    result = make_valid_output(thesis_invalidation=[], **{field_name: []})
+    assert is_only_thesis_invalidation_semantically_empty(result) is False
+
+
+def test_is_only_thesis_invalidation_semantically_empty_false_when_biggest_unknown_also_empty():
+    result = make_valid_output(thesis_invalidation=[], biggest_unknown="")
+    assert is_only_thesis_invalidation_semantically_empty(result) is False
+
+
+def test_is_only_thesis_invalidation_semantically_empty_true_for_placeholder_only():
+    result = make_valid_output(thesis_invalidation=["brak"])
+    assert is_only_thesis_invalidation_semantically_empty(result) is True
+
+
+def test_thesis_invalidation_repair_model_accepts_minimal_list_payload():
+    """`ThesisInvalidationRepair` (Faza 6h) -- WYŁĄCZNIE jedno pole, bez
+    verification_items/cited_source_ids/innych pól AnalysisOutput."""
+    repaired = ThesisInvalidationRepair.model_validate(
+        {"thesis_invalidation": ["Utrata kluczowego klienta odpowiadającego za istotną część przychodów."]}
+    )
+    assert repaired.thesis_invalidation == [
+        "Utrata kluczowego klienta odpowiadającego za istotną część przychodów.",
+    ]
+    assert not hasattr(repaired, "bull_case")
 
 
 def test_validate_accepts_payx_like_response():

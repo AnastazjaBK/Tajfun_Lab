@@ -61,6 +61,87 @@ from buffett_scanner.valuation import ValuationResult
 
 SCHEMA_VERSION = "1.0"
 
+# Faza 6g ROOT CAUSE AUDIT -- wydzielone do stałej modułowej, żeby prompt
+# głównej analizy (`build_analysis_prompt`) i prompt targeted repair
+# (`build_thesis_invalidation_repair_prompt`, Faza 6h) zawsze używały
+# IDENTYCZNEGO wymogu kardynalności dla `thesis_invalidation` -- nigdy
+# dwóch niezależnie dryfujących kopii tej instrukcji.
+_THESIS_INVALIDATION_REQUIREMENT = (
+    "MUSISZ podać co najmniej JEDEN konkretny, obserwowalny warunek/zdarzenie, "
+    "które obaliłoby tezę inwestycyjną (nie ogólne 'jeśli sytuacja się pogorszy') "
+    "— np. trwała utrata moat, materialne pogorszenie FCF/marży, materializacja "
+    "konkretnego ryzyka regulacyjnego, niepowodzenie kluczowej integracji/akwizycji, "
+    "utrata istotnego klienta/udziału rynkowego, trwałe pogorszenie konkretnego "
+    "wskaźnika operacyjnego. TO POLE NIE MOŻE BYĆ PUSTE — jeśli dostarczone dane nie "
+    "uzasadniają konkretnego progu liczbowego, sformułuj warunek jakościowo (bez "
+    "wymyślonego progu), ale podaj przynajmniej jeden."
+)
+
+
+def _price_valuation_context_lines(
+    current_price: float | None,
+    decline_snapshot: PriceChangeSnapshot | None,
+    valuation_result: ValuationResult | None,
+) -> list[str]:
+    """Wspólny blok "KONTEKST CENY I WYCENY" (Faza 6f) -- współdzielony
+    przez `build_analysis_prompt` i `build_thesis_invalidation_repair_prompt`
+    (Faza 6h), żeby repair prompt dostawał TĘ SAMĄ reprezentację już
+    policzonych wartości, bez duplikowania formatowania."""
+    lines = [
+        "KONTEKST CENY I WYCENY (policzone przez pipeline — kod, NIE Ty; użyj jako "
+        "DANYCH do oceny tezy inwestycyjnej i Margin of Safety, NIE przeliczaj DCF "
+        "samodzielnie):"
+    ]
+    if current_price is not None:
+        lines.append(f"  Aktualna cena: {current_price}")
+    else:
+        lines.append("  Aktualna cena: NIEDOSTĘPNA w tym wywołaniu")
+
+    if valuation_result is None:
+        lines.append("  Wycena DCF: NIEDOSTĘPNA w tym wywołaniu")
+    elif not valuation_result.implemented:
+        lines.append(f"  Wycena DCF: NIEDOSTĘPNA w tym przebiegu — powód: {valuation_result.reason}")
+    else:
+        lines.append("  Wycena DCF (Owner Earnings proxy FCF), policzona przez kod:")
+        for scenario in ("bear", "base", "bull"):
+            sv = valuation_result.scenarios.get(scenario)
+            if sv is None:
+                continue
+            mos = f"{sv.margin_of_safety_pct:.1f}%" if sv.margin_of_safety_pct is not None else "N/A"
+            lines.append(
+                f"    {scenario.upper()}: intrinsic value/akcję={sv.intrinsic_value_per_share:.2f}, "
+                f"Margin of Safety={mos}"
+            )
+
+    if decline_snapshot is not None:
+        # Każde pole `PriceChangeSnapshot` jest `None` (nie 0!), gdy historia
+        # nie wystarcza na dane okno (zasada DATA UNAVAILABLE, scanner.py) —
+        # formatowanie musi to respektować pole po polu, nigdy zgadywać 0.0.
+        def _fmt_pct(value: float | None) -> str:
+            return f"{value:.2f}%" if value is not None else "N/A"
+
+        lines.append(
+            "  Decline context (zmiana ceny, policzona przez kod): "
+            f"1D={_fmt_pct(decline_snapshot.daily_pct)}, 1T={_fmt_pct(decline_snapshot.week_pct)}, "
+            f"1M={_fmt_pct(decline_snapshot.month_pct)}, 1Q={_fmt_pct(decline_snapshot.quarter_pct)}, "
+            f"YTD={_fmt_pct(decline_snapshot.ytd_pct)}, 1R={_fmt_pct(decline_snapshot.year_pct)}, "
+            f"Drawdown od 52w high={_fmt_pct(decline_snapshot.drawdown_from_52w_high_pct)}, "
+            "Wolumen względny="
+            + (f"{decline_snapshot.relative_volume:.2f}"
+               if decline_snapshot.relative_volume is not None else "N/A")
+        )
+    else:
+        lines.append("  Decline context: NIEDOSTĘPNY w tym wywołaniu")
+
+    lines.append(
+        "  Powyższe dane są JUŻ POLICZONE przez pipeline, nie przez Ciebie — użyj ich "
+        "jako faktów w analizie. NIE twierdź, że nie znasz ceny/Margin of Safety, jeśli "
+        "są podane powyżej. Inne wskaźniki rynkowe (P/E, EV/EBITDA, konsensus analityków "
+        "itd.), których tu NIE podano, rzeczywiście nie są dostępne — jeśli ich "
+        "potrzebujesz, napisz to wprost jako ograniczenie/unknown, nie zgaduj ich wartości."
+    )
+    return lines
+
 
 def build_analysis_prompt(
     *,
@@ -113,15 +194,7 @@ def build_analysis_prompt(
         "- `why_this_may_not_be_a_bargain`: napisz, dlaczego obecna cena może NIE być "
         "okazją (np. wycena już uwzględnia realne ryzyko, margin of safety jest iluzoryczny "
         "z powodu niepewnych założeń).",
-        "- `thesis_invalidation`: MUSISZ podać co najmniej JEDEN konkretny, "
-        "obserwowalny warunek/zdarzenie, które obaliłoby tezę inwestycyjną (nie "
-        "ogólne 'jeśli sytuacja się pogorszy') — np. trwała utrata moat, materialne "
-        "pogorszenie FCF/marży, materializacja konkretnego ryzyka regulacyjnego, "
-        "niepowodzenie kluczowej integracji/akwizycji, utrata istotnego klienta/"
-        "udziału rynkowego, trwałe pogorszenie konkretnego wskaźnika operacyjnego. "
-        "TO POLE NIE MOŻE BYĆ PUSTE — jeśli dostarczone dane nie uzasadniają "
-        "konkretnego progu liczbowego, sformułuj warunek jakościowo (bez "
-        "wymyślonego progu), ale podaj przynajmniej jeden.",
+        f"- `thesis_invalidation`: {_THESIS_INVALIDATION_REQUIREMENT}",
         "- `biggest_unknown`: najważniejsza rzecz, której NIE wiesz z dostarczonych danych "
         "i źródeł, a która mogłaby zmienić ocenę.",
         "- Te pola mają równą wagę z bull_case — ocena, która nie potrafi uczciwie "
@@ -138,59 +211,7 @@ def build_analysis_prompt(
     )
 
     lines.append("")
-    lines.append(
-        "KONTEKST CENY I WYCENY (policzone przez pipeline — kod, NIE Ty; użyj jako "
-        "DANYCH do oceny tezy inwestycyjnej i Margin of Safety, NIE przeliczaj DCF "
-        "samodzielnie):"
-    )
-    if current_price is not None:
-        lines.append(f"  Aktualna cena: {current_price}")
-    else:
-        lines.append("  Aktualna cena: NIEDOSTĘPNA w tym wywołaniu")
-
-    if valuation_result is None:
-        lines.append("  Wycena DCF: NIEDOSTĘPNA w tym wywołaniu")
-    elif not valuation_result.implemented:
-        lines.append(f"  Wycena DCF: NIEDOSTĘPNA w tym przebiegu — powód: {valuation_result.reason}")
-    else:
-        lines.append("  Wycena DCF (Owner Earnings proxy FCF), policzona przez kod:")
-        for scenario in ("bear", "base", "bull"):
-            sv = valuation_result.scenarios.get(scenario)
-            if sv is None:
-                continue
-            mos = f"{sv.margin_of_safety_pct:.1f}%" if sv.margin_of_safety_pct is not None else "N/A"
-            lines.append(
-                f"    {scenario.upper()}: intrinsic value/akcję={sv.intrinsic_value_per_share:.2f}, "
-                f"Margin of Safety={mos}"
-            )
-
-    if decline_snapshot is not None:
-        # Każde pole `PriceChangeSnapshot` jest `None` (nie 0!), gdy historia
-        # nie wystarcza na dane okno (zasada DATA UNAVAILABLE, scanner.py) —
-        # formatowanie musi to respektować pole po polu, nigdy zgadywać 0.0.
-        def _fmt_pct(value: float | None) -> str:
-            return f"{value:.2f}%" if value is not None else "N/A"
-
-        lines.append(
-            "  Decline context (zmiana ceny, policzona przez kod): "
-            f"1D={_fmt_pct(decline_snapshot.daily_pct)}, 1T={_fmt_pct(decline_snapshot.week_pct)}, "
-            f"1M={_fmt_pct(decline_snapshot.month_pct)}, 1Q={_fmt_pct(decline_snapshot.quarter_pct)}, "
-            f"YTD={_fmt_pct(decline_snapshot.ytd_pct)}, 1R={_fmt_pct(decline_snapshot.year_pct)}, "
-            f"Drawdown od 52w high={_fmt_pct(decline_snapshot.drawdown_from_52w_high_pct)}, "
-            "Wolumen względny="
-            + (f"{decline_snapshot.relative_volume:.2f}"
-               if decline_snapshot.relative_volume is not None else "N/A")
-        )
-    else:
-        lines.append("  Decline context: NIEDOSTĘPNY w tym wywołaniu")
-
-    lines.append(
-        "  Powyższe dane są JUŻ POLICZONE przez pipeline, nie przez Ciebie — użyj ich "
-        "jako faktów w analizie. NIE twierdź, że nie znasz ceny/Margin of Safety, jeśli "
-        "są podane powyżej. Inne wskaźniki rynkowe (P/E, EV/EBITDA, konsensus analityków "
-        "itd.), których tu NIE podano, rzeczywiście nie są dostępne — jeśli ich "
-        "potrzebujesz, napisz to wprost jako ograniczenie/unknown, nie zgaduj ich wartości."
-    )
+    lines.extend(_price_valuation_context_lines(current_price, decline_snapshot, valuation_result))
 
     lines.append("")
     lines.append("ŹRÓDŁA DOSTĘPNE DO CYTOWANIA:")
@@ -201,3 +222,68 @@ def build_analysis_prompt(
         lines.append("  (brak — nie cytuj żadnego dokumentu, verification_items musi być puste)")
 
     return "\n".join(lines), source_id_map
+
+
+def build_thesis_invalidation_repair_prompt(
+    *,
+    ticker: str,
+    bull_case: list[str],
+    bear_case: list[str],
+    biggest_unknown: str,
+    why_market_may_be_right: list[str],
+    why_this_may_not_be_a_bargain: list[str],
+    metrics: dict[str, float | None],
+    current_price: float | None = None,
+    decline_snapshot: PriceChangeSnapshot | None = None,
+    valuation_result: ValuationResult | None = None,
+) -> str:
+    """Faza 6h (TARGETED FIELD REPAIR) -- minimalny prompt dla dokładnie
+    JEDNEGO empirycznie potwierdzonego przypadku naprawy: cała reszta
+    analizy jest poprawna, zawodzi WYŁĄCZNIE `thesis_invalidation`.
+    Zwraca TYLKO tekst promptu (nie source_id_map) -- celowo NIE
+    zawiera listy źródeł/cytowań (`sources`), ponieważ
+    `thesis_invalidation` nie ma wymogu cytowania (patrz
+    `ThesisInvalidationRepair` -- jedno pole, bez `verification_items`).
+    Dostaje dokładnie ten kontekst, którego potrzebuje do sformułowania
+    warunku falsyfikacji tezy -- istniejącą treść analizy (bull_case/
+    bear_case/biggest_unknown/why_market_may_be_right/
+    why_this_may_not_be_a_bargain) plus te same deterministyczne
+    metrics/current_price/decline/valuation co prompt głównej analizy
+    -- nigdy cały pierwotny prompt/source payload."""
+    lines = [
+        f"To jest TARGETED REPAIR dla spółki {ticker} -- naprawiasz WYŁĄCZNIE "
+        "jedno pole istniejącej analizy value investing (Warren Buffett), "
+        "`thesis_invalidation`, które w poprzedniej odpowiedzi było semantycznie "
+        "puste. Reszta analizy (poniżej, jako kontekst) jest już gotowa i "
+        "ZAAKCEPTOWANA -- nie zmieniasz jej, nie komentujesz jej, nie poprawiasz "
+        "niczego innego. Zwróć WYŁĄCZNIE pole `thesis_invalidation`.",
+        "",
+        "ISTNIEJĄCA ANALIZA (kontekst, nie do zmiany):",
+        f"  bull_case: {bull_case}",
+        f"  bear_case: {bear_case}",
+        f"  why_market_may_be_right: {why_market_may_be_right}",
+        f"  why_this_may_not_be_a_bargain: {why_this_may_not_be_a_bargain}",
+        f"  biggest_unknown: {biggest_unknown}",
+        "",
+        "DETERMINISTYCZNE WSKAŹNIKI FINANSOWE (policzone przez kod, nie przez Ciebie):",
+    ]
+    for key, value in metrics.items():
+        lines.append(f"  {key}: {value}")
+
+    lines.append("")
+    lines.extend(_price_valuation_context_lines(current_price, decline_snapshot, valuation_result))
+
+    lines.append("")
+    lines.append("ZADANIE:")
+    lines.append(f"- `thesis_invalidation`: {_THESIS_INVALIDATION_REQUIREMENT}")
+    lines.append(
+        "- Warunek MUSI wynikać z powyższej istniejącej analizy i danych -- nie "
+        "wymyślaj nowych faktów, które nie są obecne w kontekście powyżej, i nie "
+        "wymyślaj arbitralnych progów liczbowych, których dane nie uzasadniają."
+    )
+    lines.append(
+        '- Pole "ticker" nie istnieje w tym schemacie -- zwróć wyłącznie '
+        '"thesis_invalidation" jako listę co najmniej jednego konkretnego ciągu tekstowego.'
+    )
+
+    return "\n".join(lines)

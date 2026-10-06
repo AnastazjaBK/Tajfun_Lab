@@ -17,10 +17,14 @@ stronie kodu — nigdy nie ufamy samemu twierdzeniu modelu.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypeVar
 
 import anthropic
+from pydantic import BaseModel
 
-from buffett_scanner.analysis_schema import AnalysisOutput
+from buffett_scanner.analysis_schema import AnalysisOutput, ThesisInvalidationRepair
+
+_OutputT = TypeVar("_OutputT", bound=BaseModel)
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,17 @@ class ClaudeAnalysisResult:
     usage: ClaudeUsage
 
 
+@dataclass(frozen=True)
+class ClaudeRepairResult:
+    """Wynik `repair_thesis_invalidation` (Faza 6h, TARGETED FIELD
+    REPAIR) -- analogiczne do `ClaudeAnalysisResult`, ale dla
+    minimalnego, dedykowanego schematu `ThesisInvalidationRepair`
+    (WYŁĄCZNIE to jedno pole, nigdy cała analiza)."""
+
+    output: ThesisInvalidationRepair
+    usage: ClaudeUsage
+
+
 class ClaudeError(RuntimeError):
     def __init__(self, message: str, *, usage: ClaudeUsage | None = None):
         super().__init__(message)
@@ -95,11 +110,11 @@ class ClaudeClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def generate_analysis(self, prompt: str) -> ClaudeAnalysisResult:
-        """Wywołuje Claude API i zwraca zwalidowany strukturalnie
-        `AnalysisOutput` razem z realnym `ClaudeUsage` (Faza 6e —
-        telemetria usage). Rzuca `ClaudeError` na każdy błąd API, odmowę
-        (`stop_reason == "refusal"`) lub brak sparsowanego wyjścia —
+    def _parse(self, prompt: str, output_format: type[_OutputT]) -> tuple[_OutputT, ClaudeUsage]:
+        """Rdzeń współdzielony przez `generate_analysis`/
+        `repair_thesis_invalidation` (Faza 6h) -- identyczna obsługa
+        błędów API/refusal/nie-sparsowalnego JSON, sparametryzowana
+        wyłącznie `output_format`. Rzuca `ClaudeError` na każdy błąd,
         nigdy nie zwraca częściowego/domyślnego wyniku po cichu. Gdy
         odpowiedź realnie istniała (refusal/nie-sparsowalny JSON),
         `ClaudeError.usage` niesie jej realny `usage` dalej -- gdy API
@@ -110,7 +125,7 @@ class ClaudeClient:
                 model=self._model,
                 max_tokens=self._max_output_tokens,
                 messages=[{"role": "user", "content": prompt}],
-                output_format=AnalysisOutput,
+                output_format=output_format,
             )
         except anthropic.APIStatusError as exc:
             raise ClaudeError(
@@ -141,6 +156,23 @@ class ClaudeClient:
                 "Claude API nie zwróciło poprawnie sparsowanego wyjścia (parsed_output=None).",
                 usage=ClaudeUsage.from_response(response),
             )
-        return ClaudeAnalysisResult(
-            output=response.parsed_output, usage=ClaudeUsage.from_response(response),
-        )
+        return response.parsed_output, ClaudeUsage.from_response(response)
+
+    def generate_analysis(self, prompt: str) -> ClaudeAnalysisResult:
+        """Wywołuje Claude API i zwraca zwalidowany strukturalnie
+        `AnalysisOutput` razem z realnym `ClaudeUsage` (Faza 6e —
+        telemetria usage). Patrz `_parse` co do semantyki błędów."""
+        output, usage = self._parse(prompt, AnalysisOutput)
+        return ClaudeAnalysisResult(output=output, usage=usage)
+
+    def repair_thesis_invalidation(self, prompt: str) -> ClaudeRepairResult:
+        """Faza 6h, TARGETED FIELD REPAIR -- osobne, minimalne wywołanie
+        Claude API zwracające WYŁĄCZNIE `ThesisInvalidationRepair`
+        (jedno pole), nie całą `AnalysisOutput`. Zastępuje poprzedni
+        mechanizm pełnego ślepego/feedback retry (Faza 6f/6g) dla
+        dokładnie jednego, empirycznie potwierdzonego przypadku:
+        reszta analizy jest poprawna, zawodzi WYŁĄCZNIE
+        `thesis_invalidation`. Semantyka błędów identyczna jak
+        `generate_analysis` (patrz `_parse`)."""
+        output, usage = self._parse(prompt, ThesisInvalidationRepair)
+        return ClaudeRepairResult(output=output, usage=usage)

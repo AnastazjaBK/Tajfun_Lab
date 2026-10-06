@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import anthropic
 import pytest
 
-from buffett_scanner.analysis_schema import AnalysisOutput
-from buffett_scanner.providers.claude import ClaudeClient, ClaudeError, ClaudeUsage
+from buffett_scanner.analysis_schema import AnalysisOutput, ThesisInvalidationRepair
+from buffett_scanner.providers.claude import ClaudeClient, ClaudeError, ClaudeRepairResult, ClaudeUsage
 
 VALID_PAYLOAD = {
     "ticker": "AAPL",
@@ -169,3 +169,72 @@ def test_generate_analysis_wraps_api_status_error(monkeypatch):
     with pytest.raises(ClaudeError, match="429") as exc_info:
         client.generate_analysis("dummy prompt")
     assert exc_info.value.usage is None
+
+
+# ---------------------------------------------------------------------------
+# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06) -- `repair_thesis_invalidation`
+# współdzieli `_parse` z `generate_analysis` (identyczna obsługa błędów API/
+# refusal/nie-sparsowalnego JSON, patrz testy wyżej) -- testy niżej pilnują
+# TYLKO tego, co jest odrębne: minimalny schemat `ThesisInvalidationRepair`
+# (WYŁĄCZNIE jedno pole) i zwracany typ `ClaudeRepairResult`.
+# ---------------------------------------------------------------------------
+
+
+def test_repair_thesis_invalidation_returns_parsed_output_and_real_usage(monkeypatch):
+    client = ClaudeClient("dummy-key", model="claude-sonnet-5", max_output_tokens=1000)
+    parsed = ThesisInvalidationRepair(
+        thesis_invalidation=["Trwały spadek marży operacyjnej poniżej historycznego poziomu."],
+    )
+    fake_response = SimpleNamespace(
+        stop_reason="end_turn", parsed_output=parsed, model="claude-sonnet-5",
+        usage=_fake_usage(input_tokens=300, output_tokens=40),
+    )
+    monkeypatch.setattr(client._client.messages, "parse", lambda **kwargs: fake_response)
+
+    result = client.repair_thesis_invalidation("dummy repair prompt")
+    assert isinstance(result, ClaudeRepairResult)
+    assert result.output.thesis_invalidation == [
+        "Trwały spadek marży operacyjnej poniżej historycznego poziomu.",
+    ]
+    assert result.usage == ClaudeUsage(
+        model="claude-sonnet-5", input_tokens=300, output_tokens=40,
+        cache_creation_input_tokens=None, cache_read_input_tokens=None,
+        thinking_tokens=None, service_tier="standard",
+    )
+
+
+def test_repair_thesis_invalidation_passes_dedicated_minimal_output_format(monkeypatch):
+    """Repair call MUSI zwracać wyłącznie `ThesisInvalidationRepair`
+    (jedno pole), nigdy całą `AnalysisOutput` -- to jest sam sens
+    TARGETED FIELD REPAIR (specyfikacja właścicielki, punkt 7)."""
+    client = ClaudeClient("dummy-key", model="claude-sonnet-5", max_output_tokens=1234)
+    captured = {}
+
+    def fake_parse(**kwargs):
+        captured.update(kwargs)
+        parsed = ThesisInvalidationRepair(thesis_invalidation=["x" * 20])
+        return SimpleNamespace(
+            stop_reason="end_turn", parsed_output=parsed, model="claude-sonnet-5",
+            usage=_fake_usage(),
+        )
+
+    monkeypatch.setattr(client._client.messages, "parse", fake_parse)
+    client.repair_thesis_invalidation("dummy repair prompt")
+
+    assert captured["output_format"] is ThesisInvalidationRepair
+    assert captured["messages"] == [{"role": "user", "content": "dummy repair prompt"}]
+
+
+def test_repair_thesis_invalidation_raises_on_refusal_but_carries_real_usage(monkeypatch):
+    """Patrz `test_generate_analysis_raises_on_refusal_but_carries_real_usage`
+    -- `_parse` jest współdzielony, więc semantyka błędu jest identyczna."""
+    client = ClaudeClient("dummy-key", model="claude-sonnet-5")
+    fake_response = SimpleNamespace(
+        stop_reason="refusal", parsed_output=None, model="claude-sonnet-5",
+        usage=_fake_usage(input_tokens=200, output_tokens=10),
+    )
+    monkeypatch.setattr(client._client.messages, "parse", lambda **kwargs: fake_response)
+
+    with pytest.raises(ClaudeError, match="refusal") as exc_info:
+        client.repair_thesis_invalidation("dummy repair prompt")
+    assert exc_info.value.usage.input_tokens == 200

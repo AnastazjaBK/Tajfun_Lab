@@ -6,6 +6,8 @@ walk-forward na UNIQUE constraint w `backtest_candidates`)."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import buffett_scanner.cli as cli
@@ -462,15 +464,29 @@ class _CountingClaudeClient:
 
     call_count = {"n": 0}
     fail_tickers: set[str] = set()
-    # Faza 6f (BUGFIX V0 OUTPUT CONTRACT): tickery, dla których fake KAŻDA
-    # próba (oryginalna i retry) zwraca semantycznie puste pola anti-bias
-    # -- symuluje model, który nigdy nie poprawia się przy retry, żeby
-    # sprawdzić, że po MAX_ANALYSIS_ATTEMPTS status jest FAILED, NIE COMPLETE.
+    # Faza 6f (BUGFIX V0 OUTPUT CONTRACT): tickery, dla których fake zwraca
+    # WIELE semantycznie pustych pól anti-bias naraz (thesis_invalidation
+    # ORAZ biggest_unknown) -- jak CBOE/DECK/INTU/ACN w realnym live runie.
+    # Faza 6h: to NIE jest izolowany przypadek thesis_invalidation, więc
+    # musi iść prosto do FAILED, bez targeted repair (Test D).
     semantically_incomplete_tickers: set[str] = set()
-    # Faza 6g: pełna treść promptu każdego wywołania, w kolejności -- do
-    # sprawdzenia, że retry NIE jest ślepym powtórzeniem identycznego
-    # promptu (musi nieść konkretny powód poprzedniego niepowodzenia).
+    # Faza 6h (TARGETED FIELD REPAIR): tickery, dla których fake zwraca
+    # WYŁĄCZNIE puste thesis_invalidation -- wszystkie inne wymagane pola
+    # (bull_case/bear_case/why_market_may_be_right/why_this_may_not_be_a_
+    # bargain/biggest_unknown) poprawne. To jest izolowany przypadek, dla
+    # którego targeted repair MUSI być próbowany (Test B/C).
+    thesis_invalidation_only_empty_tickers: set[str] = set()
+    # Faza 6h: tickery, dla których SAM repair call też zwraca semantycznie
+    # puste thesis_invalidation -- FAILED po repair, bez kolejnego repair
+    # (Test C).
+    repair_fails_tickers: set[str] = set()
+    repair_call_count = {"n": 0}
+    # Pełna treść promptu każdego full analysis call, w kolejności -- m.in.
+    # do potwierdzenia, że full-analysis call nigdy nie jest powtarzany
+    # (Faza 6h usunęła full-response retry -- co najwyżej 1 full call).
     received_prompts: list = []
+    # Faza 6h: pełna treść promptu każdego targeted repair call, w kolejności.
+    received_repair_prompts: list = []
 
     def __init__(self, api_key, *, model, max_output_tokens=4000):
         pass
@@ -528,6 +544,31 @@ class _CountingClaudeClient:
                 )
                 return ClaudeAnalysisResult(output=incomplete_output, usage=incomplete_usage)
 
+        for ticker in self.thesis_invalidation_only_empty_tickers:
+            if f'"{ticker}"' in prompt:
+                isolated_incomplete_output = AnalysisOutput(
+                    ticker=ticker, schema_version="1.0",
+                    business_understandability=ScoredSection(score=5, confidence="MEDIUM"),
+                    moat=MoatSection(score=6, confidence="MEDIUM"),
+                    financial_quality_commentary=FinancialQualityCommentary(confidence="MEDIUM"),
+                    management_capital_allocation=ManagementSection(score=6, confidence="MEDIUM"),
+                    fear_analysis=FearAnalysis(classification="TEMPORARY", confidence="MEDIUM", trigger="x"),
+                    dividend_trap_alert=DividendTrapAlert(triggered=False),
+                    bull_case=["Solidna pozycja rynkowa i stabilne przepływy pieniężne."],
+                    bear_case=["Rosnąca konkurencja może ograniczyć tempo wzrostu przychodów."],
+                    why_market_may_be_right=["Spadek może odzwierciedlać trwałe spowolnienie wzrostu."],
+                    why_this_may_not_be_a_bargain=["Obecna wycena może już uwzględniać realne ryzyko."],
+                    thesis_invalidation=[],  # JEDYNY semantycznie puste pole -- izolowany przypadek
+                    biggest_unknown="Nie wiadomo, czy spadek marży w ostatnim kwartale jest trwały czy cykliczny.",
+                    cited_source_ids=["src-1"],
+                )
+                isolated_incomplete_usage = ClaudeUsage(
+                    model="claude-sonnet-5", input_tokens=950, output_tokens=140,
+                    cache_creation_input_tokens=None, cache_read_input_tokens=None,
+                    thinking_tokens=None, service_tier="standard",
+                )
+                return ClaudeAnalysisResult(output=isolated_incomplete_output, usage=isolated_incomplete_usage)
+
         output = AnalysisOutput(
             ticker="X", schema_version="1.0",
             business_understandability=ScoredSection(score=5, confidence="MEDIUM"),
@@ -550,6 +591,43 @@ class _CountingClaudeClient:
             thinking_tokens=None, service_tier="standard",
         )
         return ClaudeAnalysisResult(output=output, usage=usage)
+
+    def repair_thesis_invalidation(self, prompt):
+        """Faza 6h (TARGETED FIELD REPAIR) -- fake dedykowanego, minimalnego
+        repair call. `repair_fails_tickers` symuluje repair, który SAM
+        zwraca semantycznie puste `thesis_invalidation` (Test C) -- w
+        przeciwnym razie zwraca poprawioną, konkretną wartość (Test B).
+        Ticker rozpoznawany po treści promptu (patrz
+        `build_thesis_invalidation_repair_prompt`, prompt.py, zawsze
+        zawiera "dla spółki {ticker}")."""
+        from buffett_scanner.analysis_schema import ThesisInvalidationRepair
+        from buffett_scanner.providers.claude import ClaudeRepairResult, ClaudeUsage
+
+        type(self).repair_call_count["n"] += 1
+        type(self).received_repair_prompts.append(prompt)
+
+        for ticker in self.repair_fails_tickers:
+            if f"dla spółki {ticker}" in prompt:
+                empty_repair = ThesisInvalidationRepair(thesis_invalidation=[])
+                empty_usage = ClaudeUsage(
+                    model="claude-sonnet-5", input_tokens=250, output_tokens=20,
+                    cache_creation_input_tokens=None, cache_read_input_tokens=None,
+                    thinking_tokens=None, service_tier="standard",
+                )
+                return ClaudeRepairResult(output=empty_repair, usage=empty_usage)
+
+        repaired = ThesisInvalidationRepair(
+            thesis_invalidation=[
+                "Trwały spadek retention rate klientów poniżej historycznego poziomu "
+                "wskazywałby na erozję przewagi konkurencyjnej.",
+            ],
+        )
+        repair_usage = ClaudeUsage(
+            model="claude-sonnet-5", input_tokens=300, output_tokens=40,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            thinking_tokens=None, service_tier="standard",
+        )
+        return ClaudeRepairResult(output=repaired, usage=repair_usage)
 
 
 def _set_live_scan_env(monkeypatch):
@@ -599,6 +677,10 @@ def test_run_live_scan_shortlist_limit_only_analyzes_top_n(tmp_path, monkeypatch
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = set()
     _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = set()
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -635,6 +717,10 @@ def test_analyze_live_scan_shortlist_incomplete_status_never_emits_partial_repor
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = {"AAPL"}
     _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = set()
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -675,6 +761,10 @@ def test_analyze_live_scan_shortlist_resume_skips_complete_and_finishes(
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = {"AAPL"}
     _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = set()
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -714,6 +804,10 @@ def test_analyze_live_scan_shortlist_cache_hit_reuses_prior_analysis(
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = set()
     _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = set()
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -750,24 +844,36 @@ def test_analyze_live_scan_shortlist_cache_hit_reuses_prior_analysis(
 # kompletność (retry bounded, FAILED po wyczerpaniu prób, NIE COMPLETE),
 # a dotychczasowe failure/resume i usage telemetry nadal działają.
 # ---------------------------------------------------------------------------
+#
+# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06): DWA REALNE validation runy
+# (validation-6f, po bdfcc92 validation-6g) wykazały, że full-response
+# retry (ślepy, i z dołączonym konkretnym feedbackiem) NIE naprawiał
+# rzetelnie pustego `thesis_invalidation` -- 1/5 COMPLETE w obu runach.
+# Zastąpione: maksymalnie 1 full analysis call + (TYLKO gdy JEDYNYM
+# naruszeniem jest semantycznie pusty thesis_invalidation) 1 targeted
+# repair call, WYŁĄCZNIE dla tego pola. Testy A-I niżej (specyfikacja
+# właścicielki).
+# ---------------------------------------------------------------------------
 
 
-def test_analyze_live_scan_shortlist_semantically_incomplete_response_retries_then_fails(
+def test_analyze_live_scan_shortlist_clean_response_needs_zero_repair_calls(
     tmp_path, monkeypatch, capsys,
 ):
-    """Testy C/D (specyfikacja właścicielki): odpowiedź z pustym
-    `biggest_unknown`/`thesis_invalidation` (jak CBOE/DECK/INTU/ACN w
-    realnym live runie) nie może przejść jako COMPLETE. Fake Claude
-    ZAWSZE zwraca semantycznie pustą odpowiedź dla AAPL -> musi zostać
-    retry'owana (MAX_ANALYSIS_ATTEMPTS=2 wywołania), potem FAILED, NIGDY
-    COMPLETE -- i NIGDY nie zapisana do `analyses` (immutable, tylko dla
-    realnie kompletnych analiz)."""
+    """Test A (specyfikacja właścicielki): pełna analiza poprawna od razu
+    -> 1 full call, 0 repair calls, COMPLETE. `test_run_live_scan_end_to_
+    end_with_fake_providers` już pokrywa happy path na poziomie `_FakeClaudeClient`
+    -- ten test dodaje jawną asercję ZERO repair calls i NULL kolumn
+    `llm_repair_*` przez `_CountingClaudeClient`."""
     _set_live_scan_env(monkeypatch)
     monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
     monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = set()
-    _CountingClaudeClient.semantically_incomplete_tickers = {"AAPL"}
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = set()
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
     _CountingClaudeClient.received_prompts = []
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
@@ -776,25 +882,119 @@ def test_analyze_live_scan_shortlist_semantically_incomplete_response_retries_th
     out = capsys.readouterr().out
 
     assert exit_code == 0
-    # MAX_ANALYSIS_ATTEMPTS=2 -- bounded retry, nigdy nieskończona pętla
-    # (test 5, specyfikacja BUGFIX V0 OUTPUT CONTRACT Faza 6g).
-    from buffett_scanner.cli import MAX_ANALYSIS_ATTEMPTS
+    assert _CountingClaudeClient.call_count["n"] == 1
+    assert _CountingClaudeClient.repair_call_count["n"] == 0
+    assert "Targeted repair calls (thesis_invalidation): 0" in out
 
-    assert MAX_ANALYSIS_ATTEMPTS == 2
-    assert _CountingClaudeClient.call_count["n"] == 2
-    assert "próba 1/2 nie przeszła walidacji" in out
-    assert "FAILED (walidacja po 2 próbach)" in out
+    from buffett_scanner.db import connect, get_live_scan_candidates
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+    row = get_live_scan_candidates(conn, run_id)[0]
+    assert row["llm_status"] == "COMPLETE"
+    assert row["llm_repair_input_tokens"] is None
+
+
+def test_analyze_live_scan_shortlist_isolated_empty_thesis_invalidation_triggers_one_repair_call(
+    tmp_path, monkeypatch, capsys,
+):
+    """Test B (specyfikacja właścicielki): pełna analiza ma TYLKO puste
+    `thesis_invalidation` (wszystkie inne wymagane pola poprawne) -> 1
+    full call + 1 targeted repair call -> repaired field wstawione -> pełny
+    validator przechodzi -> COMPLETE. Realny przykład root cause: CBOE/
+    DECK/INTU/ACN w live-scan-2026-10-06T083825543395Z."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = set()
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = {"AAPL"}
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
+    _CountingClaudeClient.received_prompts = []
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    exit_code = cli.main(["--db", str(db_path), "run-live-scan", "--sample", "AAPL"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    # Maksymalnie 1 full call + 1 repair call -- nigdy więcej (hard cap,
+    # specyfikacja właścicielki, punkt 1 ostatnia linia).
+    assert _CountingClaudeClient.call_count["n"] == 1
+    assert _CountingClaudeClient.repair_call_count["n"] == 1
+    assert "INCOMPLETE_LLM_ANALYSIS" not in out
+    assert "Targeted repair calls (thesis_invalidation): 1" in out
+
+    # Test E: repair prompt nie zawiera zadania do zmiany innych pól --
+    # dostaje je tylko jako kontekst (nie jako coś do nadpisania).
+    assert len(_CountingClaudeClient.received_repair_prompts) == 1
+
+    from buffett_scanner.db import connect, get_live_scan_candidates
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+    row = get_live_scan_candidates(conn, run_id)[0]
+    assert row["llm_status"] == "COMPLETE"
+    assert row["analysis_id"] is not None
+
+    # Test E/F: merged thesis_invalidation (z repair) jest obecne, reszta
+    # pól analizy i dane deterministyczne NIE są zmienione przez repair.
+    analysis_row = conn.execute(
+        "SELECT llm_raw_output, business_quality_score FROM analyses WHERE analysis_id = ?",
+        (row["analysis_id"],),
+    ).fetchone()
+    raw = json.loads(analysis_row["llm_raw_output"])
+    assert raw["thesis_invalidation"] == [
+        "Trwały spadek retention rate klientów poniżej historycznego poziomu "
+        "wskazywałby na erozję przewagi konkurencyjnej.",
+    ]
+    assert raw["bull_case"] == ["Solidna pozycja rynkowa i stabilne przepływy pieniężne."]
+    assert raw["bear_case"] == ["Rosnąca konkurencja może ograniczyć tempo wzrostu przychodów."]
+    assert raw["biggest_unknown"] == (
+        "Nie wiadomo, czy spadek marży w ostatnim kwartale jest trwały czy cykliczny."
+    )
+
+    # Test G: full call (950/140) i repair call (300/40) telemetria
+    # ODRĘBNA, rozróżnialna -- nie scalona w jedną liczbę.
+    assert row["llm_input_tokens"] == 950
+    assert row["llm_output_tokens"] == 140
+    assert row["llm_repair_input_tokens"] == 300
+    assert row["llm_repair_output_tokens"] == 40
+    assert "input_tokens: 950, output_tokens: 140" in out
+    assert "repair input_tokens: 300, repair output_tokens: 40" in out
+
+
+def test_analyze_live_scan_shortlist_repair_also_empty_fails_without_second_repair(
+    tmp_path, monkeypatch, capsys,
+):
+    """Test C (specyfikacja właścicielki): targeted repair SAM zwraca
+    semantycznie puste `thesis_invalidation` -> FAILED, BEZ kolejnego
+    repair (hard cap: maksymalnie 1 full + 1 repair call na ticker)."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = set()
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = {"AAPL"}
+    _CountingClaudeClient.repair_fails_tickers = {"AAPL"}
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
+    _CountingClaudeClient.received_prompts = []
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    exit_code = cli.main(["--db", str(db_path), "run-live-scan", "--sample", "AAPL"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert _CountingClaudeClient.call_count["n"] == 1
+    # Dokładnie 1 repair call -- NIGDY drugi, nawet gdy repair też zawodzi.
+    assert _CountingClaudeClient.repair_call_count["n"] == 1
     assert "INCOMPLETE_LLM_ANALYSIS" in out
-
-    # Testy 3/4 (ROOT CAUSE AUDIT Faza 6g): retry NIE jest ślepym
-    # powtórzeniem identycznego promptu -- druga próba dostaje konkretny
-    # powód poprzedniego niepowodzenia.
-    assert len(_CountingClaudeClient.received_prompts) == 2
-    first_prompt, second_prompt = _CountingClaudeClient.received_prompts
-    assert first_prompt != second_prompt
-    assert "POPRZEDNIA ODPOWIEDŹ ODRZUCONA" not in first_prompt
-    assert "POPRZEDNIA ODPOWIEDŹ ODRZUCONA" in second_prompt
-    assert "thesis_invalidation jest semantycznie pusty" in second_prompt
 
     from buffett_scanner.db import connect, get_live_scan_candidates, get_live_scan_run
 
@@ -803,10 +1003,58 @@ def test_analyze_live_scan_shortlist_semantically_incomplete_response_retries_th
     assert get_live_scan_run(conn, run_id)["status"] == "INCOMPLETE_LLM_ANALYSIS"
     row = get_live_scan_candidates(conn, run_id)[0]
     assert row["llm_status"] == "FAILED"
-    assert "semantycznie pusty" in row["llm_error"]
-    # Telemetria: usage z OBU prób zsumowany, nie zgubiony przez retry.
-    assert row["llm_input_tokens"] == 1000  # 2 x 500 (fake incomplete usage)
-    assert row["llm_output_tokens"] == 160  # 2 x 80
+    assert "thesis_invalidation jest semantycznie pusty" in row["llm_error"]
+    # Telemetria obu wywołań (full + repair) jest zapisana, mimo FAILED --
+    # realny koszt poniesiony, nigdy nie gubiony.
+    assert row["llm_input_tokens"] == 950
+    assert row["llm_repair_input_tokens"] == 250
+    # Żadna analiza nie jest zapisywana dla kontraktu, który nigdy nie
+    # został spełniony -- `analyses` to tylko realnie kompletne wyniki.
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 0
+
+
+def test_analyze_live_scan_shortlist_multi_field_violation_skips_repair_straight_to_failed(
+    tmp_path, monkeypatch, capsys,
+):
+    """Test D (specyfikacja właścicielki): pełna analiza ma puste
+    `thesis_invalidation` ORAZ puste `biggest_unknown` naraz -> NIE jest
+    to izolowany przypadek -> targeted repair NIGDY nie jest próbowany ->
+    FAILED, zero repair calls. Nie generalizujemy repair na przypadki,
+    dla których nie mamy dowodu z realnych runów (specyfikacja
+    właścicielki, punkt 2)."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = set()
+    _CountingClaudeClient.semantically_incomplete_tickers = {"AAPL"}
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = set()
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
+    _CountingClaudeClient.received_prompts = []
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    exit_code = cli.main(["--db", str(db_path), "run-live-scan", "--sample", "AAPL"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert _CountingClaudeClient.call_count["n"] == 1
+    # ZERO repair calls -- naruszenie nie jest izolowanym thesis_invalidation.
+    assert _CountingClaudeClient.repair_call_count["n"] == 0
+    assert len(_CountingClaudeClient.received_repair_prompts) == 0
+    assert "brak targeted repair" in out
+    assert "INCOMPLETE_LLM_ANALYSIS" in out
+
+    from buffett_scanner.db import connect, get_live_scan_candidates, get_live_scan_run
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+    assert get_live_scan_run(conn, run_id)["status"] == "INCOMPLETE_LLM_ANALYSIS"
+    row = get_live_scan_candidates(conn, run_id)[0]
+    assert row["llm_status"] == "FAILED"
+    assert row["llm_repair_input_tokens"] is None  # repair nigdy nie był wywołany
     # Żadna analiza nie jest zapisywana dla kontraktu, który nigdy nie
     # został spełniony -- `analyses` to tylko realnie kompletne wyniki.
     assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 0
@@ -826,6 +1074,10 @@ def test_analyze_live_scan_shortlist_existing_resume_and_telemetry_still_work(
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = {"AAPL"}
     _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = set()
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -858,31 +1110,37 @@ def test_analyze_live_scan_shortlist_existing_resume_and_telemetry_still_work(
     assert "input_tokens: 1800, output_tokens: 300" in out
 
 
-# ---------------------------------------------------------------------------
-# BUGFIX V0 OUTPUT CONTRACT (Faza 6g, 2026-10-06) -- ROOT CAUSE AUDIT po
-# LIVE VALIDATION TEST Fazy 6f (4/5 FAILED, identyczny powód: thesis_
-# invalidation semantycznie pusty na OBU próbach). Root cause: (1) prompt
-# nigdy nie mówił wprost "musisz podać co najmniej jeden" dla tego pola
-# (test w test_prompt.py), (2) retry był ślepym powtórzeniem identycznego
-# promptu, zero informacji o tym, co zawiodło. Testy niżej pokrywają
-# punkt 3/4 ze specyfikacji na poziomie samej funkcji pomocniczej.
-# ---------------------------------------------------------------------------
+def test_analyze_live_scan_shortlist_repair_prompt_carries_price_valuation_context(
+    tmp_path, monkeypatch, capsys,
+):
+    """Test H (specyfikacja właścicielki): price/valuation context
+    pozostaje dostępny -- regresja na to, że BUGFIX V0 OUTPUT CONTRACT
+    (Faza 6f) nie został zgubiony przy wprowadzeniu targeted repair.
+    Targeted repair prompt (budowany przez `build_thesis_invalidation_
+    repair_prompt`) dostaje te SAME deterministyczne current_price/DCF/
+    decline context co pełny prompt -- nigdy nie jest to pusty prompt bez
+    kontekstu."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = set()
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
+    _CountingClaudeClient.thesis_invalidation_only_empty_tickers = {"AAPL"}
+    _CountingClaudeClient.repair_fails_tickers = set()
+    _CountingClaudeClient.repair_call_count = {"n": 0}
+    _CountingClaudeClient.received_repair_prompts = []
+    _CountingClaudeClient.received_prompts = []
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
+    db_path = tmp_path / "test.db"
+    cli.main(["--db", str(db_path), "run-live-scan", "--sample", "AAPL"])
+    capsys.readouterr()
 
-def test_append_validation_retry_feedback_carries_concrete_failure_reason():
-    from buffett_scanner.analysis_schema import AnalysisValidationError
-
-    original = "ORYGINALNY PROMPT TREŚĆ"
-    error = AnalysisValidationError(
-        'thesis_invalidation jest semantycznie pusty — wymagany co najmniej jeden '
-        'konkretny punkt (nie ""/null/[]/"brak"/"N/A")'
-    )
-    augmented = cli._append_validation_retry_feedback(original, error)
-
-    # Test 3: konkretny powód poprzedniego niepowodzenia jest obecny.
-    assert "thesis_invalidation jest semantycznie pusty" in augmented
-    # Test 4: to NIE jest identyczny prompt -- oryginał jest zachowany
-    # (kontekst/dane niezmienione), ale coś nowego zostało dołączone.
-    assert augmented != original
-    assert original in augmented
-    assert "POPRZEDNIA ODPOWIEDŹ ODRZUCONA" in augmented
+    assert len(_CountingClaudeClient.received_repair_prompts) == 1
+    repair_prompt = _CountingClaudeClient.received_repair_prompts[0]
+    assert "KONTEKST CENY I WYCENY" in repair_prompt
+    assert "dla spółki AAPL" in repair_prompt
+    # Nigdy pełny source payload -- repair nie cytuje źródeł (specyfikacja
+    # właścicielki, punkt 6).
+    assert "ŹRÓDŁA" not in repair_prompt

@@ -106,6 +106,17 @@ class HardFlagCandidate(BaseModel):
     quoted_text: str = ""
 
 
+class ThesisInvalidationRepair(BaseModel):
+    """Faza 6h (TARGETED FIELD REPAIR) — minimalny, dedykowany schemat dla
+    jednego, empirycznie potwierdzonego przypadku naprawy: cała reszta
+    analizy jest poprawna, zawodzi WYŁĄCZNIE `thesis_invalidation`.
+    Celowo NIE jest to `AnalysisOutput` ani jego podzbiór z większą
+    liczbą pól — repair call nie ma prawa (i nie ma możliwości w
+    schemacie) zwrócić/zmienić żadne inne pole analizy."""
+
+    thesis_invalidation: list[str] = Field(default_factory=list)
+
+
 class AnalysisOutput(BaseModel):
     ticker: str
     schema_version: str
@@ -223,3 +234,27 @@ def validate_analysis_output(
             "biggest_unknown jest semantycznie pusty — wymagany konkretny, materialny "
             "unknown (nie \"\"/\"brak\"/\"N/A\")"
         )
+
+
+def is_only_thesis_invalidation_semantically_empty(result: AnalysisOutput) -> bool:
+    """Faza 6h (TARGETED FIELD REPAIR) -- True wyłącznie gdy JEDYNYM
+    naruszeniem semantic completeness w `result` jest `thesis_invalidation`
+    (wszystkie pozostałe wymagane pola -- bull_case/bear_case/
+    why_market_may_be_right/why_this_may_not_be_a_bargain/biggest_unknown
+    -- są semantycznie niepuste). Sprawdza WSZYSTKIE pola niezależnie
+    (nie zatrzymuje się na pierwszym naruszeniu, w przeciwieństwie do
+    `validate_analysis_output`), żeby targeted repair nigdy nie był
+    próbowany, gdy zawodzi więcej niż jedno pole (specyfikacja
+    właścicielki, punkt 2: "jeżeli brakuje/inwalidne jest [inne pole]
+    ... zachowaj bezpieczny FAILED"). Nie sprawdza reguł strukturalnych
+    (cited_source_ids/page/score) -- te mają zawsze iść prosto do
+    FAILED, obsługiwane osobno przez wywołującego."""
+    other_fields = [name for name in _REQUIRED_NONEMPTY_LIST_FIELDS if name != "thesis_invalidation"]
+    for field_name in other_fields:
+        values = getattr(result, field_name)
+        if not values or all(_is_semantically_empty(v) for v in values):
+            return False
+    if _is_semantically_empty(result.biggest_unknown):
+        return False
+    values = result.thesis_invalidation
+    return not values or all(_is_semantically_empty(v) for v in values)
