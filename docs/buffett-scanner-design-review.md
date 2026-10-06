@@ -2398,7 +2398,22 @@ Zero zmian scoringu/wag/hard gates/DCF/growth caps/decline screening/prefiltra/d
 
 ---
 
-## IMPORTANT — do ustalenia przed V1
+## Faza 7 — UI + PORTFOLIO V0, v1.66 (w budowie)
+
+**Decyzja właścicielki 2026-10-06:** Buffett Opportunity Scanner przestaje być tylko projektem technicznym — potrzebny prosty, praktyczny interfejs (Streamlit) do codziennego podejmowania decyzji przez właścicielkę i jej męża, plus minimalny multi-user portfolio tracking (transakcje/pozycje/decyzje), bez auth, bez zmiany metodologii inwestycyjnej. Pełny audyt (stan obecny, proponowana architektura, data model, multi-user, brokers, currencies, current prices, pliki, implementation plan, blokery) wykonany i zaakceptowany PRZED implementacją — patrz transkrypt sesji; nie duplikowany tu w całości. Zaakceptowane korekty właścicielki do audytu: `run_id LIKE 'live-scan-%'` (ignorując `validation-*`) jako jedyna reguła wyboru "ostatniego właściwego skanu" na V0 (bez nowej kolumny `run_type`); UI pokazuje najnowszy właściwy live-scan niezależnie od jego `status` (COMPLETE/INCOMPLETE_LLM_ANALYSIS), per-kandydat "Analiza jakościowa niekompletna" dla FAILED, nigdy jako ocena spółki; `purchase_transactions`/`sale_transactions` (NIE jedna tabela `transactions`) + nowe `broker`/`acquisition_type`; shares liczone per (user, position, broker) PRZED agregacją do łącznej ekspozycji (SELL na jednym brokerze nigdy nie tworzy ujemnej subpozycji na innym); `positions.cik` NULLABLE (portfel nie jest ograniczony do SEC/S&P500); `users` NIE jest automatycznie seedowane "Anastazja"/"Mąż" — jawny, prosty setup.
+
+### KROK 0 — Streamlit tabs spike (empirycznie zweryfikowany, 2026-10-06)
+
+Zainstalowano `streamlit==1.65.0` + jednorazowo `playwright` (tylko do tego testu, odinstalowany po użyciu — nie jest zależnością aplikacji) i realny headless Chromium z tego środowiska. Zbudowano minimalny, jednorazowy spike (`st.tabs()` zagnieżdżone: zakładka zewnętrzna PORTFEL → zakładki wewnętrzne PODSUMOWANIE/AAPL/GSK + przycisk w zakładce wewnętrznej + przycisk na poziomie strony poza zakładkami) i sterowano nim realnym Chromium przez Playwright (klik, nie zgadywanie z dokumentacji/pamięci modelu — API Streamlit zmienia się między wersjami).
+
+**Wynik — WSZYSTKIE 3 testowane scenariusze potwierdzają stabilność natywnych zagnieżdżonych `st.tabs()`:**
+1. Zagnieżdżone `st.tabs()` (taby w tabie) renderują się i są klikalne bez błędu.
+2. Kliknięcie przycisku WEWNĄTRZ zagnieżdżonej zakładki (AAPL) → rerun skryptu → zakładka AAPL **pozostaje aktywna** (nie resetuje się do pierwszej).
+3. Kliknięcie przycisku POZA wszystkimi zakładkami (pełny rerun strony) → zarówno zakładka zewnętrzna (CBOE), jak i zagnieżdżona (AAPL) **pozostają aktywne**.
+
+**Decyzja:** używamy natywnego `st.tabs()`, zagnieżdżonego dwupoziomowo ([PORTFEL/kandydaci] → [PODSUMOWANIE/pozycje]), zgodnie z pierwotnym planem UI. Fallback na `st.radio(horizontal=True)` NIE jest potrzebny — historyczne ograniczenie Streamlit (resetowanie zakładek przy rerunie) nie reprodukuje się w `1.65.0`. Spike usunięty po użyciu (katalog `/tmp`, nigdy niecommitowany) — jedyny trwały artefakt to ta notatka + nowa zależność `streamlit>=1.65,<2` w `requirements.txt`.
+
+Zero zmian kodu produkcyjnego scanner'a w tym kroku. Zero nowych wywołań Claude API. Zero zmian danych.
 
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
