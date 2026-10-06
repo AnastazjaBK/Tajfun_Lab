@@ -312,11 +312,12 @@ class _FakeClaudeClient:
             fear_analysis=FearAnalysis(classification="TEMPORARY", confidence="MEDIUM",
                                         trigger="Spadek ceny -30%"),
             dividend_trap_alert=DividendTrapAlert(triggered=False),
-            bull_case=["Silna marka"], bear_case=["Presja konkurencyjna"],
-            why_market_may_be_right=["Możliwe spowolnienie wzrostu"],
-            why_this_may_not_be_a_bargain=["MoS może być iluzoryczny"],
-            thesis_invalidation=["Dalszy spadek marż"],
-            biggest_unknown="Wpływ nowego cyklu produktowego",
+            bull_case=["Silna marka i wysokie bariery wejścia dla konkurentów."],
+            bear_case=["Presja konkurencyjna może trwale obniżyć marże w kluczowym segmencie."],
+            why_market_may_be_right=["Możliwe trwałe spowolnienie wzrostu przychodów."],
+            why_this_may_not_be_a_bargain=["MoS może być iluzoryczny przy niepewnych założeniach wzrostu."],
+            thesis_invalidation=["Dalszy spadek marż operacyjnych poniżej historycznego poziomu."],
+            biggest_unknown="Wpływ nowego cyklu produktowego na przyszłe przychody i marże.",
             cited_source_ids=["src-1"],
         )
         usage = ClaudeUsage(
@@ -461,6 +462,11 @@ class _CountingClaudeClient:
 
     call_count = {"n": 0}
     fail_tickers: set[str] = set()
+    # Faza 6f (BUGFIX V0 OUTPUT CONTRACT): tickery, dla których fake KAŻDA
+    # próba (oryginalna i retry) zwraca semantycznie puste pola anti-bias
+    # -- symuluje model, który nigdy nie poprawia się przy retry, żeby
+    # sprawdzić, że po MAX_ANALYSIS_ATTEMPTS status jest FAILED, NIE COMPLETE.
+    semantically_incomplete_tickers: set[str] = set()
 
     def __init__(self, api_key, *, model, max_output_tokens=4000):
         pass
@@ -492,6 +498,31 @@ class _CountingClaudeClient:
                     f"Claude API zwróciło błąd (400): Your credit balance is too low ({ticker})"
                 )
 
+        for ticker in self.semantically_incomplete_tickers:
+            if f'"{ticker}"' in prompt:
+                incomplete_output = AnalysisOutput(
+                    ticker=ticker, schema_version="1.0",
+                    business_understandability=ScoredSection(score=5, confidence="MEDIUM"),
+                    moat=MoatSection(score=6, confidence="MEDIUM"),
+                    financial_quality_commentary=FinancialQualityCommentary(confidence="MEDIUM"),
+                    management_capital_allocation=ManagementSection(score=6, confidence="MEDIUM"),
+                    fear_analysis=FearAnalysis(classification="TEMPORARY", confidence="MEDIUM", trigger="x"),
+                    dividend_trap_alert=DividendTrapAlert(triggered=False),
+                    bull_case=["Solidna pozycja rynkowa i stabilne przepływy pieniężne."],
+                    bear_case=["Rosnąca konkurencja może ograniczyć tempo wzrostu przychodów."],
+                    why_market_may_be_right=["Spadek może odzwierciedlać trwałe spowolnienie wzrostu."],
+                    why_this_may_not_be_a_bargain=["Obecna wycena może już uwzględniać realne ryzyko."],
+                    thesis_invalidation=[],  # semantycznie pusty -- jak CBOE/DECK/INTU/ACN w realnym runie
+                    biggest_unknown="",  # semantycznie pusty
+                    cited_source_ids=["src-1"],
+                )
+                incomplete_usage = ClaudeUsage(
+                    model="claude-sonnet-5", input_tokens=500, output_tokens=80,
+                    cache_creation_input_tokens=None, cache_read_input_tokens=None,
+                    thinking_tokens=None, service_tier="standard",
+                )
+                return ClaudeAnalysisResult(output=incomplete_output, usage=incomplete_usage)
+
         output = AnalysisOutput(
             ticker="X", schema_version="1.0",
             business_understandability=ScoredSection(score=5, confidence="MEDIUM"),
@@ -500,7 +531,13 @@ class _CountingClaudeClient:
             management_capital_allocation=ManagementSection(score=6, confidence="MEDIUM"),
             fear_analysis=FearAnalysis(classification="TEMPORARY", confidence="MEDIUM", trigger="x"),
             dividend_trap_alert=DividendTrapAlert(triggered=False),
-            bull_case=["Bull"], bear_case=["Bear"], cited_source_ids=["src-1"],
+            bull_case=["Solidna pozycja rynkowa i stabilne przepływy pieniężne."],
+            bear_case=["Rosnąca konkurencja może ograniczyć tempo wzrostu przychodów."],
+            why_market_may_be_right=["Spadek może odzwierciedlać trwałe spowolnienie wzrostu."],
+            why_this_may_not_be_a_bargain=["Obecna wycena może już uwzględniać realne ryzyko."],
+            thesis_invalidation=["Utrata kluczowego klienta odpowiadającego za istotną część przychodów."],
+            biggest_unknown="Nie wiadomo, czy spadek marży w ostatnim kwartale jest trwały czy cykliczny.",
+            cited_source_ids=["src-1"],
         )
         usage = ClaudeUsage(
             model="claude-sonnet-5", input_tokens=900, output_tokens=150,
@@ -556,6 +593,7 @@ def test_run_live_scan_shortlist_limit_only_analyzes_top_n(tmp_path, monkeypatch
     monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = set()
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -591,6 +629,7 @@ def test_analyze_live_scan_shortlist_incomplete_status_never_emits_partial_repor
     monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = {"AAPL"}
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -630,6 +669,7 @@ def test_analyze_live_scan_shortlist_resume_skips_complete_and_finishes(
     monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = {"AAPL"}
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -668,6 +708,7 @@ def test_analyze_live_scan_shortlist_cache_hit_reuses_prior_analysis(
     monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = set()
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -696,3 +737,102 @@ def test_analyze_live_scan_shortlist_cache_hit_reuses_prior_analysis(
     rows = conn.execute("SELECT analysis_id FROM live_scan_candidates WHERE llm_status='COMPLETE'").fetchall()
     assert all(r["analysis_id"] == first_analysis_id for r in rows)
     assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 1
+
+
+# ---------------------------------------------------------------------------
+# BUGFIX V0 OUTPUT CONTRACT (Faza 6f, 2026-10-06) -- testy C/D/G ze
+# specyfikacji właścicielki: COMPLETE musi oznaczać rzeczywistą
+# kompletność (retry bounded, FAILED po wyczerpaniu prób, NIE COMPLETE),
+# a dotychczasowe failure/resume i usage telemetry nadal działają.
+# ---------------------------------------------------------------------------
+
+
+def test_analyze_live_scan_shortlist_semantically_incomplete_response_retries_then_fails(
+    tmp_path, monkeypatch, capsys,
+):
+    """Testy C/D (specyfikacja właścicielki): odpowiedź z pustym
+    `biggest_unknown`/`thesis_invalidation` (jak CBOE/DECK/INTU/ACN w
+    realnym live runie) nie może przejść jako COMPLETE. Fake Claude
+    ZAWSZE zwraca semantycznie pustą odpowiedź dla AAPL -> musi zostać
+    retry'owana (MAX_ANALYSIS_ATTEMPTS=2 wywołania), potem FAILED, NIGDY
+    COMPLETE -- i NIGDY nie zapisana do `analyses` (immutable, tylko dla
+    realnie kompletnych analiz)."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = set()
+    _CountingClaudeClient.semantically_incomplete_tickers = {"AAPL"}
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    exit_code = cli.main(["--db", str(db_path), "run-live-scan", "--sample", "AAPL"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    # MAX_ANALYSIS_ATTEMPTS=2 -- bounded retry, nigdy nieskończona pętla.
+    assert _CountingClaudeClient.call_count["n"] == 2
+    assert "próba 1/2 nie przeszła walidacji" in out
+    assert "FAILED (walidacja po 2 próbach)" in out
+    assert "INCOMPLETE_LLM_ANALYSIS" in out
+
+    from buffett_scanner.db import connect, get_live_scan_candidates, get_live_scan_run
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+    assert get_live_scan_run(conn, run_id)["status"] == "INCOMPLETE_LLM_ANALYSIS"
+    row = get_live_scan_candidates(conn, run_id)[0]
+    assert row["llm_status"] == "FAILED"
+    assert "semantycznie pusty" in row["llm_error"]
+    # Telemetria: usage z OBU prób zsumowany, nie zgubiony przez retry.
+    assert row["llm_input_tokens"] == 1000  # 2 x 500 (fake incomplete usage)
+    assert row["llm_output_tokens"] == 160  # 2 x 80
+    # Żadna analiza nie jest zapisywana dla kontraktu, który nigdy nie
+    # został spełniony -- `analyses` to tylko realnie kompletne wyniki.
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 0
+
+
+def test_analyze_live_scan_shortlist_existing_resume_and_telemetry_still_work(
+    tmp_path, monkeypatch, capsys,
+):
+    """Test G (specyfikacja właścicielki): dotychczasowe failure/resume
+    (fail-fast na ClaudeError, resume TYLKO PENDING/FAILED) i usage
+    telemetry (Faza 6e) nadal działają niezmienione po BUGFIX V0 OUTPUT
+    CONTRACT -- regresja na realnym scenariuszu z Fazy 6c (MSFT COMPLETE,
+    AAPL FAILED przez 400, resume kończy AAPL, telemetria realna)."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _TwoTickerFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = {"AAPL"}
+    _CountingClaudeClient.semantically_incomplete_tickers = set()
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    cli.main([
+        "--db", str(db_path), "run-live-scan", "--sample", "AAPL,MSFT", "--shortlist-limit", "20",
+    ])
+    capsys.readouterr()
+    assert _CountingClaudeClient.call_count["n"] == 2  # MSFT (COMPLETE) + AAPL (FAILED, bez retry na 400)
+
+    from buffett_scanner.db import connect
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+
+    _CountingClaudeClient.fail_tickers = set()  # "kredyt uzupełniony"
+    exit_code = cli.main([
+        "--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+    ])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert _CountingClaudeClient.call_count["n"] == 3  # TYLKO +1 (AAPL) -- MSFT nie ponownie
+    assert "INCOMPLETE_LLM_ANALYSIS" not in out
+    assert "Kandydat" in out
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 2
+    # Telemetria (Faza 6e) nadal realna po BUGFIX -- agregat per-run sumuje
+    # OBA kompletne kandydaty (MSFT + AAPL), 900/150 input/output każdy
+    # (zdefiniowane w _CountingClaudeClient).
+    assert "Telemetria Anthropic API usage" in out
+    assert "input_tokens: 1800, output_tokens: 300" in out

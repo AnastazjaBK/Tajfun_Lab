@@ -24,6 +24,12 @@ def make_valid_output(**overrides) -> AnalysisOutput:
             "trigger": "guidance cut", "reasoning": "one quarter miss",
         },
         "dividend_trap_alert": {"triggered": False, "reasoning": ""},
+        "bull_case": ["Silny moat oparty na efektach sieciowych i wysokich kosztach zmiany dostawcy."],
+        "bear_case": ["Rosnąca konkurencja regulacyjna może ograniczyć marże w kluczowym segmencie."],
+        "why_market_may_be_right": ["Spadek może odzwierciedlać trwałe spowolnienie wzrostu przychodów."],
+        "why_this_may_not_be_a_bargain": ["Obecna wycena może już uwzględniać ryzyko regulacyjne."],
+        "thesis_invalidation": ["Utrata kluczowego klienta odpowiadającego za >10% przychodów."],
+        "biggest_unknown": "Nie wiadomo, czy spadek marży w ostatnim kwartale jest trwały czy cykliczny.",
         "verification_items": [
             {"source_id": "src-1", "document": "10-K", "section": "Item 7", "reason": "r", "question": "q"},
         ],
@@ -140,3 +146,92 @@ def test_validate_rejects_negative_score():
         validate_analysis_output(
             result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
         )
+
+
+# ---------------------------------------------------------------------------
+# BUGFIX V0 OUTPUT CONTRACT (Faza 6f, 2026-10-06) -- semantyczna
+# niepustość pól anti-confirmation-bias. Realny live run
+# (live-scan-2026-10-06T083825543395Z) zwrócił `thesis_invalidation=[]`
+# i `biggest_unknown=""` dla CBOE/DECK/INTU/ACN, a dotychczasowa
+# walidacja (tylko kształt JSON) to przepuszczała jako COMPLETE.
+# ---------------------------------------------------------------------------
+
+
+def test_validate_rejects_empty_biggest_unknown():
+    result = make_valid_output(biggest_unknown="")
+    with pytest.raises(AnalysisValidationError, match="biggest_unknown"):
+        validate_analysis_output(
+            result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
+        )
+
+
+@pytest.mark.parametrize("placeholder", ["brak", "N/A", "n/a", "Brak danych", "-", "unknown"])
+def test_validate_rejects_placeholder_biggest_unknown(placeholder):
+    result = make_valid_output(biggest_unknown=placeholder)
+    with pytest.raises(AnalysisValidationError, match="biggest_unknown"):
+        validate_analysis_output(
+            result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
+        )
+
+
+def test_validate_rejects_empty_thesis_invalidation():
+    result = make_valid_output(thesis_invalidation=[])
+    with pytest.raises(AnalysisValidationError, match="thesis_invalidation"):
+        validate_analysis_output(
+            result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
+        )
+
+
+def test_validate_rejects_thesis_invalidation_with_only_placeholder():
+    result = make_valid_output(thesis_invalidation=["brak"])
+    with pytest.raises(AnalysisValidationError, match="thesis_invalidation"):
+        validate_analysis_output(
+            result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
+        )
+
+
+@pytest.mark.parametrize(
+    "field_name", ["bull_case", "bear_case", "why_market_may_be_right", "why_this_may_not_be_a_bargain"]
+)
+@pytest.mark.parametrize("empty_value", [[], [""], ["brak"], ["N/A"], ["null"]])
+def test_validate_rejects_semantically_empty_required_list_fields(field_name, empty_value):
+    """Pokrywa "", null, [], 'brak', 'N/A' dla każdego z czterech
+    pozostałych wymaganych pól listowych (bez thesis_invalidation,
+    pokrytego osobno powyżej z realnym przykładem z live runu)."""
+    result = make_valid_output(**{field_name: empty_value})
+    with pytest.raises(AnalysisValidationError, match=field_name):
+        validate_analysis_output(
+            result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
+        )
+
+
+def test_validate_accepts_concrete_honest_unknown_statement():
+    """Model MOŻE uczciwie przyznać niewiedzę (prompt.py go o to prosi)
+    -- ale konkretnie, nie samym 'brak'/'N/A' (patrz przykład właścicielki)."""
+    result = make_valid_output(
+        biggest_unknown=(
+            "Nie wiadomo, jaka część wzrostu przychodów pochodzi z podwyżek cen a jaka "
+            "z wolumenu, i bez tego nie można ocenić trwałości marży."
+        ),
+    )
+    validate_analysis_output(
+        result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
+    )  # nie rzuca
+
+
+def test_validate_accepts_payx_like_response():
+    """Odpowiedź podobna do PAYX z realnego live runu (jedyny shortlist
+    candidate, który poprawnie wygenerował oba pola) musi przejść."""
+    result = make_valid_output(
+        thesis_invalidation=[
+            "Trwały spadek retention rate klientów PEO poniżej historycznego poziomu "
+            "wskazywałby na erozję przewagi konkurencyjnej.",
+        ],
+        biggest_unknown=(
+            "Nie wiadomo, jaki wpływ na przyszłe przychody będzie miała konkurencja "
+            "cenowa w segmencie HR tech."
+        ),
+    )
+    validate_analysis_output(
+        result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set(),
+    )  # nie rzuca

@@ -23,11 +23,26 @@ zmiana schematu, tylko instrukcji tekstowych). Wymóg: bear_case/
 why_market_may_be_right/why_this_may_not_be_a_bargain muszą być tak
 samo rygorystyczne jak bull_case — model ma AKTYWNIE argumentować
 PRZECIW własnej tezie inwestycyjnej, nie tylko wymienić formalności.
+
+BUGFIX V0 OUTPUT CONTRACT (Faza 6f, 2026-10-06): realny live run
+(live-scan-2026-10-06T083825543395Z) ujawnił, że Claude wielokrotnie
+pisał "nie dysponuję danymi o aktualnej cenie/Margin of Safety" —
+PRAWDZIWE stwierdzenie, bo prompt do tej fazy NIGDY nie przekazywał
+current_price/DCF/MoS/decline context modelowi, choć pipeline je już
+policzył deterministycznie (Stage 1 ranking / `valuation.
+compute_valuation`, zero LLM) PRZED wywołaniem Claude. Nowa sekcja
+"KONTEKST CENY I WYCENY" niżej przekazuje te JUŻ POLICZONE wartości
+jako dane — Claude ma z nich korzystać do oceny tezy/MoS, NIE
+przeliczać DCF samodzielnie i NIE zgadywać innych wskaźników rynkowych
+(P/E, EV/EBITDA itd.), których tu nie podano (dla nich prawidłowa
+odpowiedź to jawne "niedostępne/unknown", nie zgadywanie).
 """
 
 from __future__ import annotations
 
+from buffett_scanner.scanner import PriceChangeSnapshot
 from buffett_scanner.sources import VerifiedSource
+from buffett_scanner.valuation import ValuationResult
 
 SCHEMA_VERSION = "1.0"
 
@@ -38,10 +53,20 @@ def build_analysis_prompt(
     metrics: dict[str, float | None],
     prefilter_flags: list[str],
     sources: list[VerifiedSource],
+    current_price: float | None = None,
+    decline_snapshot: PriceChangeSnapshot | None = None,
+    valuation_result: ValuationResult | None = None,
 ) -> tuple[str, dict[str, VerifiedSource]]:
     """Zwraca (prompt, source_id_map). `source_id_map` mapuje
     lokalny source_id -> VerifiedSource, do przekazania jako
-    `allowed_source_ids` przy walidacji odpowiedzi."""
+    `allowed_source_ids` przy walidacji odpowiedzi.
+
+    `current_price`/`decline_snapshot`/`valuation_result` (Faza 6f,
+    BUGFIX V0 OUTPUT CONTRACT) to wartości JUŻ POLICZONE deterministycznie
+    przez pipeline (zero LLM) — przekazywane jako kontekst, NIE do
+    przeliczenia przez model. `None` oznacza "rzeczywiście niedostępne w
+    tym wywołaniu" (np. `score`/`cmd_analyze` bez pobranej ceny) — prompt
+    to mówi wprost, nigdy nie udaje dostępności, której nie ma."""
     verified = [s for s in sources if s.verified]
     source_id_map = {f"src-{i + 1}": s for i, s in enumerate(verified)}
 
@@ -88,6 +113,61 @@ def build_analysis_prompt(
     lines.append(
         f"  FLAGI PRE-FILTRA: {prefilter_flags}" if prefilter_flags
         else "  FLAGI PRE-FILTRA: brak (żaden próg nie przekroczony)"
+    )
+
+    lines.append("")
+    lines.append(
+        "KONTEKST CENY I WYCENY (policzone przez pipeline — kod, NIE Ty; użyj jako "
+        "DANYCH do oceny tezy inwestycyjnej i Margin of Safety, NIE przeliczaj DCF "
+        "samodzielnie):"
+    )
+    if current_price is not None:
+        lines.append(f"  Aktualna cena: {current_price}")
+    else:
+        lines.append("  Aktualna cena: NIEDOSTĘPNA w tym wywołaniu")
+
+    if valuation_result is None:
+        lines.append("  Wycena DCF: NIEDOSTĘPNA w tym wywołaniu")
+    elif not valuation_result.implemented:
+        lines.append(f"  Wycena DCF: NIEDOSTĘPNA w tym przebiegu — powód: {valuation_result.reason}")
+    else:
+        lines.append("  Wycena DCF (Owner Earnings proxy FCF), policzona przez kod:")
+        for scenario in ("bear", "base", "bull"):
+            sv = valuation_result.scenarios.get(scenario)
+            if sv is None:
+                continue
+            mos = f"{sv.margin_of_safety_pct:.1f}%" if sv.margin_of_safety_pct is not None else "N/A"
+            lines.append(
+                f"    {scenario.upper()}: intrinsic value/akcję={sv.intrinsic_value_per_share:.2f}, "
+                f"Margin of Safety={mos}"
+            )
+
+    if decline_snapshot is not None:
+        # Każde pole `PriceChangeSnapshot` jest `None` (nie 0!), gdy historia
+        # nie wystarcza na dane okno (zasada DATA UNAVAILABLE, scanner.py) —
+        # formatowanie musi to respektować pole po polu, nigdy zgadywać 0.0.
+        def _fmt_pct(value: float | None) -> str:
+            return f"{value:.2f}%" if value is not None else "N/A"
+
+        lines.append(
+            "  Decline context (zmiana ceny, policzona przez kod): "
+            f"1D={_fmt_pct(decline_snapshot.daily_pct)}, 1T={_fmt_pct(decline_snapshot.week_pct)}, "
+            f"1M={_fmt_pct(decline_snapshot.month_pct)}, 1Q={_fmt_pct(decline_snapshot.quarter_pct)}, "
+            f"YTD={_fmt_pct(decline_snapshot.ytd_pct)}, 1R={_fmt_pct(decline_snapshot.year_pct)}, "
+            f"Drawdown od 52w high={_fmt_pct(decline_snapshot.drawdown_from_52w_high_pct)}, "
+            "Wolumen względny="
+            + (f"{decline_snapshot.relative_volume:.2f}"
+               if decline_snapshot.relative_volume is not None else "N/A")
+        )
+    else:
+        lines.append("  Decline context: NIEDOSTĘPNY w tym wywołaniu")
+
+    lines.append(
+        "  Powyższe dane są JUŻ POLICZONE przez pipeline, nie przez Ciebie — użyj ich "
+        "jako faktów w analizie. NIE twierdź, że nie znasz ceny/Margin of Safety, jeśli "
+        "są podane powyżej. Inne wskaźniki rynkowe (P/E, EV/EBITDA, konsensus analityków "
+        "itd.), których tu NIE podano, rzeczywiście nie są dostępne — jeśli ich "
+        "potrzebujesz, napisz to wprost jako ograniczenie/unknown, nie zgaduj ich wartości."
     )
 
     lines.append("")

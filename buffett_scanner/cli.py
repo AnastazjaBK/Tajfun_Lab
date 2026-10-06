@@ -133,8 +133,9 @@ from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundame
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
 from buffett_scanner.providers.sp500_history import Sp500HistoryError, fetch_components_csv
 from buffett_scanner.report import render_markdown_report
-from buffett_scanner.scanner import PriceBar, compute_price_changes, evaluate_decline_flags
+from buffett_scanner.scanner import PriceBar, PriceChangeSnapshot, compute_price_changes, evaluate_decline_flags
 from buffett_scanner.scoring import compute_score
+from buffett_scanner.valuation import compute_valuation
 from buffett_scanner.sector_classification import classify_sic_to_sector_profile
 from buffett_scanner.sources import VerifiedSource, build_sec_source_packet
 from buffett_scanner.universe_cik_reconciliation import (
@@ -398,13 +399,23 @@ def cmd_build_source_packet(args: argparse.Namespace) -> int:
 
 def _run_llm_analysis(
     conn, edgar_client, claude_client, config, *, cik: str, ticker: str, periods,
+    current_price: float | None = None, sector_profile: str = "GENERAL",
+    decline_snapshot: PriceChangeSnapshot | None = None,
 ) -> tuple[AnalysisOutput, list[VerifiedSource], ClaudeUsage] | None:
     """Wspólna ścieżka dla `analyze` i `score`: wskaźniki (Faza 1) +
     source packet (Faza 2) -> prompt -> Claude API -> walidacja
     deterministyczna (Faza 3). Zwraca None (i wypisuje powód) przy
     dowolnym niepowodzeniu — wołający decyduje, co dalej. Trzeci
     element zwracanej trójki to realny `ClaudeUsage` (Faza 6e) tego
-    wywołania."""
+    wywołania.
+
+    `current_price`/`sector_profile`/`decline_snapshot` (Faza 6f, BUGFIX
+    V0 OUTPUT CONTRACT): gdy `current_price` jest podane, licz tu samo
+    deterministyczny `valuation_result` (ten sam frozen `compute_valuation`
+    co Stage 1 live-scanu, zero LLM) i przekaż go razem z ceną/decline
+    context do promptu jako JUŻ POLICZONE dane — `cmd_analyze` (dry-run
+    bez pobranej ceny) woła to z domyślnym `current_price=None`, co
+    poprawnie daje "NIEDOSTĘPNE" w prompt.py, nie zgadywaną wartość."""
     metrics = compute_metrics(periods)
     prefilter_result = evaluate_prefilter(metrics, config.prefilter)
 
@@ -416,9 +427,17 @@ def _run_llm_analysis(
         print(f"{ticker}: brak zweryfikowanych źródeł, pomijam analizę LLM.")
         return None
 
+    valuation_result = None
+    if current_price is not None:
+        valuation_result = compute_valuation(
+            sector_profile, periods, current_price=current_price, config=config.valuation,
+        )
+
     prompt, source_id_map = build_analysis_prompt(
         ticker=ticker, metrics=metrics,
         prefilter_flags=prefilter_result.flags, sources=verified_sources,
+        current_price=current_price, decline_snapshot=decline_snapshot,
+        valuation_result=valuation_result,
     )
     try:
         generated = claude_client.generate_analysis(prompt)
@@ -530,9 +549,18 @@ def cmd_score(args: argparse.Namespace) -> int:
                 "SELECT sector_profile FROM companies WHERE cik = ?", (cik,)
             ).fetchone()
             sector_profile = company_row["sector_profile"] if company_row else "GENERAL"
+            decline_snapshot = compute_price_changes([
+                PriceBar(
+                    date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                    close=r["close"], adj_close=r["adj_close"], volume=r["volume"],
+                )
+                for r in price_rows
+            ])
 
             outcome = _run_llm_analysis(
                 conn, edgar_client, claude_client, config, cik=cik, ticker=ticker, periods=periods,
+                current_price=current_price, sector_profile=sector_profile,
+                decline_snapshot=decline_snapshot,
             )
             if outcome is None:
                 continue
@@ -852,6 +880,41 @@ def cmd_analyze_live_scan_shortlist(args: argparse.Namespace) -> int:
     )
 
 
+# BUGFIX V0 OUTPUT CONTRACT (Faza 6f, 2026-10-06): bounded retry dla
+# `AnalysisValidationError` (strukturalna LUB semantic completeness —
+# patrz analysis_schema.py) w Stage 2 live-scanu. 2 CAŁKOWITE próby (1
+# oryginalna + 1 retry), nigdy nieskończona pętla. Błędy Claude API
+# (ClaudeError) NIE są tu retry'owane -- zachowują istniejące fail-fast
+# (Faza 6c: realne niepowodzenia API są systemowe/uniform, nie
+# per-próba, więc retry na nich tylko gwarantowanie powtarza porażkę).
+MAX_ANALYSIS_ATTEMPTS = 2
+
+
+def _sum_claude_usage(attempts: list) -> "ClaudeUsage | None":
+    """Sumuje `ClaudeUsage` z WSZYSTKICH realnych prób (Faza 6f retry) —
+    telemetria per-kandydat musi odzwierciedlać CAŁKOWITY koszt tego
+    kandydata w tym run_id, nie tylko ostatniej próby (inaczej retry
+    cichcem zaniżałby zapisane tokeny względem realnie wydanych).
+    `None` tylko gdy nie było żadnej realnej odpowiedzi API (lista
+    pusta) -- nigdy nie wymyślamy wartości."""
+    if not attempts:
+        return None
+
+    def _sum_optional(values):
+        present = [v for v in values if v is not None]
+        return sum(present) if present else None
+
+    return ClaudeUsage(
+        model=attempts[-1].model,
+        input_tokens=sum(a.input_tokens for a in attempts),
+        output_tokens=sum(a.output_tokens for a in attempts),
+        cache_creation_input_tokens=_sum_optional(a.cache_creation_input_tokens for a in attempts),
+        cache_read_input_tokens=_sum_optional(a.cache_read_input_tokens for a in attempts),
+        thinking_tokens=_sum_optional(a.thinking_tokens for a in attempts),
+        service_tier=attempts[-1].service_tier,
+    )
+
+
 def _analyze_shortlist_and_report(
     conn, *, run_id: str, config, config_version: str, user_agent: str, claude_key: str,
     final_limit: int, markdown_out: str | None,
@@ -926,19 +989,83 @@ def _analyze_shortlist_and_report(
 
                 metrics = compute_metrics(periods)
                 prefilter_result = evaluate_prefilter(metrics, config.prefilter)
+
+                # BUGFIX V0 OUTPUT CONTRACT (Faza 6f): current_price/
+                # valuation_result/decline snapshot są JUŻ policzone
+                # deterministycznie (Stage 1 / frozen compute_valuation,
+                # zero LLM) -- przekazujemy je do promptu jako kontekst,
+                # PRZED wywołaniem Claude, zamiast dawać modelowi puste
+                # dane i winić go za "nie znam ceny" (realny live run
+                # 2026-10-06).
+                current_price = row["current_price"]
+                sector_row = conn.execute(
+                    "SELECT sector_profile FROM companies WHERE cik = ?", (cik,)
+                ).fetchone()
+                sector_profile = sector_row["sector_profile"] if sector_row else "GENERAL"
+                valuation_result_for_prompt = compute_valuation(
+                    sector_profile, periods, current_price=current_price, config=config.valuation,
+                )
+                price_rows_for_snapshot = get_price_series(conn, cik)
+                decline_snapshot_ctx = (
+                    compute_price_changes([
+                        PriceBar(
+                            date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                            close=r["close"], adj_close=r["adj_close"], volume=r["volume"],
+                        )
+                        for r in price_rows_for_snapshot
+                    ])
+                    if price_rows_for_snapshot else None
+                )
+
                 prompt, source_id_map = build_analysis_prompt(
                     ticker=ticker, metrics=metrics, prefilter_flags=prefilter_result.flags,
-                    sources=verified_sources,
+                    sources=verified_sources, current_price=current_price,
+                    decline_snapshot=decline_snapshot_ctx, valuation_result=valuation_result_for_prompt,
                 )
-                try:
-                    generated = claude_client.generate_analysis(prompt)
-                except ClaudeError as exc:
+
+                # BUGFIX V0 OUTPUT CONTRACT (Faza 6f): bounded retry na
+                # AnalysisValidationError (strukturalna LUB semantic
+                # completeness) -- ClaudeError (błąd API) nadal przerywa
+                # natychmiast, bez retry, zachowując istniejący fail-fast
+                # (Faza 6c). Usage WSZYSTKICH realnych prób jest sumowane
+                # (_sum_claude_usage), żeby telemetria nie zaniżała
+                # realnego kosztu tego kandydata.
+                analysis = None
+                usage_attempts: list = []
+                claude_error: ClaudeError | None = None
+                validation_error: AnalysisValidationError | None = None
+                for attempt in range(1, MAX_ANALYSIS_ATTEMPTS + 1):
+                    try:
+                        generated = claude_client.generate_analysis(prompt)
+                    except ClaudeError as exc:
+                        claude_error = exc
+                        break
+                    usage_attempts.append(generated.usage)
+                    try:
+                        validate_analysis_output(
+                            generated.output, allowed_source_ids=set(source_id_map),
+                            pdf_paginated_source_ids=set(),
+                        )
+                    except AnalysisValidationError as exc:
+                        validation_error = exc
+                        print(
+                            f"  {ticker}: próba {attempt}/{MAX_ANALYSIS_ATTEMPTS} nie przeszła "
+                            f"walidacji (strukturalnej lub semantic completeness): {exc}"
+                        )
+                        continue
+                    analysis = generated.output
+                    validation_error = None
+                    break
+
+                usage = _sum_claude_usage(usage_attempts)
+
+                if claude_error is not None:
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
-                        llm_error=str(exc), cache_key=cache_key, usage=exc.usage,
+                        llm_error=str(claude_error), cache_key=cache_key, usage=usage,
                     )
                     conn.commit()
-                    print(f"  {ticker}: FAILED (Claude API error): {exc}")
+                    print(f"  {ticker}: FAILED (Claude API error): {claude_error}")
                     print(
                         "  STOP: błąd Claude API — zatrzymuję dalsze NOWE wywołania w tym "
                         f"przebiegu. Pozostali kandydaci zostają PENDING/FAILED — wznów przez "
@@ -946,26 +1073,22 @@ def _analyze_shortlist_and_report(
                     )
                     stop_early = True
                     continue
-                analysis, usage = generated.output, generated.usage
 
-                try:
-                    validate_analysis_output(
-                        analysis, allowed_source_ids=set(source_id_map), pdf_paginated_source_ids=set(),
-                    )
-                except AnalysisValidationError as exc:
+                if analysis is None:
+                    # Kontrakt nie spełniony po MAX_ANALYSIS_ATTEMPTS realnych
+                    # wywołaniach -> FAILED, NIGDY COMPLETE (wymóg właścicielki,
+                    # BUGFIX V0 OUTPUT CONTRACT, punkt 3).
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
-                        llm_error=str(exc), cache_key=cache_key, usage=usage,
+                        llm_error=str(validation_error), cache_key=cache_key, usage=usage,
                     )
                     conn.commit()
-                    print(f"  {ticker}: FAILED (walidacja deterministyczna): {exc}")
+                    print(
+                        f"  {ticker}: FAILED (walidacja po {MAX_ANALYSIS_ATTEMPTS} próbach): "
+                        f"{validation_error}"
+                    )
                     continue
 
-                current_price = row["current_price"]
-                sector_row = conn.execute(
-                    "SELECT sector_profile FROM companies WHERE cik = ?", (cik,)
-                ).fetchone()
-                sector_profile = sector_row["sector_profile"] if sector_row else "GENERAL"
                 score = compute_score(
                     analysis=analysis, periods=periods, sector_profile=sector_profile,
                     current_price=current_price, config=config,

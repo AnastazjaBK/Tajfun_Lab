@@ -15,6 +15,15 @@ kształtu):
    potwierdzoną paginacją (BLOCKER 4).
 3. Wynik liczbowy poza zakresem (`score > max_score` lub `score < 0`)
    → reject, nigdy clamp.
+4. BUGFIX V0 OUTPUT CONTRACT (Faza 6f, 2026-10-06 — realny live run
+   `live-scan-2026-10-06T083825543395Z`): `output_format` gwarantuje
+   tylko KSZTAŁT pól anti-confirmation-bias, nie ich TREŚĆ — model mógł
+   (i w praktyce czasem robił) zwrócić pusty `biggest_unknown`/
+   `thesis_invalidation` i wciąż przejść walidację strukturalną. Nowa
+   `_is_semantically_empty`/sprawdzenie niżej odrzuca taki wynik —
+   HEURYSTYKA (blocklist placeholderów + minimalna długość), nie
+   prawdziwe NLU — jawnie udokumentowana jako przybliżenie, nigdy
+   fałszywa precyzja.
 
 Nigdy nie "naprawiamy" łagodnie niepoprawnego wyjścia — `config.llm.
 reject_on_schema_violation` jest domyślnie `true` z dobrego powodu:
@@ -119,6 +128,44 @@ class AnalysisOutput(BaseModel):
 
 _SCORED_SECTIONS = ("business_understandability", "moat", "management_capital_allocation")
 
+# BUGFIX V0 OUTPUT CONTRACT (Faza 6f) -- pola, które realny live run
+# (live-scan-2026-10-06T083825543395Z) zwrócił semantycznie puste mimo
+# poprawnego kształtu JSON: CBOE/DECK/INTU/ACN miały
+# `thesis_invalidation=[]` i `biggest_unknown=""`, a walidacja uznawała
+# to za COMPLETE. Wymagane: co najmniej jeden semantycznie niepusty
+# element w każdym z tych pól listowych.
+_REQUIRED_NONEMPTY_LIST_FIELDS = (
+    "bull_case",
+    "bear_case",
+    "why_market_may_be_right",
+    "why_this_may_not_be_a_bargain",
+    "thesis_invalidation",
+)
+
+# Frazy-placeholdery, które same w sobie (po normalizacji) NIE liczą się
+# jako konkretna treść -- odrzucane nawet gdy to jedyny element listy.
+# Model WOLNO przyznać, że czegoś nie wie (prompt.py go o to prosi) --
+# ale musi to zrobić KONKRETNIE (patrz przykład w docs/Faza 6f), nie
+# samym "brak"/"N/A".
+_PLACEHOLDER_PHRASES = frozenset({
+    "", "brak", "n/a", "na", "brak danych", "brak informacji",
+    "nie wiadomo", "nieznane", "unknown", "none", "null", "-", "n/d",
+    "no data", "not available", "not applicable",
+})
+
+# Dolny próg długości dla "konkretnej" treści -- HEURYSTYKA (nie
+# analiza NLU), jawnie udokumentowana jako przybliżenie. Wartość
+# dobrana tak, by odciąć jednosłowne/formalne zbitki ("brak pewności")
+# bez odcinania krótkich, ale realnie konkretnych stwierdzeń.
+_MIN_SUBSTANTIVE_LENGTH = 15
+
+
+def _is_semantically_empty(text: str) -> bool:
+    normalized = text.strip().strip(".").lower()
+    if normalized in _PLACEHOLDER_PHRASES:
+        return True
+    return len(normalized) < _MIN_SUBSTANTIVE_LENGTH
+
 
 def validate_analysis_output(
     result: AnalysisOutput,
@@ -161,3 +208,18 @@ def validate_analysis_output(
             )
         if section.score < 0:
             raise AnalysisValidationError(f"{name}.score ({section.score}) jest ujemny")
+
+    # BUGFIX V0 OUTPUT CONTRACT (Faza 6f) -- semantyczna niepustość pól
+    # anti-confirmation-bias (patrz docstring modułu, punkt 4).
+    for field_name in _REQUIRED_NONEMPTY_LIST_FIELDS:
+        values = getattr(result, field_name)
+        if not values or all(_is_semantically_empty(v) for v in values):
+            raise AnalysisValidationError(
+                f"{field_name} jest semantycznie pusty — wymagany co najmniej jeden "
+                "konkretny punkt (nie \"\"/null/[]/\"brak\"/\"N/A\")"
+            )
+    if _is_semantically_empty(result.biggest_unknown):
+        raise AnalysisValidationError(
+            "biggest_unknown jest semantycznie pusty — wymagany konkretny, materialny "
+            "unknown (nie \"\"/\"brak\"/\"N/A\")"
+        )
