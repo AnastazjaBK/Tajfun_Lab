@@ -5,6 +5,7 @@ wywala wyjątku (fallback na surowy string, nigdy crash UI)."""
 from __future__ import annotations
 
 from buffett_scanner.ui.labels import (
+    acquisition_types_label,
     analysis_status_label,
     broker_label,
     decision_status_label,
@@ -51,3 +52,9 @@ def test_broker_label_known_and_unknown():
     assert broker_label("TRADE_REPUBLIC") == "Trade Republic"
     assert broker_label("OTHER") == "Inny"
     assert broker_label("XTB") == "XTB"
+
+
+def test_acquisition_types_label_joins_mixed_and_handles_empty():
+    assert acquisition_types_label(()) == "—"
+    assert acquisition_types_label(("BUY",)) == "Zakup"
+    assert acquisition_types_label(("BONUS", "BUY")) == "Bonus + Zakup"

@@ -21,16 +21,37 @@ pomijalny przy tej skali danych.
 
 from __future__ import annotations
 
+import json
 import os
 
 import streamlit as st
 
-from buffett_scanner.db import connect, create_user, get_latest_user_decision, get_users, insert_user_decision
+from buffett_scanner.db import (
+    connect,
+    create_user,
+    get_latest_holding_user_action,
+    get_latest_user_decision,
+    get_purchase_thesis,
+    get_users,
+    insert_holding_user_action,
+    insert_user_decision,
+)
 from buffett_scanner.ui.labels import (
     METHODOLOGY_DISCLAIMER,
+    acquisition_types_label,
     analysis_status_label,
+    broker_label,
     decision_status_label,
     decline_flags_label,
+    holding_action_label,
+)
+from buffett_scanner.ui.portfolio import compute_portfolio_bar_summary
+from buffett_scanner.ui.queries import (
+    get_candidate_detail,
+    get_latest_live_scan_run,
+    get_review_needed_count,
+    get_synthesis_rows,
+    get_user_positions_with_summaries,
 )
 
 # Sekcja 16 specyfikacji: mapowanie przycisków UI na istniejący enum
@@ -42,13 +63,14 @@ _DECISION_BUTTONS = (
     ("SNOOZE", "Sprawdzam"),
     ("BOUGHT", "Kupiłam/Kupiłem"),
 )
-from buffett_scanner.ui.portfolio import compute_portfolio_bar_summary
-from buffett_scanner.ui.queries import (
-    get_candidate_detail,
-    get_latest_live_scan_run,
-    get_review_needed_count,
-    get_synthesis_rows,
-    get_user_positions_with_summaries,
+
+# Sekcja 14 specyfikacji: status pozycji -- istniejący enum
+# `holding_user_actions.action` (sekcja 16 design review).
+_HOLDING_ACTION_BUTTONS = (
+    ("HOLD", "Trzymam"),
+    ("REDUCE", "Redukuję"),
+    ("REVIEW_LATER", "Do przeglądu"),
+    ("SOLD", "Sprzedane"),
 )
 
 _VALUATION_SCENARIO_LABELS = (
@@ -289,6 +311,159 @@ def _render_candidate_card(conn, run_id: str, cik: str, *, user_id: int) -> None
     _render_decision_buttons(conn, user_id=user_id, cik=cik)
 
 
+def _format_optional(value: float | None, fmt: str = "{:.2f}") -> str:
+    return fmt.format(value) if value is not None else "—"
+
+
+def _render_portfolio_summary_tab(conn, positions_with_summaries: list) -> None:
+    """Sekcja 6 specyfikacji -- PODSUMOWANIE + tabela pozycji. Tabela
+    jest na poziomie (pozycja, broker) -- sekcja 7: "szczegóły muszą
+    zachować rozbicie na brokerów", nigdy tylko zagregowana linia."""
+    summaries = [s for _, s in positions_with_summaries]
+    if not positions_with_summaries:
+        st.info(
+            "Brak pozycji. Dodaj pierwszą transakcję w zakładce 'Dodaj transakcję' (KROK 7, "
+            "jeszcze w budowie)."
+        )
+        return
+
+    st.markdown("##### Łączne wartości")
+    bar = compute_portfolio_bar_summary(summaries, review_needed_count=0)
+    cols = st.columns(3)
+    cols[0].metric("Wartość bieżąca", _format_currency_dict(bar["current_value_by_currency"]))
+    cols[1].metric("Zainwestowany kapitał", _format_currency_dict(bar["invested_by_currency"]))
+    cols[2].metric("Zysk/strata", _format_currency_dict(bar["unrealized_pl_by_currency"]))
+    st.caption(
+        "Dywidendy: dane niedostępne w V0. "
+        + ("" if bar["current_value_by_currency"] else "Konwersja walut niedostępna w V0 — wartości per waluta.")
+    )
+
+    st.markdown("##### Pozycje (rozbicie per broker)")
+    table_rows = []
+    for position, summary in positions_with_summaries:
+        latest_action = get_latest_holding_user_action(conn, position["position_id"])
+        status_label = holding_action_label(latest_action["action"]) if latest_action else "Trzymam"
+        for sub in summary.by_broker_currency:
+            # WŁASNA wartość tej subpozycji (broker), NIE suma całej
+            # pozycji -- patrz komentarz w `BrokerCurrencySubposition`
+            # (realny bug znaleziony przy weryfikacji wizualnej).
+            current_value = sub.current_value
+            pl = sub.unrealized_pl
+            pl_pct = pl / sub.total_invested * 100 if pl is not None and sub.total_invested > 0 else None
+            current_price_per_share = (
+                current_value / sub.shares_held if current_value is not None and sub.shares_held > 0 else None
+            )
+            table_rows.append({
+                "Ticker": position["ticker"],
+                "Spółka": position["company_name"],
+                "Platforma": broker_label(sub.broker),
+                "Akcje": sub.shares_held,
+                "Śr. cena zakupu": _format_optional(sub.avg_price),
+                "Własny koszt": f"{sub.total_invested:.2f} {sub.currency}",
+                "Bieżąca cena": _format_optional(current_price_per_share),
+                "Bieżąca wartość": (
+                    f"{current_value:.2f} {sub.currency}" if current_value is not None else "—"
+                ),
+                "P/L": f"{pl:.2f} {sub.currency}" if pl is not None else "—",
+                "P/L %": f"{pl_pct:.1f}%" if pl_pct is not None else "n/d",
+                "Sposób nabycia": acquisition_types_label(sub.acquisition_types),
+                "Status": status_label,
+            })
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+
+
+def _render_position_card(conn, position: dict, summary) -> None:
+    """Sekcja 14 specyfikacji -- karta JEDNEJ posiadanej pozycji."""
+    st.header(f"{position['ticker']} — {position['company_name']}")
+
+    thesis = get_purchase_thesis(conn, position["position_id"])
+    snapshot: dict = {}
+    if thesis is not None and thesis["snapshot_json"]:
+        try:
+            snapshot = json.loads(thesis["snapshot_json"])
+        except (TypeError, ValueError):
+            snapshot = {}
+
+    st.markdown("#### Co to za firma?")
+    description = snapshot.get("business_description") if snapshot else None
+    if description:
+        st.write(description)
+    else:
+        st.info("Opis spółki niedostępny — ta pozycja nie ma jeszcze zapisanej analizy scannera.")
+
+    st.markdown("#### Moja pozycja")
+    st.write(f"Liczba akcji: **{summary.shares_held:g}**")
+    brokers = sorted({sub.broker for sub in summary.by_broker_currency})
+    st.write(f"Broker(rzy): {', '.join(broker_label(b) for b in brokers) or '—'}")
+    for currency, invested in summary.invested_by_currency.items():
+        value = (summary.current_value_by_currency or {}).get(currency)
+        pl = (summary.unrealized_pl_by_currency or {}).get(currency)
+        st.write(
+            f"Własny koszt: {invested:.2f} {currency} | "
+            f"Bieżąca wartość: {(f'{value:.2f} {currency}' if value is not None else '—')} | "
+            f"P/L: {(f'{pl:.2f} {currency}' if pl is not None else '—')}"
+        )
+    if len(summary.by_broker_currency) > 1:
+        st.write("**Rozbicie per broker:**")
+        for sub in summary.by_broker_currency:
+            st.write(
+                f"- {broker_label(sub.broker)}: {sub.shares_held:g} akcji, "
+                f"śr. cena {_format_optional(sub.avg_price)} {sub.currency}"
+            )
+
+    st.markdown("#### Dlaczego ją mam?")
+    bull_case = snapshot.get("bull_case") if snapshot else None
+    if bull_case:
+        for item in bull_case:
+            st.write(f"- {item}")
+    else:
+        st.info("Zakup przed analizą scannera — teza do uzupełnienia.")
+
+    st.markdown("#### Co się zmieniło od zakupu?")
+    st.info("Brak danych — monitoring zmian od zakupu nie jest jeszcze częścią V0.")
+
+    st.markdown("#### Co obserwować?")
+    thesis_invalidation = snapshot.get("thesis_invalidation") if snapshot else None
+    biggest_unknown = snapshot.get("biggest_unknown") if snapshot else None
+    if thesis_invalidation or biggest_unknown:
+        if thesis_invalidation:
+            st.write("**Co obaliłoby tezę:**")
+            for item in thesis_invalidation:
+                st.write(f"- {item}")
+        if biggest_unknown:
+            st.write(f"**Największa niewiadoma:** {biggest_unknown}")
+    else:
+        st.info("Niedostępne — brak zapisanej tezy zakupowej dla tej pozycji.")
+
+    st.markdown("---")
+    st.markdown("#### Status")
+    latest_action = get_latest_holding_user_action(conn, position["position_id"])
+    if latest_action is not None:
+        st.caption(f"Obecny status: **{holding_action_label(latest_action['action'])}**")
+    cols = st.columns(4)
+    for col, (action, label) in zip(cols, _HOLDING_ACTION_BUTTONS):
+        if col.button(label, key=f"holding_{position['position_id']}_{action}"):
+            insert_holding_user_action(conn, position_id=position["position_id"], action=action)
+            conn.commit()
+            st.rerun()
+
+
+def _render_portfolio_tab(conn, user: dict) -> None:
+    """Sekcja 6 specyfikacji: wewnątrz PORTFEL, drugi poziom zakładek
+    [PODSUMOWANIE] + DYNAMICZNE tickery posiadanych pozycji."""
+    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"])
+
+    inner_labels = ["PODSUMOWANIE"] + [p["ticker"] for p, _ in positions_with_summaries]
+    inner_tabs = st.tabs(inner_labels)
+
+    with inner_tabs[0]:
+        _render_portfolio_summary_tab(conn, positions_with_summaries)
+
+    for tab, (position, summary) in zip(inner_tabs[1:], positions_with_summaries):
+        with tab:
+            _render_position_card(conn, dict(position), summary)
+
+
 def main() -> None:
     st.set_page_config(page_title="Buffett Opportunity Scanner", layout="wide")
     conn = connect(DB_PATH)
@@ -313,7 +488,7 @@ def main() -> None:
     tabs = st.tabs(tab_labels)
 
     with tabs[0]:
-        st.write("Szczegóły portfela — KROK 6 (w budowie).")
+        _render_portfolio_tab(conn, user)
 
     for tab, row in zip(tabs[1:], synthesis_rows):
         with tab:

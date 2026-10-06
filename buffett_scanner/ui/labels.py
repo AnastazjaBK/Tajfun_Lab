@@ -48,6 +48,11 @@ BROKER_LABELS: dict[str, str] = {
     "OTHER": "Inny",
 }
 
+ACQUISITION_TYPE_LABELS: dict[str, str] = {
+    "BUY": "Zakup",
+    "BONUS": "Bonus",
+}
+
 # Decyzja właścicielki, sekcja 21 specyfikacji UI: NIGDY starego
 # "UNCALIBRATED until Phase 5" ani sugestii, że backtesting/kalibracja
 # wciąż czeka na wykonanie. Treść poniżej cytuje wprost ustalenia z
@@ -82,3 +87,9 @@ def holding_action_label(action: str) -> str:
 
 def broker_label(broker: str) -> str:
     return BROKER_LABELS.get(broker, broker)
+
+
+def acquisition_types_label(acquisition_types: tuple[str, ...]) -> str:
+    if not acquisition_types:
+        return "—"
+    return " + ".join(ACQUISITION_TYPE_LABELS.get(t, t) for t in acquisition_types)

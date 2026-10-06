@@ -27,7 +27,7 @@ pieniężne wyniki są słownikami `{currency: value}`.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,18 @@ class BrokerCurrencySubposition:
     shares_held: float
     total_invested: float  # 0.0 dla subpozycji złożonej wyłącznie z BONUS
     avg_price: float | None  # None gdy shares_held <= 0 (w pełni sprzedana/nigdy nie była kupiona)
+    # Sposoby nabycia, które KIEDYKOLWIEK zasiliły tę subpozycję (nie
+    # "nadal posiadane" -- uproszczenie dla czytelnej etykiety UI, np.
+    # "Zakup + bonus"). Posortowane dla deterministycznego porównania w testach.
+    acquisition_types: tuple[str, ...]
+    # Wypełniane DOPIERO w `compute_position_summary` (wymaga current_price
+    # z zewnątrz) -- `None`, dopóki cena nie jest znana LUB subpozycja jest
+    # w innej walucie niż cena. NIGDY nie czytać `PositionSummary.
+    # current_value_by_currency` per subpozycja -- to jest suma WSZYSTKICH
+    # subpozycji tej waluty, nie wartość TEJ JEDNEJ (realny bug znaleziony
+    # przy weryfikacji wizualnej UI, Faza 7 KROK 6).
+    current_value: float | None = None
+    unrealized_pl: float | None = None
 
 
 @dataclass(frozen=True)
@@ -62,19 +74,25 @@ def compute_broker_currency_subpositions(
     wszystkie zakupy") -- inaczej proporcjonalna redukcja invested przy
     sprzedaży użyłaby złej bazy akcji, gdy sprzedaż nastąpiła między
     dwoma zakupami."""
-    events: list[tuple[str, str, str, str, float, float | None]] = []
+    events: list[tuple[str, str, str, str, float, float | None, str | None]] = []
     for p in purchases:
-        events.append((p["purchase_date"], "BUY", p["broker"], p["currency"], p["shares"], p["total_invested"]))
+        events.append((
+            p["purchase_date"], "PURCHASE", p["broker"], p["currency"], p["shares"],
+            p["total_invested"], p["acquisition_type"],
+        ))
     for s in sales:
-        events.append((s["sale_date"], "SELL", s["broker"], s["currency"], s["shares"], None))
+        events.append((s["sale_date"], "SALE", s["broker"], s["currency"], s["shares"], None, None))
     events.sort(key=lambda e: e[0])
 
-    state: dict[tuple[str, str], dict[str, float]] = {}
-    for _date, kind, broker, currency, shares, invested in events:
-        group = state.setdefault((broker, currency), {"shares": 0.0, "invested": 0.0})
-        if kind == "BUY":
+    state: dict[tuple[str, str], dict] = {}
+    for _date, kind, broker, currency, shares, invested, acquisition_type in events:
+        group = state.setdefault(
+            (broker, currency), {"shares": 0.0, "invested": 0.0, "acquisition_types": set()},
+        )
+        if kind == "PURCHASE":
             group["shares"] += shares
             group["invested"] += invested if invested is not None else 0.0
+            group["acquisition_types"].add(acquisition_type)
         else:
             if group["shares"] > 0:
                 # Average cost: redukcja invested proporcjonalnie do
@@ -92,6 +110,7 @@ def compute_broker_currency_subpositions(
         result.append(BrokerCurrencySubposition(
             broker=broker, currency=currency, shares_held=shares_held,
             total_invested=total_invested, avg_price=avg_price,
+            acquisition_types=tuple(sorted(group["acquisition_types"])),
         ))
     return result
 
@@ -108,33 +127,47 @@ def compute_position_summary(
     `price_daily`/profilu FMP) w JEDNEJ walucie -- jeśli subpozycja jest
     w innej walucie niż `current_price_currency`, jej bieżąca wartość
     jest NIEZNANA (nigdy przeliczana bez FX engine, sekcja 12
-    specyfikacji) i nie trafia do `current_value_by_currency`."""
-    subpositions = compute_broker_currency_subpositions(purchases, sales)
-    shares_held = sum(s.shares_held for s in subpositions)
+    specyfikacji) i nie trafia do `current_value_by_currency`.
+
+    Każda subpozycja (`BrokerCurrencySubposition.current_value`) dostaje
+    WŁASNĄ, osobno policzoną wartość (`shares_held * current_price`) --
+    agregaty `current_value_by_currency`/`unrealized_pl_by_currency` są
+    PÓŹNIEJ liczone jako suma tych już-policzonych wartości, nigdy
+    odwrotnie (żeby UI nigdy nie pomyliło sumy całej pozycji z wartością
+    jednej subpozycji -- realny bug znaleziony przy weryfikacji
+    wizualnej, Faza 7 KROK 6)."""
+    raw_subpositions = compute_broker_currency_subpositions(purchases, sales)
+
+    enriched_subpositions = []
+    for s in raw_subpositions:
+        current_value = None
+        unrealized_pl = None
+        if current_price is not None and current_price_currency is not None and s.currency == current_price_currency:
+            current_value = s.shares_held * current_price
+            unrealized_pl = current_value - s.total_invested
+        enriched_subpositions.append(replace(s, current_value=current_value, unrealized_pl=unrealized_pl))
+
+    shares_held = sum(s.shares_held for s in enriched_subpositions)
 
     invested_by_currency: dict[str, float] = {}
-    for s in subpositions:
+    for s in enriched_subpositions:
         invested_by_currency[s.currency] = invested_by_currency.get(s.currency, 0.0) + s.total_invested
 
     current_value_by_currency: dict[str, float] | None = None
     unrealized_pl_by_currency: dict[str, float] | None = None
-    if current_price is not None and current_price_currency is not None:
+    priced_subpositions = [s for s in enriched_subpositions if s.current_value is not None]
+    if priced_subpositions:
         current_value_by_currency = {}
-        for s in subpositions:
-            if s.currency != current_price_currency:
-                continue  # inna waluta -- bieżąca wartość nieznana bez FX, nie zgadujemy
-            current_value_by_currency[s.currency] = (
-                current_value_by_currency.get(s.currency, 0.0) + s.shares_held * current_price
-            )
-        if current_value_by_currency:
-            unrealized_pl_by_currency = {
-                currency: value - invested_by_currency.get(currency, 0.0)
-                for currency, value in current_value_by_currency.items()
-            }
+        for s in priced_subpositions:
+            current_value_by_currency[s.currency] = current_value_by_currency.get(s.currency, 0.0) + s.current_value
+        unrealized_pl_by_currency = {
+            currency: value - invested_by_currency.get(currency, 0.0)
+            for currency, value in current_value_by_currency.items()
+        }
 
     return PositionSummary(
         position_id=position_id, shares_held=shares_held,
-        by_broker_currency=tuple(subpositions),
+        by_broker_currency=tuple(enriched_subpositions),
         invested_by_currency=invested_by_currency,
         current_value_by_currency=current_value_by_currency,
         unrealized_pl_by_currency=unrealized_pl_by_currency,
