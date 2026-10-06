@@ -1,0 +1,86 @@
+name: DIAG Faza 6f Stage 2 validation (5 historycznych finalistów)
+
+# Jednorazowy workflow diagnostyczny (Faza 6f). Ograniczony LIVE
+# VALIDATION TEST poprawionego Stage 2 (BUGFIX V0 OUTPUT CONTRACT,
+# commit 536c924) WYLACZNIE dla 5 historycznych finalistow (CBOE/PAYX/
+# DECK/INTU/ACN) z FINAL FULL LIVE MVP RUN (run_id
+# live-scan-2026-10-06T083825543395Z). Cel: zweryfikowac poprawke
+# kontraktu LLM, NIE ponownie wybierac kandydatow ani kalibrowac model.
+#
+# Pobiera historyczny artefakt (phase6-live-scan-result) jako
+# READ-ONLY zrodlo deterministycznych danych (current_price/decline
+# flags/DCF/MoS/hard gates -- JUZ policzone, kopiowane 1:1 przez
+# scripts/seed_stage6f_validation_run.py, zero nowego decline
+# screeningu/ranking/TOP-20), potem woloa NIEZMIENIONY
+# `analyze-live-scan-shortlist` na NOWYM, osobnym run_id -- historyczny
+# run_id/jego analyses pozostaja nietkniete (tylko SELECT).
+#
+# Narzedzie operacyjne/diagnostyczne (nie zmienia bugfixu/metodologii)
+# -- usuniete po uzyciu, jak kazda jednorazowa diagnostyka w tym
+# projekcie (patrz historia Fazy 6d, scripts/diag_cost_audit.py).
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: >
+          ID uruchomienia GH Actions "Phase 6 Live End-to-End Scan",
+          ktorego artefakt (phase6-live-scan-result, zawiera
+          live_scan_result.db z historycznym run_id/analizami) ma
+          zostac pobrany jako zrodlo deterministycznych danych.
+        required: true
+        default: "37437405189"
+
+jobs:
+  validate-stage2:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe (pelny zestaw przed walidacja)
+        run: python -m pytest -q
+
+      - name: Pobranie historycznej bazy (immutable audit -- tylko odczyt)
+        uses: actions/download-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: historical-result
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Kopia bazy do walidacji (historical-result/live_scan_result.db zostaje nietkniety)
+        run: cp historical-result/live_scan_result.db live_scan_result.db
+
+      - name: Seed nowego run_id z 5 historycznymi finalistami (zero decline screening/ranking)
+        run: |
+          VALIDATION_RUN_ID=$(python scripts/seed_stage6f_validation_run.py --db live_scan_result.db | tail -n1)
+          echo "VALIDATION_RUN_ID=$VALIDATION_RUN_ID" >> "$GITHUB_ENV"
+          echo "Seeded: $VALIDATION_RUN_ID"
+        env:
+          PYTHONPATH: .
+
+      - name: Stage 2 (poprawiony kontrakt Faza 6f, REALNE wywolania Claude) dla 5 finalistow
+        run: |
+          python -m buffett_scanner.cli --db live_scan_result.db analyze-live-scan-shortlist \
+            --run-id "$VALIDATION_RUN_ID" --limit 5 --markdown-out reports
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Upload wyniku walidacji (osobny artefakt, NIE nadpisuje historycznego)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6f-validation-result
+          path: |
+            reports/
+            live_scan_result.db
+          if-no-files-found: warn
+          retention-days: 30
