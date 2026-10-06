@@ -75,6 +75,7 @@ from buffett_scanner.db import (
     get_fundamentals_periods,
     get_live_scan_candidates,
     get_live_scan_run,
+    get_live_scan_run_usage_summary,
     get_price_series,
     get_sec_company_facts_cache,
     get_universe_membership_as_of,
@@ -127,7 +128,7 @@ from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_a
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
 from buffett_scanner.price_history_plan import build_price_fetch_plan
 from buffett_scanner.prompt import build_analysis_prompt
-from buffett_scanner.providers.claude import ClaudeClient, ClaudeError
+from buffett_scanner.providers.claude import ClaudeClient, ClaudeError, ClaudeUsage
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
 from buffett_scanner.providers.sp500_history import Sp500HistoryError, fetch_components_csv
@@ -397,11 +398,13 @@ def cmd_build_source_packet(args: argparse.Namespace) -> int:
 
 def _run_llm_analysis(
     conn, edgar_client, claude_client, config, *, cik: str, ticker: str, periods,
-) -> tuple[AnalysisOutput, list[VerifiedSource]] | None:
+) -> tuple[AnalysisOutput, list[VerifiedSource], ClaudeUsage] | None:
     """Wspólna ścieżka dla `analyze` i `score`: wskaźniki (Faza 1) +
     source packet (Faza 2) -> prompt -> Claude API -> walidacja
     deterministyczna (Faza 3). Zwraca None (i wypisuje powód) przy
-    dowolnym niepowodzeniu — wołający decyduje, co dalej."""
+    dowolnym niepowodzeniu — wołający decyduje, co dalej. Trzeci
+    element zwracanej trójki to realny `ClaudeUsage` (Faza 6e) tego
+    wywołania."""
     metrics = compute_metrics(periods)
     prefilter_result = evaluate_prefilter(metrics, config.prefilter)
 
@@ -418,10 +421,11 @@ def _run_llm_analysis(
         prefilter_flags=prefilter_result.flags, sources=verified_sources,
     )
     try:
-        result = claude_client.generate_analysis(prompt)
+        generated = claude_client.generate_analysis(prompt)
     except ClaudeError as exc:
         print(f"BŁĄD LLM dla {ticker}: {exc}")
         return None
+    result = generated.output
 
     try:
         validate_analysis_output(
@@ -431,7 +435,7 @@ def _run_llm_analysis(
         print(f"ODRZUCONO (walidacja deterministyczna) dla {ticker}: {exc}")
         return None
 
-    return result, packet
+    return result, packet, generated.usage
 
 
 def cmd_analyze(args: argparse.Namespace) -> int:
@@ -461,7 +465,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             )
             if outcome is None:
                 continue
-            result, _packet = outcome
+            result, _packet, _usage = outcome
 
             print(f"\n{ticker} — analiza OK (schema_version={result.schema_version})")
             print(f"  business_understandability: {result.business_understandability.score}/"
@@ -532,7 +536,7 @@ def cmd_score(args: argparse.Namespace) -> int:
             )
             if outcome is None:
                 continue
-            analysis, packet = outcome
+            analysis, packet, usage = outcome
 
             score = compute_score(
                 analysis=analysis, periods=periods, sector_profile=sector_profile,
@@ -578,6 +582,13 @@ def cmd_score(args: argparse.Namespace) -> int:
                 llm_model_id=config.llm.model,
                 llm_schema_version=analysis.schema_version,
                 llm_raw_output=json.dumps(analysis.model_dump()),
+                llm_response_model=usage.model,
+                llm_input_tokens=usage.input_tokens,
+                llm_output_tokens=usage.output_tokens,
+                llm_cache_creation_input_tokens=usage.cache_creation_input_tokens,
+                llm_cache_read_input_tokens=usage.cache_read_input_tokens,
+                llm_thinking_tokens=usage.thinking_tokens,
+                llm_service_tier=usage.service_tier,
             )
             insert_analysis_sources(conn, analysis_id, packet)
             conn.commit()
@@ -920,11 +931,11 @@ def _analyze_shortlist_and_report(
                     sources=verified_sources,
                 )
                 try:
-                    analysis = claude_client.generate_analysis(prompt)
+                    generated = claude_client.generate_analysis(prompt)
                 except ClaudeError as exc:
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
-                        llm_error=str(exc), cache_key=cache_key,
+                        llm_error=str(exc), cache_key=cache_key, usage=exc.usage,
                     )
                     conn.commit()
                     print(f"  {ticker}: FAILED (Claude API error): {exc}")
@@ -935,6 +946,7 @@ def _analyze_shortlist_and_report(
                     )
                     stop_early = True
                     continue
+                analysis, usage = generated.output, generated.usage
 
                 try:
                     validate_analysis_output(
@@ -943,7 +955,7 @@ def _analyze_shortlist_and_report(
                 except AnalysisValidationError as exc:
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
-                        llm_error=str(exc), cache_key=cache_key,
+                        llm_error=str(exc), cache_key=cache_key, usage=usage,
                     )
                     conn.commit()
                     print(f"  {ticker}: FAILED (walidacja deterministyczna): {exc}")
@@ -993,11 +1005,18 @@ def _analyze_shortlist_and_report(
                     llm_model_id=config.llm.model,
                     llm_schema_version=analysis.schema_version,
                     llm_raw_output=json.dumps(analysis.model_dump()),
+                    llm_response_model=usage.model,
+                    llm_input_tokens=usage.input_tokens,
+                    llm_output_tokens=usage.output_tokens,
+                    llm_cache_creation_input_tokens=usage.cache_creation_input_tokens,
+                    llm_cache_read_input_tokens=usage.cache_read_input_tokens,
+                    llm_thinking_tokens=usage.thinking_tokens,
+                    llm_service_tier=usage.service_tier,
                 )
                 insert_analysis_sources(conn, analysis_id, packet)
                 update_live_scan_candidate_llm_status(
                     conn, run_id=run_id, cik=cik, llm_status="COMPLETE",
-                    cache_key=cache_key, analysis_id=analysis_id,
+                    cache_key=cache_key, analysis_id=analysis_id, usage=usage,
                 )
                 conn.commit()
                 print(f"  {ticker}: COMPLETE (analysis_id={analysis_id})")
@@ -1005,6 +1024,21 @@ def _analyze_shortlist_and_report(
     shortlist_rows = get_live_scan_candidates(conn, run_id, only_shortlist=True)
     print(f"\n== Status shortlisty (run_id={run_id}) ==\n")
     print(render_shortlist_status_table(shortlist_rows))
+
+    usage_summary = get_live_scan_run_usage_summary(conn, run_id)
+    print(
+        f"\n== Telemetria Anthropic API usage (run_id={run_id}) ==\n"
+        f"Nowe wywołania z realnym usage: {usage_summary['calls_with_usage']}/"
+        f"{usage_summary['shortlist_size']} "
+        f"(cache hit: {usage_summary['cache_hits']}, FAILED: {usage_summary['failed']})\n"
+        f"input_tokens: {usage_summary['total_input_tokens']}, "
+        f"output_tokens: {usage_summary['total_output_tokens']}, "
+        f"cache_creation_input_tokens: {usage_summary['total_cache_creation_input_tokens']}, "
+        f"cache_read_input_tokens: {usage_summary['total_cache_read_input_tokens']}, "
+        f"thinking_tokens: {usage_summary['total_thinking_tokens']}\n"
+        "(Brak wyliczonego kosztu $ — brak dziś zweryfikowanego cennika per-token, "
+        "patrz COST AUDIT Faza 6d; surowe tokeny powyżej są realne, nie szacowane.)"
+    )
 
     n_complete = sum(1 for r in shortlist_rows if r["llm_status"] == "COMPLETE")
     n_failed = sum(1 for r in shortlist_rows if r["llm_status"] == "FAILED")

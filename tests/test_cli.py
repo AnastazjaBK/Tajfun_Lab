@@ -301,8 +301,9 @@ class _FakeClaudeClient:
             MoatSection,
             ScoredSection,
         )
+        from buffett_scanner.providers.claude import ClaudeAnalysisResult, ClaudeUsage
 
-        return AnalysisOutput(
+        output = AnalysisOutput(
             ticker="AAPL", schema_version="1.0",
             business_understandability=ScoredSection(score=5, confidence="MEDIUM"),
             moat=MoatSection(score=6, confidence="MEDIUM"),
@@ -318,6 +319,12 @@ class _FakeClaudeClient:
             biggest_unknown="Wpływ nowego cyklu produktowego",
             cited_source_ids=["src-1"],
         )
+        usage = ClaudeUsage(
+            model="claude-sonnet-5", input_tokens=1000, output_tokens=200,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            thinking_tokens=None, service_tier="standard",
+        )
+        return ClaudeAnalysisResult(output=output, usage=usage)
 
 
 def test_run_live_scan_end_to_end_with_fake_providers(tmp_path, monkeypatch, capsys):
@@ -345,13 +352,32 @@ def test_run_live_scan_end_to_end_with_fake_providers(tmp_path, monkeypatch, cap
     assert "Kandydat 1: AAPL" in out
     assert "Silna marka" in out
     assert "No qualifying opportunities" not in out
+    # Faza 6e — agregat per-run w raporcie CLI, bez wyliczonego $.
+    assert "Telemetria Anthropic API usage" in out
+    assert "input_tokens: 1000, output_tokens: 200" in out
+    assert "Brak wyliczonego kosztu $" in out
 
     from buffett_scanner.db import connect
 
     conn = connect(db_path)
-    rows = conn.execute("SELECT cik, total_score FROM analyses").fetchall()
+    rows = conn.execute(
+        "SELECT cik, total_score, llm_response_model, llm_input_tokens, llm_output_tokens "
+        "FROM analyses"
+    ).fetchall()
     assert len(rows) == 1
     assert rows[0]["cik"] == "0000320193"
+    # Faza 6e — realny usage z `_FakeClaudeClient` (model/input_tokens/
+    # output_tokens zdefiniowane w teście) musi trafić do `analyses`.
+    assert rows[0]["llm_response_model"] == "claude-sonnet-5"
+    assert rows[0]["llm_input_tokens"] == 1000
+    assert rows[0]["llm_output_tokens"] == 200
+
+    candidate_rows = conn.execute(
+        "SELECT llm_input_tokens, llm_output_tokens FROM live_scan_candidates"
+    ).fetchall()
+    assert len(candidate_rows) == 1
+    assert candidate_rows[0]["llm_input_tokens"] == 1000
+    assert candidate_rows[0]["llm_output_tokens"] == 200
 
 
 def test_run_live_scan_reports_no_qualifying_opportunities_when_nothing_surfaces(
@@ -455,16 +481,18 @@ class _CountingClaudeClient:
             MoatSection,
             ScoredSection,
         )
-        from buffett_scanner.providers.claude import ClaudeError
+        from buffett_scanner.providers.claude import ClaudeAnalysisResult, ClaudeError, ClaudeUsage
 
         type(self).call_count["n"] += 1
         for ticker in self.fail_tickers:
             if f'"{ticker}"' in prompt:
+                # Realny 400 insufficient-credit: SDK nigdy nie dostaje
+                # `response`, więc `usage=None` -- nic nie wymyślamy.
                 raise ClaudeError(
                     f"Claude API zwróciło błąd (400): Your credit balance is too low ({ticker})"
                 )
 
-        return AnalysisOutput(
+        output = AnalysisOutput(
             ticker="X", schema_version="1.0",
             business_understandability=ScoredSection(score=5, confidence="MEDIUM"),
             moat=MoatSection(score=6, confidence="MEDIUM"),
@@ -474,6 +502,12 @@ class _CountingClaudeClient:
             dividend_trap_alert=DividendTrapAlert(triggered=False),
             bull_case=["Bull"], bear_case=["Bear"], cited_source_ids=["src-1"],
         )
+        usage = ClaudeUsage(
+            model="claude-sonnet-5", input_tokens=900, output_tokens=150,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            thinking_tokens=None, service_tier="standard",
+        )
+        return ClaudeAnalysisResult(output=output, usage=usage)
 
 
 def _set_live_scan_env(monkeypatch):
@@ -577,6 +611,11 @@ def test_analyze_live_scan_shortlist_incomplete_status_never_emits_partial_repor
     assert by_ticker["MSFT"]["llm_status"] == "COMPLETE"
     assert by_ticker["AAPL"]["llm_status"] == "FAILED"
     assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 1
+    # Faza 6e: MSFT (sukces) ma realny usage; AAPL (400 insufficient-credit,
+    # SDK nigdy nie dostał `response`) ma NULL -- nigdy nie wymyślamy
+    # tokenów dla niewykonanego wywołania.
+    assert by_ticker["MSFT"]["llm_input_tokens"] == 900
+    assert by_ticker["AAPL"]["llm_input_tokens"] is None
 
 
 def test_analyze_live_scan_shortlist_resume_skips_complete_and_finishes(

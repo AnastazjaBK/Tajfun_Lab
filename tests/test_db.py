@@ -96,6 +96,58 @@ def test_init_db_adds_overlap_merge_note_column_to_pre_existing_table(tmp_path):
     assert row["overlap_merge_note"] == "test"
 
 
+def test_init_db_adds_usage_telemetry_columns_to_pre_existing_live_scan_candidates(tmp_path):
+    """Faza 6e — ten sam scenariusz co `overlap_merge_note` powyżej, ale
+    dla `live_scan_candidates` z realnym, reużywanym artefaktem
+    `live_scan_result.db` (Fazy 6/6b/6c), który już istnieje BEZ kolumn
+    usage dodanych w tej fazie."""
+    import sqlite3
+
+    db_path = tmp_path / "old_live_scan.db"
+    raw = sqlite3.connect(db_path)
+    raw.execute("CREATE TABLE companies (cik TEXT PRIMARY KEY, name TEXT NOT NULL)")
+    raw.execute(
+        """
+        CREATE TABLE live_scan_runs (
+            run_id TEXT PRIMARY KEY, run_date TEXT NOT NULL, config_version TEXT NOT NULL,
+            universe_size INTEGER NOT NULL, decline_surfaced INTEGER NOT NULL,
+            prefilter_excluded INTEGER NOT NULL, shortlist_limit INTEGER NOT NULL,
+            shortlist_size INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'RANKED'
+        )
+        """
+    )
+    raw.execute(
+        """
+        CREATE TABLE live_scan_candidates (
+            run_id TEXT NOT NULL, cik TEXT NOT NULL, ticker TEXT NOT NULL, rank INTEGER NOT NULL,
+            current_price REAL NOT NULL, decline_flags_json TEXT NOT NULL,
+            deterministic_score_pct REAL, deterministic_partial_score REAL NOT NULL,
+            available_components_json TEXT NOT NULL, missing_components_json TEXT NOT NULL,
+            safety_score REAL NOT NULL, valuation_score REAL, dividend_score REAL NOT NULL,
+            margin_of_safety_base_pct REAL, hard_gate_passed_deterministic INTEGER NOT NULL,
+            hard_gate_triggered_deterministic_json TEXT NOT NULL, in_shortlist INTEGER NOT NULL,
+            llm_status TEXT NOT NULL DEFAULT 'NOT_SHORTLISTED', llm_error TEXT, cache_key TEXT,
+            analysis_id INTEGER, PRIMARY KEY (run_id, cik)
+        )
+        """
+    )
+    raw.commit()
+    raw.close()
+
+    columns_before = {
+        row[1] for row in sqlite3.connect(db_path).execute("PRAGMA table_info(live_scan_candidates)")
+    }
+    assert "llm_input_tokens" not in columns_before
+
+    conn = init_db(db_path)
+    columns_after = {row["name"] for row in conn.execute("PRAGMA table_info(live_scan_candidates)")}
+    assert {
+        "llm_response_model", "llm_input_tokens", "llm_output_tokens",
+        "llm_cache_creation_input_tokens", "llm_cache_read_input_tokens",
+        "llm_thinking_tokens", "llm_service_tier",
+    } <= columns_after
+
+
 def test_init_db_creates_expected_tables(conn):
     tables = {
         row["name"]
@@ -1006,6 +1058,140 @@ def test_update_live_scan_candidate_llm_status(conn):
     assert row["llm_error"] == "Claude API zwróciło błąd (400): ..."
     assert row["cache_key"] == "deadbeef"
     assert row["analysis_id"] is None
+    # 400 insufficient-credit: SDK nigdy nie dostało `response`, więc brak
+    # `usage` do zapisania -- nigdy nie wymyślamy tokenów dla niewykonanego
+    # wywołania (Faza 6e, domyślne `usage=None`).
+    assert row["llm_input_tokens"] is None
+    assert row["llm_output_tokens"] is None
+
+
+def test_update_live_scan_candidate_llm_status_persists_real_usage_on_success(conn):
+    """Faza 6e — udane wywołanie Claude zapisuje realny `ClaudeUsage` na
+    wierszu kandydata (źródło agregatu per-run, patrz
+    `get_live_scan_run_usage_summary`)."""
+    from buffett_scanner.db import (
+        get_live_scan_candidates,
+        insert_live_scan_candidate,
+        insert_live_scan_run,
+        update_live_scan_candidate_llm_status,
+    )
+    from buffett_scanner.providers.claude import ClaudeUsage
+
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    insert_live_scan_run(
+        conn, run_id="live-1", run_date="2026-10-06", config_version="config.yaml:abc123",
+        universe_size=1, decline_surfaced=1, prefilter_excluded=0, shortlist_limit=20, shortlist_size=1,
+    )
+    insert_live_scan_candidate(
+        conn, run_id="live-1", cik="0000320193", ticker="AAPL", rank=1, current_price=150.0,
+        decline_flags={}, deterministic_score_pct=80.0, deterministic_partial_score=36.0,
+        available_components=("safety", "valuation", "dividend"), missing_components=(),
+        safety_score=15.0, valuation_score=16.0, dividend_score=5.0, margin_of_safety_base_pct=40.0,
+        hard_gate_passed_deterministic=True, hard_gate_triggered_deterministic=(), in_shortlist=True,
+    )
+    conn.commit()
+
+    usage = ClaudeUsage(
+        model="claude-sonnet-5", input_tokens=12000, output_tokens=2500,
+        cache_creation_input_tokens=500, cache_read_input_tokens=0,
+        thinking_tokens=1800, service_tier="standard",
+    )
+    update_live_scan_candidate_llm_status(
+        conn, run_id="live-1", cik="0000320193", llm_status="COMPLETE",
+        cache_key="deadbeef", analysis_id=None, usage=usage,
+    )
+    conn.commit()
+
+    row = get_live_scan_candidates(conn, "live-1")[0]
+    assert row["llm_status"] == "COMPLETE"
+    assert row["llm_response_model"] == "claude-sonnet-5"
+    assert row["llm_input_tokens"] == 12000
+    assert row["llm_output_tokens"] == 2500
+    assert row["llm_cache_creation_input_tokens"] == 500
+    assert row["llm_cache_read_input_tokens"] == 0
+    assert row["llm_thinking_tokens"] == 1800
+    assert row["llm_service_tier"] == "standard"
+
+
+def test_get_live_scan_run_usage_summary_sums_only_real_new_calls(conn):
+    """Faza 6e — agregat per-run: suma tokenów TYLKO dla wierszy z realnym
+    usage w TYM run_id; cache hit (COMPLETE, usage=None) i FAILED bez
+    odpowiedzi API (usage=None) liczą się do `shortlist_size`, ale nie do
+    sum tokenów -- nigdy nie przypisujemy kosztu/tokenów nowemu wywołaniu,
+    które się nie wydarzyło w tym runie."""
+    from buffett_scanner.db import (
+        get_live_scan_run_usage_summary,
+        insert_analysis,
+        insert_live_scan_candidate,
+        insert_live_scan_run,
+        update_live_scan_candidate_llm_status,
+    )
+    from buffett_scanner.providers.claude import ClaudeUsage
+
+    for cik, ticker in (
+        ("0000320193", "AAPL"), ("0000789019", "MSFT"),
+        ("0000000003", "FAIL"), ("0000000004", "CACHE"),
+    ):
+        upsert_company(conn, cik=cik, name=ticker)
+    upsert_scoring_model_version(conn, version="0.1.0-draft", description="x", weights_json="{}", gates_json="{}")
+    cached_analysis_id = insert_analysis(
+        conn, cik="0000000004", run_date="2026-10-01", price_at_analysis=100.0,
+        scoring_model_version="0.1.0-draft", total_score=70.0, hard_gates_passed=1,
+    )
+    insert_live_scan_run(
+        conn, run_id="live-1", run_date="2026-10-06", config_version="config.yaml:abc123",
+        universe_size=4, decline_surfaced=4, prefilter_excluded=0, shortlist_limit=20, shortlist_size=4,
+    )
+    for rank, (cik, ticker) in enumerate((
+        ("0000320193", "AAPL"), ("0000789019", "MSFT"),
+        ("0000000003", "FAIL"), ("0000000004", "CACHE"),
+    ), start=1):
+        insert_live_scan_candidate(
+            conn, run_id="live-1", cik=cik, ticker=ticker, rank=rank, current_price=100.0,
+            decline_flags={}, deterministic_score_pct=80.0, deterministic_partial_score=36.0,
+            available_components=("safety",), missing_components=(), safety_score=15.0,
+            valuation_score=None, dividend_score=5.0, margin_of_safety_base_pct=None,
+            hard_gate_passed_deterministic=True, hard_gate_triggered_deterministic=(), in_shortlist=True,
+        )
+    conn.commit()
+
+    update_live_scan_candidate_llm_status(
+        conn, run_id="live-1", cik="0000320193", llm_status="COMPLETE", cache_key="k1",
+        usage=ClaudeUsage(
+            model="claude-sonnet-5", input_tokens=10000, output_tokens=2000,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            thinking_tokens=None, service_tier="standard",
+        ),
+    )
+    update_live_scan_candidate_llm_status(
+        conn, run_id="live-1", cik="0000789019", llm_status="COMPLETE", cache_key="k2",
+        usage=ClaudeUsage(
+            model="claude-sonnet-5", input_tokens=8000, output_tokens=1500,
+            cache_creation_input_tokens=None, cache_read_input_tokens=None,
+            thinking_tokens=None, service_tier="standard",
+        ),
+    )
+    # FAILED bez odpowiedzi API (400 insufficient-credit) -- usage=None.
+    update_live_scan_candidate_llm_status(
+        conn, run_id="live-1", cik="0000000003", llm_status="FAILED",
+        llm_error="Claude API zwróciło błąd (400): ...",
+    )
+    # CACHE HIT -- COMPLETE bez nowego wywołania w TYM run_id -- usage=None.
+    update_live_scan_candidate_llm_status(
+        conn, run_id="live-1", cik="0000000004", llm_status="COMPLETE",
+        cache_key="k-cached", analysis_id=cached_analysis_id,
+    )
+    conn.commit()
+
+    summary = get_live_scan_run_usage_summary(conn, "live-1")
+    assert summary["shortlist_size"] == 4
+    assert summary["calls_with_usage"] == 2
+    assert summary["cache_hits"] == 1
+    assert summary["failed"] == 1
+    assert summary["total_input_tokens"] == 18000
+    assert summary["total_output_tokens"] == 3500
+    assert summary["total_cache_creation_input_tokens"] is None
+    assert summary["total_thinking_tokens"] is None
 
 
 def test_find_cached_live_scan_analysis_hits_only_on_complete_with_matching_key(conn):

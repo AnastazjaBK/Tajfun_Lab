@@ -22,6 +22,7 @@ import sqlite3
 from pathlib import Path
 
 from buffett_scanner.fundamentals import FundamentalsPeriod
+from buffett_scanner.providers.claude import ClaudeUsage
 
 # Kanoniczne nazwy line_item używane przy zapisie/odczycie fundamentals_raw
 # — muszą być spójne między ingestem (cli.py) a pivotowaniem tutaj.
@@ -169,6 +170,20 @@ CREATE TABLE IF NOT EXISTS analyses (
     llm_model_id              TEXT,
     llm_schema_version        TEXT,
     llm_raw_output            TEXT,     -- JSON
+    -- Faza 6e (2026-10-06) — telemetria realnego `response`/`response.
+    -- usage` z `anthropic==1.8.0` (zweryfikowane przez inspekcję
+    -- zainstalowanego SDK, nigdy nie zakładane). `llm_response_model`
+    -- to RZECZYWISTY `response.model` (ground truth), odrębny od
+    -- `llm_model_id` (configu) -- oba powinny się zgadzać, ale nie
+    -- ufamy temu bez weryfikacji. Brak liczonego kosztu $ -- NIE mamy
+    -- dziś zweryfikowanego cennika per-token (COST AUDIT, Faza 6d).
+    llm_response_model              TEXT,
+    llm_input_tokens                INTEGER,
+    llm_output_tokens               INTEGER,
+    llm_cache_creation_input_tokens INTEGER,
+    llm_cache_read_input_tokens     INTEGER,
+    llm_thinking_tokens             INTEGER,
+    llm_service_tier                TEXT,
     created_at                TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_analyses_cik_run_date ON analyses(cik, run_date);
@@ -498,6 +513,24 @@ CREATE TABLE IF NOT EXISTS live_scan_candidates (
     llm_error                   TEXT,
     cache_key                   TEXT,
     analysis_id                 INTEGER REFERENCES analyses(analysis_id),
+    -- Faza 6e (2026-10-06) — telemetria PER-KANDYDAT (per próba
+    -- wywołania Claude API w TYM run_id). W przeciwieństwie do kolumn
+    -- usage w `analyses` (zapisywanych tylko dla faktycznie udanej,
+    -- persystowanej analizy) te kolumny są wypełniane dla KAŻDEGO
+    -- wyniku: realne wywołanie zakończone sukcesem, odmowa/niesparsowalny
+    -- JSON (FAILED, ale realna odpowiedź/usage istniała), błąd API bez
+    -- odpowiedzi (FAILED, NULL -- nigdy nie zgadujemy), i CACHE HIT
+    -- (COMPLETE, NULL -- zero nowego wywołania w TYM run_id, zero
+    -- nowego kosztu). To właśnie ta tabela (nie `analyses`) jest
+    -- źródłem agregatu per-run -- płaski SUM po `run_id`, bez JOIN-a,
+    -- więc cache hit nigdy nie jest liczony jako nowy koszt.
+    llm_response_model              TEXT,
+    llm_input_tokens                INTEGER,
+    llm_output_tokens               INTEGER,
+    llm_cache_creation_input_tokens INTEGER,
+    llm_cache_read_input_tokens     INTEGER,
+    llm_thinking_tokens             INTEGER,
+    llm_service_tier                TEXT,
     PRIMARY KEY (run_id, cik)
 );
 CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_run_id ON live_scan_candidates(run_id);
@@ -529,6 +562,24 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 # D5: Postgres/Supabase od V1, gdzie migracje będą formalne).
 _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("universe_membership", "overlap_merge_note", "TEXT"),
+    # Faza 6e (2026-10-06) — telemetria Anthropic API usage, dodana PO
+    # tym, jak `analyses`/`live_scan_candidates` mogły już istnieć w
+    # plikach DB z poprzednich runów (np. ponownie używany artefakt
+    # `live_scan_result.db`).
+    ("analyses", "llm_response_model", "TEXT"),
+    ("analyses", "llm_input_tokens", "INTEGER"),
+    ("analyses", "llm_output_tokens", "INTEGER"),
+    ("analyses", "llm_cache_creation_input_tokens", "INTEGER"),
+    ("analyses", "llm_cache_read_input_tokens", "INTEGER"),
+    ("analyses", "llm_thinking_tokens", "INTEGER"),
+    ("analyses", "llm_service_tier", "TEXT"),
+    ("live_scan_candidates", "llm_response_model", "TEXT"),
+    ("live_scan_candidates", "llm_input_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_output_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_cache_creation_input_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_cache_read_input_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_thinking_tokens", "INTEGER"),
+    ("live_scan_candidates", "llm_service_tier", "TEXT"),
 )
 
 
@@ -1427,16 +1478,65 @@ def update_live_scan_candidate_llm_status(
     llm_error: str | None = None,
     cache_key: str | None = None,
     analysis_id: int | None = None,
+    usage: ClaudeUsage | None = None,
 ) -> None:
+    """`usage` (Faza 6e): realny `ClaudeUsage` gdy API faktycznie
+    odpowiedziało w TYM wywołaniu (sukces, albo FAILED przez refusal/
+    nie-sparsowalny JSON) — `None` gdy nie było żadnej odpowiedzi do
+    zmierzenia (błąd API bez `response`, brak fundamentals/źródeł) albo
+    gdy to CACHE HIT (zero nowego wywołania, więc zero nowego kosztu w
+    TYM run_id). Nigdy nie wymyślamy wartości zamiast `None`."""
     conn.execute(
         """
         UPDATE live_scan_candidates
-        SET llm_status = ?, llm_error = ?, cache_key = ?, analysis_id = ?
+        SET llm_status = ?, llm_error = ?, cache_key = ?, analysis_id = ?,
+            llm_response_model = ?, llm_input_tokens = ?, llm_output_tokens = ?,
+            llm_cache_creation_input_tokens = ?, llm_cache_read_input_tokens = ?,
+            llm_thinking_tokens = ?, llm_service_tier = ?
         WHERE run_id = ? AND cik = ?
         """,
-        (llm_status, llm_error, cache_key, analysis_id, run_id, cik),
+        (
+            llm_status, llm_error, cache_key, analysis_id,
+            usage.model if usage else None,
+            usage.input_tokens if usage else None,
+            usage.output_tokens if usage else None,
+            usage.cache_creation_input_tokens if usage else None,
+            usage.cache_read_input_tokens if usage else None,
+            usage.thinking_tokens if usage else None,
+            usage.service_tier if usage else None,
+            run_id, cik,
+        ),
     )
 
 
 def update_live_scan_run_status(conn: sqlite3.Connection, run_id: str, status: str) -> None:
     conn.execute("UPDATE live_scan_runs SET status = ? WHERE run_id = ?", (status, run_id))
+
+
+def get_live_scan_run_usage_summary(conn: sqlite3.Connection, run_id: str) -> dict:
+    """Agregat per-run (Faza 6e) — płaski SUM po `live_scan_candidates`
+    dla `run_id` (NIE join do `analyses`: cache hit ma tu `NULL` usage,
+    więc nigdy nie jest liczony jako nowy koszt TEGO runu, mimo że jego
+    `analysis_id` wskazuje na analizę policzoną w innym, wcześniejszym
+    run_id). Zwraca surowe sumy tokenów/liczniki — zero wyliczonego $
+    (patrz `ClaudeUsage`/COST AUDIT Faza 6d: brak zweryfikowanego
+    cennika per-token)."""
+    row = conn.execute(
+        """
+        SELECT
+            COUNT(*) AS shortlist_size,
+            SUM(CASE WHEN llm_input_tokens IS NOT NULL THEN 1 ELSE 0 END) AS calls_with_usage,
+            SUM(CASE WHEN llm_status = 'COMPLETE' AND llm_input_tokens IS NULL
+                     THEN 1 ELSE 0 END) AS cache_hits,
+            SUM(CASE WHEN llm_status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+            SUM(llm_input_tokens) AS total_input_tokens,
+            SUM(llm_output_tokens) AS total_output_tokens,
+            SUM(llm_cache_creation_input_tokens) AS total_cache_creation_input_tokens,
+            SUM(llm_cache_read_input_tokens) AS total_cache_read_input_tokens,
+            SUM(llm_thinking_tokens) AS total_thinking_tokens
+        FROM live_scan_candidates
+        WHERE run_id = ? AND in_shortlist = 1
+        """,
+        (run_id,),
+    ).fetchone()
+    return dict(row) if row else {}

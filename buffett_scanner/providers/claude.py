@@ -16,13 +16,66 @@ stronie kodu — nigdy nie ufamy samemu twierdzeniu modelu.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import anthropic
 
 from buffett_scanner.analysis_schema import AnalysisOutput
 
 
+@dataclass(frozen=True)
+class ClaudeUsage:
+    """Surowe pola realnie zwrócone przez `response`/`response.usage`
+    zainstalowanego SDK (`anthropic==1.8.0`, zweryfikowane 2026-10-06
+    przez inspekcję `anthropic.types.Usage`/`Message` — nigdy nie
+    zakładane z pamięci/dokumentacji nowszej generacji SDK). Zero
+    wyliczonego kosztu $ tutaj — `model` nie ma dziś zweryfikowanego
+    cennika per-token (patrz COST AUDIT, Faza 6d), więc koszt jest
+    liczony (jeśli w ogóle) wyżej w warstwie persystencji, tylko gdy
+    jest wiarygodnie policzalny."""
+
+    model: str
+    input_tokens: int
+    output_tokens: int
+    cache_creation_input_tokens: int | None
+    cache_read_input_tokens: int | None
+    thinking_tokens: int | None
+    service_tier: str | None
+
+    @classmethod
+    def from_response(cls, response) -> "ClaudeUsage":
+        usage = response.usage
+        output_details = usage.output_tokens_details
+        return cls(
+            model=response.model,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            cache_creation_input_tokens=usage.cache_creation_input_tokens,
+            cache_read_input_tokens=usage.cache_read_input_tokens,
+            thinking_tokens=output_details.thinking_tokens if output_details is not None else None,
+            service_tier=usage.service_tier,
+        )
+
+
+@dataclass(frozen=True)
+class ClaudeAnalysisResult:
+    """Wynik jednego wywołania `generate_analysis` razem z realnym
+    `usage` -- rozdzielone od `AnalysisOutput`, żeby nie zmieniać
+    schematu JSON analizy (Faza 3, sekcja 8) ani jej walidacji."""
+
+    output: AnalysisOutput
+    usage: ClaudeUsage
+
+
 class ClaudeError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, usage: ClaudeUsage | None = None):
+        super().__init__(message)
+        # Obecne TYLKO gdy API faktycznie zwróciło odpowiedź (refusal /
+        # nie-sparsowalny JSON) -- na APIStatusError/APIConnectionError
+        # (np. wyczerpany kredyt, błąd sieci) `response` nigdy nie
+        # istnieje, więc `usage` zostaje None: nigdy nie wymyślamy
+        # kosztu/tokenów dla niewykonanego wywołania.
+        self.usage = usage
 
 
 class ClaudeClient:
@@ -42,11 +95,16 @@ class ClaudeClient:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    def generate_analysis(self, prompt: str) -> AnalysisOutput:
+    def generate_analysis(self, prompt: str) -> ClaudeAnalysisResult:
         """Wywołuje Claude API i zwraca zwalidowany strukturalnie
-        `AnalysisOutput`. Rzuca `ClaudeError` na każdy błąd API, odmowę
+        `AnalysisOutput` razem z realnym `ClaudeUsage` (Faza 6e —
+        telemetria usage). Rzuca `ClaudeError` na każdy błąd API, odmowę
         (`stop_reason == "refusal"`) lub brak sparsowanego wyjścia —
-        nigdy nie zwraca częściowego/domyślnego wyniku po cichu."""
+        nigdy nie zwraca częściowego/domyślnego wyniku po cichu. Gdy
+        odpowiedź realnie istniała (refusal/nie-sparsowalny JSON),
+        `ClaudeError.usage` niesie jej realny `usage` dalej -- gdy API
+        nie zwróciło żadnej odpowiedzi (APIStatusError/APIConnectionError,
+        np. wyczerpany kredyt), `ClaudeError.usage` jest `None`."""
         try:
             response = self._client.messages.parse(
                 model=self._model,
@@ -74,9 +132,15 @@ class ClaudeClient:
             ) from exc
 
         if response.stop_reason == "refusal":
-            raise ClaudeError("Claude odmówił odpowiedzi (stop_reason=refusal).")
+            raise ClaudeError(
+                "Claude odmówił odpowiedzi (stop_reason=refusal).",
+                usage=ClaudeUsage.from_response(response),
+            )
         if response.parsed_output is None:
             raise ClaudeError(
-                "Claude API nie zwróciło poprawnie sparsowanego wyjścia (parsed_output=None)."
+                "Claude API nie zwróciło poprawnie sparsowanego wyjścia (parsed_output=None).",
+                usage=ClaudeUsage.from_response(response),
             )
-        return response.parsed_output
+        return ClaudeAnalysisResult(
+            output=response.parsed_output, usage=ClaudeUsage.from_response(response),
+        )
