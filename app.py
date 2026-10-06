@@ -33,10 +33,17 @@ from buffett_scanner.ui.labels import (
 )
 from buffett_scanner.ui.portfolio import compute_portfolio_bar_summary
 from buffett_scanner.ui.queries import (
+    get_candidate_detail,
     get_latest_live_scan_run,
     get_review_needed_count,
     get_synthesis_rows,
     get_user_positions_with_summaries,
+)
+
+_VALUATION_SCENARIO_LABELS = (
+    ("bear", "Pesymistyczny (BEAR)"),
+    ("base", "Bazowy (BASE)"),
+    ("bull", "Optymistyczny (BULL)"),
 )
 
 DB_PATH = os.environ.get("BUFFETT_SCANNER_DB", "buffett_scanner.db")
@@ -74,22 +81,24 @@ def _render_user_picker(conn) -> dict | None:
     return next(u for u in users if u["display_name"] == selected)
 
 
-def _render_synthesis_table(conn) -> list[dict]:
+def _render_synthesis_table(conn) -> tuple[str | None, list[dict]]:
     """Sekcja 4 specyfikacji: tabela SYNTEZY ostatniego WŁAŚCIWEGO
     live-scanu (nigdy walidacji technicznej -- patrz `ui/queries.
     get_latest_live_scan_run`). FAILED to status RAPORTU jakościowego,
     nie ocena spółki -- deterministyczne dane/cena/wycena pozostają
-    widoczne niezależnie od statusu analizy LLM."""
+    widoczne niezależnie od statusu analizy LLM. Zwraca `(run_id, rows)`
+    -- `run_id` reużywany przez karty kandydatów, żeby nie odpytywać
+    "najnowszego skanu" drugi raz per zakładkę."""
     run = get_latest_live_scan_run(conn)
     if run is None:
         st.info("Brak jeszcze ukończonego live-scan rynku.")
-        return []
+        return None, []
 
     st.subheader(f"Co scanner znalazł — skan z {run['run_date']}")
     rows = get_synthesis_rows(conn, run["run_id"])
     if not rows:
         st.info("Ten skan nie wytypował żadnych kandydatów (to prawidłowy wynik).")
-        return rows
+        return run["run_id"], rows
 
     table_data = [
         {
@@ -110,7 +119,7 @@ def _render_synthesis_table(conn) -> list[dict]:
     ]
     st.dataframe(table_data, use_container_width=True, hide_index=True)
     st.caption(METHODOLOGY_DISCLAIMER)
-    return rows
+    return run["run_id"], rows
 
 
 def _render_portfolio_bar(conn, user: dict) -> None:
@@ -132,6 +141,124 @@ def _render_portfolio_bar(conn, user: dict) -> None:
         st.caption("Konwersja walut niedostępna w V0 — wartości pokazane per waluta, gdy znane.")
 
 
+def _format_decline_narrative(snapshot, triggered_flags: list[str]) -> str:
+    """Sekcja 15 specyfikacji: "DLACZEGO SCANNER JĄ ZNALAZŁ?" -- jedno
+    zdanie z realnymi % zmiany ceny, nigdy wymyślone liczby."""
+    if snapshot is None:
+        return "Brak wystarczającej historii cen, by pokazać szczegóły spadku."
+    parts = []
+    if snapshot.month_pct is not None:
+        parts.append(f"zmiana ceny w ostatnim miesiącu: {snapshot.month_pct:.1f}%")
+    if snapshot.drawdown_from_52w_high_pct is not None:
+        parts.append(f"spadek od szczytu 52-tygodniowego: {snapshot.drawdown_from_52w_high_pct:.1f}%")
+    detail = ", ".join(parts) if parts else "brak szczegółowych danych procentowych dla tego okna"
+    return f"Wykryte sygnały: {decline_flags_label(triggered_flags)}. {detail.capitalize()}."
+
+
+def _render_valuation_section(valuation_result, current_price: float) -> None:
+    """Sekcja 15 specyfikacji: BEAR/BASE/BULL + jawne zastrzeżenie, że
+    DCF to szacunek modelu, nie pewna wartość spółki (nigdy
+    przedstawiana jako prawda)."""
+    st.markdown("#### Wycena")
+    st.write(f"Obecna cena: **{current_price}**")
+    if not valuation_result.implemented:
+        st.info(f"Wycena DCF niedostępna dla tej spółki. Powód: {valuation_result.reason}")
+        return
+
+    for scenario_key, label in _VALUATION_SCENARIO_LABELS:
+        scenario = valuation_result.scenarios.get(scenario_key)
+        if scenario is None:
+            continue
+        mos_text = (
+            f"{scenario.margin_of_safety_pct:.1f}%" if scenario.margin_of_safety_pct is not None else "n/d"
+        )
+        st.write(
+            f"**{label}**: szacowana wartość wewnętrzna/akcję ≈ {scenario.intrinsic_value_per_share:.2f}, "
+            f"margines bezpieczeństwa: {mos_text}"
+        )
+
+    base_scenario = valuation_result.scenarios.get("base")
+    if base_scenario is not None and base_scenario.margin_of_safety_pct is not None:
+        direction = "wyższa" if base_scenario.margin_of_safety_pct >= 0 else "niższa"
+        st.caption(
+            "Według bazowego (BASE) scenariusza modelu szacowana wartość wewnętrzna jest o "
+            f"{abs(base_scenario.margin_of_safety_pct):.1f}% {direction} od obecnej ceny. "
+            "To szacunek oparty na modelu DCF przy założonych parametrach wzrostu/dyskonta, "
+            "nie pewna, zweryfikowana wartość spółki."
+        )
+
+
+def _render_candidate_card(conn, run_id: str, cik: str) -> None:
+    """Sekcja 15 specyfikacji UI -- pełna karta kandydata PO POLSKU.
+    Deterministyczne sekcje (decline/wycena) zawsze renderowane; sekcje
+    zależne od analizy LLM (`analysis`) pokazują jawnie "Analiza
+    jakościowa niekompletna", gdy `llm_status != COMPLETE` -- nigdy nie
+    ukrywają reszty karty."""
+    detail = get_candidate_detail(conn, run_id, cik)
+    analysis = detail["analysis"]
+
+    st.header(f"{detail['ticker']} — {detail['company_name']}")
+
+    st.markdown("#### Co to za firma?")
+    reasoning = analysis.business_understandability.reasoning.strip() if analysis else ""
+    if reasoning:
+        st.write(reasoning)
+    else:
+        st.info("Opis spółki niedostępny w tej analizie.")
+
+    st.markdown("#### Dlaczego scanner ją znalazł?")
+    st.write(_format_decline_narrative(detail["decline_snapshot"], detail["triggered_decline_flags"]))
+
+    if analysis is None:
+        # Celowo BEZ surowego `llm_error` (sekcja 1 specyfikacji: "Nie
+        # chcę czytać ... technicznych outputów") -- pełny techniczny
+        # powód pozostaje dostępny w `live_scan_candidates.llm_error`
+        # dla kogoś, kto faktycznie potrzebuje debugować raport.
+        st.warning(analysis_status_label(detail["llm_status"]))
+    else:
+        st.markdown("#### Co przemawia za?")
+        for item in analysis.bull_case:
+            st.write(f"- {item}")
+        st.markdown("#### Co przemawia przeciw?")
+        for item in analysis.bear_case:
+            st.write(f"- {item}")
+
+    _render_valuation_section(detail["valuation_result"], detail["current_price"])
+
+    if analysis is None:
+        st.markdown("#### Co muszę sprawdzić przed zakupem?")
+        st.warning(
+            "Analiza jakościowa niekompletna — pełna lista rzeczy do sprawdzenia nie jest dziś "
+            "dostępna dla tej spółki. Cena i wycena powyżej są dostępne niezależnie."
+        )
+        return
+
+    st.markdown("#### Co muszę sprawdzić przed zakupem?")
+    st.write(f"**Największa niewiadoma:** {analysis.biggest_unknown}")
+    st.write("**Co obaliłoby tezę inwestycyjną:**")
+    for item in analysis.thesis_invalidation:
+        st.write(f"- {item}")
+    if analysis.verification_items:
+        st.write("**Do zweryfikowania przed decyzją:**")
+        for vi in analysis.verification_items:
+            st.write(f"- {vi.question or vi.reason}")
+
+    st.markdown("#### Dlaczego rynek może mieć rację?")
+    for item in analysis.why_market_may_be_right:
+        st.write(f"- {item}")
+
+    st.markdown("#### Dlaczego ta przecena może NIE być okazją?")
+    for item in analysis.why_this_may_not_be_a_bargain:
+        st.write(f"- {item}")
+
+    st.markdown("#### Źródła")
+    if detail["analysis_sources"]:
+        for source in detail["analysis_sources"]:
+            st.markdown(f"- [{source.title}]({source.url}) — {source.issuer}")
+    else:
+        st.caption("Brak zweryfikowanych źródeł dla tej analizy.")
+
+
 def main() -> None:
     st.set_page_config(page_title="Buffett Opportunity Scanner", layout="wide")
     conn = connect(DB_PATH)
@@ -139,7 +266,7 @@ def main() -> None:
     st.title("Buffett Opportunity Scanner")
     user = _render_user_picker(conn)
 
-    synthesis_rows = _render_synthesis_table(conn)
+    latest_run_id, synthesis_rows = _render_synthesis_table(conn)
 
     if user is None:
         return
@@ -160,7 +287,7 @@ def main() -> None:
 
     for tab, row in zip(tabs[1:], synthesis_rows):
         with tab:
-            st.write(f"Karta kandydata {row['ticker']} — KROK 4 (w budowie).")
+            _render_candidate_card(conn, run_id=latest_run_id, cik=row["cik"])
 
 
 if __name__ == "__main__":

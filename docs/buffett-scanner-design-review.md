@@ -2433,6 +2433,18 @@ Nowe tabele `user_decisions`/`positions`/`purchase_transactions`/`sale_transacti
 
 7 nowych testów (`test_ui_labels.py`). Pełny zestaw: **709 passed, 1 skipped** (było 702).
 
+### KROK 4 — karty kandydatów (zrobiony)
+
+`ui/queries.get_candidate_detail(conn, run_id, cik)` — zbiera pełne dane karty (sekcja 15 specyfikacji): deterministyczną wycenę DCF BEAR/BASE/BULL i decline snapshot RE-LICZONE tymi samymi, niezmienionymi, czystymi funkcjami co produkcyjny pipeline (`compute_valuation`/`compute_price_changes`, zero LLM, zero nowej logiki), ZAWSZE dostępne niezależnie od `llm_status`; `analysis` (pełny `AnalysisOutput`) tylko gdy `analysis_id` istnieje. `app.py` renderuje 9 sekcji PO POLSKU (co to za firma / dlaczego scanner znalazł / za / przeciw / wycena z jawnym zastrzeżeniem "to szacunek modelu, nie pewna wartość spółki" / co sprawdzić przed zakupem / dlaczego rynek może mieć rację / dlaczego przecena może nie być okazją / źródła z klikalnymi linkami).
+
+**Znalezisko podczas audytu danych (zgłaszam wprost, nie milczę):** `AnalysisOutput` NIE MA dedykowanego pola "opis działalności spółki" — `business_understandability` to oceniana rubryka (Buffett "circle of competence": czy biznes jest zrozumiały), nie gwarantowany opis firmy; `prompt.py` nie daje modelowi żadnej instrukcji co do treści `reasoning` tego pola. Sekcja "Co to za firma?" używa tego pola jako best-effort (jedyne pipeline'owe źródło wolnego tekstu o firmie), z jawnym fallbackiem "Opis spółki niedostępny w tej analizie", gdy puste — NIGDY nie generuję opisu spółki sama (byłoby to fabrykowanie faktów poza zweryfikowanym pipeline'em, złamanie fundamentalnej zasady całego projektu).
+
+**Druga korekta znaleziona przy weryfikacji wizualnej:** pierwsza wersja karty pokazywała surowy techniczny `llm_error` (np. "thesis_invalidation jest semantycznie pusty") w sekcji dla FAILED — złamanie sekcji 1 specyfikacji ("nie chcę czytać... technicznych outputów"). Naprawione: karta pokazuje wyłącznie przetłumaczony status, nigdy surowy string walidatora.
+
+**Weryfikacja empiryczna** (ten sam wzorzec co KROK 0/3): zseedowana SQLite z realnym `AnalysisOutput` + zweryfikowanym źródłem SEC + headless Chromium przez Playwright (tymczasowo, odinstalowany po użyciu). Potwierdzone zrzutami ekranu: karta COMPLETE (CBOE) renderuje wszystkie 9 sekcji poprawnie, źródło jako klikalny link; karta FAILED (PAYX) pokazuje "Opis spółki niedostępny"/"Analiza jakościowa niekompletna" w miejscach zależnych od LLM, ale **wycenę i decline trigger nadal w pełni widoczne** (tu: "Wycena DCF niedostępna — Brak danych fundamentalnych", bo smoke-test nie miał zaingestowanych fundamentals — honest, nie zmyślone). Zero Traceback/Exception na stronie.
+
+2 nowe testy (`test_ui_queries.py`). Pełny zestaw: **711 passed, 1 skipped** (było 709).
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.

@@ -19,14 +19,20 @@ import json
 import sqlite3
 
 from buffett_scanner.analysis_schema import AnalysisOutput
+from buffett_scanner.config import load_config
 from buffett_scanner.db import (
     get_analysis,
+    get_analysis_sources,
+    get_fundamentals_periods,
     get_latest_holding_user_action,
     get_positions_for_user,
+    get_price_series,
     get_purchase_transactions,
     get_sale_transactions,
 )
+from buffett_scanner.scanner import PriceBar, compute_price_changes
 from buffett_scanner.ui.portfolio import PositionSummary, compute_position_summary
+from buffett_scanner.valuation import compute_valuation
 
 
 def get_latest_live_scan_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
@@ -148,3 +154,61 @@ def get_review_needed_count(conn: sqlite3.Connection, user_id: int) -> int:
         if action is not None and action["action"] == "REVIEW_LATER":
             count += 1
     return count
+
+
+def get_candidate_detail(conn: sqlite3.Connection, run_id: str, cik: str) -> dict:
+    """Pełne dane karty kandydata (sekcja 15 specyfikacji UI).
+
+    Deterministyczne dane (decline snapshot, wycena DCF BEAR/BASE/BULL)
+    są ZAWSZE dostępne, niezależnie od `llm_status` -- re-liczone tu
+    TYMI SAMYMI, niezmienionymi, czystymi funkcjami co produkcyjny
+    pipeline (`compute_valuation`/`compute_price_changes`, zero LLM,
+    zero nowej logiki/metodologii) z już zaingestowanych fundamentals/
+    cen. Pola jakościowe (`analysis`) są `None`, gdy `analysis_id` nie
+    istnieje (FAILED) -- UI pokazuje wtedy "Analiza jakościowa
+    niekompletna", NIGDY nie ukrywa deterministycznej części raportu."""
+    candidate_row = conn.execute(
+        "SELECT * FROM live_scan_candidates WHERE run_id = ? AND cik = ?", (run_id, cik),
+    ).fetchone()
+    company_row = conn.execute("SELECT * FROM companies WHERE cik = ?", (cik,)).fetchone()
+    periods = get_fundamentals_periods(conn, cik)
+    config = load_config()
+
+    valuation_result = compute_valuation(
+        company_row["sector_profile"], periods,
+        current_price=candidate_row["current_price"], config=config.valuation,
+    )
+
+    price_rows = get_price_series(conn, cik)
+    decline_snapshot = (
+        compute_price_changes([
+            PriceBar(
+                date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                close=r["close"], adj_close=r["adj_close"], volume=r["volume"],
+            )
+            for r in price_rows
+        ])
+        if price_rows else None
+    )
+
+    analysis: AnalysisOutput | None = None
+    analysis_sources = []
+    if candidate_row["analysis_id"] is not None:
+        analysis_row = get_analysis(conn, candidate_row["analysis_id"])
+        analysis = AnalysisOutput.model_validate(json.loads(analysis_row["llm_raw_output"]))
+        analysis_sources = get_analysis_sources(conn, candidate_row["analysis_id"])
+
+    return {
+        "ticker": candidate_row["ticker"],
+        "company_name": company_row["name"],
+        "current_price": candidate_row["current_price"],
+        "triggered_decline_flags": [
+            k for k, v in json.loads(candidate_row["decline_flags_json"]).items() if v
+        ],
+        "decline_snapshot": decline_snapshot,
+        "valuation_result": valuation_result,
+        "llm_status": candidate_row["llm_status"],
+        "llm_error": candidate_row["llm_error"],
+        "analysis": analysis,
+        "analysis_sources": [s for s in analysis_sources if s.verified],
+    }

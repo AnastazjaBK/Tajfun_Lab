@@ -22,6 +22,7 @@ from buffett_scanner.db import (
     upsert_scoring_model_version,
 )
 from buffett_scanner.ui.queries import (
+    get_candidate_detail,
     get_current_price_for_position,
     get_latest_live_scan_run,
     get_position_summary,
@@ -216,6 +217,50 @@ def test_get_user_positions_with_summaries_isolates_users(conn):
     assert results_a[0][1].shares_held == 3.0
     assert len(results_b) == 1
     assert results_b[0][1].shares_held == 0.0  # GSK: zero transakcji wpisanych
+
+
+def test_get_candidate_detail_complete_includes_analysis_and_recomputed_valuation(conn):
+    """Test (sekcja 15 specyfikacji): karta kandydata dla COMPLETE ma
+    pełny `AnalysisOutput` ORAZ deterministyczną wycenę, re-liczoną TĄ
+    SAMĄ, niezmienioną `compute_valuation` co produkcyjny pipeline
+    (zero nowej logiki/metodologii)."""
+    run_id = "live-scan-2026-10-06T083825543395Z"
+    _seed_live_scan_run(conn, run_id)
+
+    detail = get_candidate_detail(conn, run_id, "0000928054")  # CBOE, COMPLETE
+    assert detail["ticker"] == "CBOE"
+    assert detail["company_name"] == "CBOE Global Markets Inc."
+    assert detail["llm_status"] == "COMPLETE"
+    assert detail["analysis"] is not None
+    assert detail["analysis"].bull_case == ["Silny moat oparty na efektach sieciowych i wysokich kosztach zmiany."]
+    # Brak zaingestowanych fundamentals w tym teście -> wycena honestnie
+    # NOT_IMPLEMENTED (ten sam, niezmieniony kod co produkcyjny pipeline),
+    # nigdy fikcyjna liczba.
+    assert detail["valuation_result"].implemented is False
+    assert detail["valuation_result"].reason is not None
+    # Brak zaingestowanych cen -> decline snapshot honestnie None.
+    assert detail["decline_snapshot"] is None
+    assert "daily_decline" in detail["triggered_decline_flags"]
+
+
+def test_get_candidate_detail_failed_has_no_analysis_but_keeps_deterministic_data(conn):
+    """Test KLUCZOWY (Decyzja właścicielki, Faza 7 pkt 2): FAILED ->
+    `analysis=None` (brak pól jakościowych), ale cena/deterministic
+    score/decline trigger pozostają dostępne -- UI pokazuje "Analiza
+    jakościowa niekompletna", NIGDY ukrywa resztę raportu."""
+    run_id = "live-scan-2026-10-06T083825543395Z"
+    _seed_live_scan_run(conn, run_id)
+
+    detail = get_candidate_detail(conn, run_id, "0001099800")  # PAYX, FAILED
+    assert detail["ticker"] == "PAYX"
+    assert detail["llm_status"] == "FAILED"
+    assert detail["llm_error"] == "thesis_invalidation jest semantycznie pusty"
+    assert detail["analysis"] is None
+    assert detail["analysis_sources"] == []
+    assert detail["current_price"] == 145.0
+    # Deterministyczna wycena nadal re-liczana (honestnie NOT_IMPLEMENTED
+    # tu, bo brak fundamentals w tym teście, ale funkcja się nie wywala).
+    assert detail["valuation_result"].implemented is False
 
 
 def test_get_review_needed_count_counts_only_review_later_action(conn):
