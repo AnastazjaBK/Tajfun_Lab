@@ -32,10 +32,16 @@ from buffett_scanner.db import (
     get_latest_holding_user_action,
     get_latest_user_decision,
     get_purchase_thesis,
+    get_purchase_transactions,
+    get_sale_transactions,
     get_users,
     insert_holding_user_action,
+    insert_position,
+    insert_purchase_transaction,
+    insert_sale_transaction,
     insert_user_decision,
 )
+from buffett_scanner.ui.instrument_lookup import InstrumentLookupResult, lookup_instrument
 from buffett_scanner.ui.labels import (
     METHODOLOGY_DISCLAIMER,
     acquisition_types_label,
@@ -45,7 +51,7 @@ from buffett_scanner.ui.labels import (
     decline_flags_label,
     holding_action_label,
 )
-from buffett_scanner.ui.portfolio import compute_portfolio_bar_summary
+from buffett_scanner.ui.portfolio import compute_broker_currency_subpositions, compute_portfolio_bar_summary
 from buffett_scanner.ui.queries import (
     get_candidate_detail,
     get_latest_live_scan_run,
@@ -72,6 +78,14 @@ _HOLDING_ACTION_BUTTONS = (
     ("REVIEW_LATER", "Do przeglądu"),
     ("SOLD", "Sprzedane"),
 )
+
+# Sekcja 9/3 specyfikacji -- istniejący enum `purchase_transactions.
+# broker`/`sale_transactions.broker` (sekcja 1.1/16 design review).
+_BROKER_OPTIONS = ("TRADE_REPUBLIC", "REVOLUT", "OTHER")
+
+# Sekcja 10 specyfikacji -- istniejący enum `purchase_transactions.
+# acquisition_type`.
+_ACQUISITION_TYPE_OPTIONS = ("BUY", "BONUS")
 
 _VALUATION_SCENARIO_LABELS = (
     ("bear", "Pesymistyczny (BEAR)"),
@@ -321,10 +335,7 @@ def _render_portfolio_summary_tab(conn, positions_with_summaries: list) -> None:
     zachować rozbicie na brokerów", nigdy tylko zagregowana linia."""
     summaries = [s for _, s in positions_with_summaries]
     if not positions_with_summaries:
-        st.info(
-            "Brak pozycji. Dodaj pierwszą transakcję w zakładce 'Dodaj transakcję' (KROK 7, "
-            "jeszcze w budowie)."
-        )
+        st.info("Brak pozycji. Dodaj pierwszą transakcję w zakładce '+ Dodaj transakcję'.")
         return
 
     st.markdown("##### Łączne wartości")
@@ -448,18 +459,266 @@ def _render_position_card(conn, position: dict, summary) -> None:
             st.rerun()
 
 
+def _render_instrument_lookup_widget(key_prefix: str) -> tuple[str, InstrumentLookupResult | None]:
+    """Sekcja 9/19 specyfikacji: "Nie zgaduj symbolu ani giełdy. Formularz
+    ma pozwolić użytkownikowi potwierdzić instrument." Lookup jest POZA
+    `st.form` -- musi pokazać wynik PRZED zapisem, więc potrzebuje
+    własnego przycisku. Zwraca `(symbol, wynik_lookupu)` -- wynik jest
+    `None`, dopóki użytkownik nie zaznaczy jawnego potwierdzenia, LUB
+    gdy FMP nie rozpoznał symbolu (wtedy UI pozwala zapisać ręcznie,
+    bez automatycznej ceny -- Decyzja właścicielki, Faza 7 pkt 6)."""
+    symbol = st.text_input(
+        "Symbol/ticker (np. AAPL, SU.PA, GSK.L)", key=f"{key_prefix}_symbol"
+    ).strip()
+    if st.button("Sprawdź instrument w FMP", key=f"{key_prefix}_lookup_btn") and symbol:
+        st.session_state[f"{key_prefix}_lookup_symbol"] = symbol
+        st.session_state[f"{key_prefix}_lookup_result"] = lookup_instrument(symbol)
+
+    looked_up_symbol = st.session_state.get(f"{key_prefix}_lookup_symbol")
+    result = st.session_state.get(f"{key_prefix}_lookup_result")
+
+    if looked_up_symbol != symbol:
+        if looked_up_symbol is not None:
+            st.caption("Symbol zmienił się od ostatniego sprawdzenia — sprawdź ponownie przed zapisem.")
+        return symbol, None
+
+    if result is None:
+        if looked_up_symbol is not None:
+            st.warning(
+                "FMP nie rozpoznał tego symbolu (albo brak skonfigurowanego klucza API). "
+                "Możesz zapisać pozycję ręcznie, bez automatycznej ceny bieżącej — nigdy nie "
+                "zgadujemy symbolu ani giełdy za Ciebie."
+            )
+        return symbol, None
+
+    st.success(
+        f"FMP rozpoznał: **{result.company_name or '—'}** "
+        f"({result.exchange or '—'}, {result.currency or '—'})."
+    )
+    if result.currency and result.currency.strip() in {"GBp", "GBX"}:
+        st.caption(
+            "Uwaga: to notowanie jest w pensach (GBp), NIE w funtach (GBP) — sprawdź, w "
+            "jakiej walucie Twój broker raportuje wartość tej transakcji."
+        )
+    confirmed = st.checkbox("Tak, to właściwy instrument", key=f"{key_prefix}_confirm")
+    return symbol, (result if confirmed else None)
+
+
+def _render_new_position_form(conn, user: dict) -> None:
+    st.markdown("##### Nowa pozycja")
+    symbol, confirmed_result = _render_instrument_lookup_widget("new_pos")
+
+    with st.form("new_position_form", clear_on_submit=True):
+        company_name = st.text_input(
+            "Nazwa spółki", value=(confirmed_result.company_name if confirmed_result else "") or "",
+        )
+        exchange = st.text_input(
+            "Giełda (opcjonalnie)", value=(confirmed_result.exchange if confirmed_result else "") or "",
+        )
+        broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key="new_pos_broker")
+        acquisition_type = st.selectbox(
+            "Sposób nabycia", _ACQUISITION_TYPE_OPTIONS,
+            format_func=lambda t: acquisition_types_label((t,)), key="new_pos_acq_type",
+        )
+        purchase_date = st.date_input("Data transakcji", key="new_pos_date")
+        shares = st.number_input("Liczba akcji", min_value=0.0, step=0.0001, format="%.4f", key="new_pos_shares")
+        currency = st.text_input(
+            "Waluta transakcji (np. USD, EUR, GBP)",
+            value=(confirmed_result.currency if confirmed_result else "") or "",
+            key="new_pos_currency",
+        )
+        total_invested = st.number_input(
+            "Zainwestowany kapitał (0 dla bonusu)", min_value=0.0, step=0.01, format="%.2f",
+            disabled=(acquisition_type == "BONUS"), key="new_pos_invested",
+        )
+        fees = st.number_input("Opłaty (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f", key="new_pos_fees")
+        note = st.text_input("Notatka (opcjonalnie)", key="new_pos_note")
+
+        submitted = st.form_submit_button("Zapisz nową pozycję")
+        if submitted:
+            errors = []
+            if not symbol:
+                errors.append("Symbol/ticker jest wymagany.")
+            if not company_name.strip():
+                errors.append("Nazwa spółki jest wymagana.")
+            if shares <= 0:
+                errors.append("Liczba akcji musi być większa od zera.")
+            if not currency.strip():
+                errors.append("Waluta transakcji jest wymagana.")
+            if acquisition_type == "BUY" and total_invested <= 0:
+                errors.append("Zainwestowany kapitał musi być większy od zera dla zakupu (nie bonusu).")
+            for error in errors:
+                st.error(error)
+            if not errors:
+                final_invested = 0.0 if acquisition_type == "BONUS" else total_invested
+                price_per_share = (final_invested / shares) if acquisition_type == "BUY" and shares > 0 else None
+                position_id = insert_position(
+                    conn, user_id=user["user_id"], ticker=symbol, company_name=company_name.strip(),
+                    cik=(confirmed_result.cik if confirmed_result else None),
+                    exchange=(exchange.strip() or None), instrument_currency=currency.strip(),
+                )
+                insert_purchase_transaction(
+                    conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
+                    purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
+                    currency=currency.strip(), price_per_share=price_per_share,
+                    fees=(fees or None), note=(note.strip() or None),
+                )
+                conn.commit()
+                st.session_state.pop("new_pos_lookup_symbol", None)
+                st.session_state.pop("new_pos_lookup_result", None)
+                st.toast(f"Zapisano nową pozycję: {symbol}.")
+                st.rerun()
+
+
+def _render_existing_position_transaction_form(conn, position: dict) -> None:
+    position_id = position["position_id"]
+    st.markdown(f"##### {position['ticker']} — {position['company_name']}")
+    kind = st.radio(
+        "Typ transakcji", ["Zakup/Bonus", "Sprzedaż"], key=f"tx_kind_{position_id}", horizontal=True,
+    )
+
+    if kind == "Zakup/Bonus":
+        with st.form(f"purchase_form_{position_id}", clear_on_submit=True):
+            broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key=f"ep_broker_{position_id}")
+            acquisition_type = st.selectbox(
+                "Sposób nabycia", _ACQUISITION_TYPE_OPTIONS,
+                format_func=lambda t: acquisition_types_label((t,)), key=f"ep_acq_type_{position_id}",
+            )
+            purchase_date = st.date_input("Data transakcji", key=f"ep_date_{position_id}")
+            shares = st.number_input(
+                "Liczba akcji", min_value=0.0, step=0.0001, format="%.4f", key=f"ep_shares_{position_id}",
+            )
+            currency = st.text_input(
+                "Waluta transakcji", value=position["instrument_currency"] or "", key=f"ep_currency_{position_id}",
+            )
+            total_invested = st.number_input(
+                "Zainwestowany kapitał (0 dla bonusu)", min_value=0.0, step=0.01, format="%.2f",
+                disabled=(acquisition_type == "BONUS"), key=f"ep_invested_{position_id}",
+            )
+            fees = st.number_input(
+                "Opłaty (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f", key=f"ep_fees_{position_id}",
+            )
+            note = st.text_input("Notatka (opcjonalnie)", key=f"ep_note_{position_id}")
+
+            submitted = st.form_submit_button("Zapisz zakup/bonus")
+            if submitted:
+                errors = []
+                if shares <= 0:
+                    errors.append("Liczba akcji musi być większa od zera.")
+                if not currency.strip():
+                    errors.append("Waluta transakcji jest wymagana.")
+                if acquisition_type == "BUY" and total_invested <= 0:
+                    errors.append("Zainwestowany kapitał musi być większy od zera dla zakupu (nie bonusu).")
+                for error in errors:
+                    st.error(error)
+                if not errors:
+                    final_invested = 0.0 if acquisition_type == "BONUS" else total_invested
+                    price_per_share = (final_invested / shares) if acquisition_type == "BUY" and shares > 0 else None
+                    insert_purchase_transaction(
+                        conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
+                        purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
+                        currency=currency.strip(), price_per_share=price_per_share,
+                        fees=(fees or None), note=(note.strip() or None),
+                    )
+                    conn.commit()
+                    st.toast("Zapisano zakup/bonus.")
+                    st.rerun()
+    else:
+        with st.form(f"sale_form_{position_id}", clear_on_submit=True):
+            broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key=f"es_broker_{position_id}")
+            sale_date = st.date_input("Data sprzedaży", key=f"es_date_{position_id}")
+            shares = st.number_input(
+                "Liczba sprzedanych akcji", min_value=0.0, step=0.0001, format="%.4f", key=f"es_shares_{position_id}",
+            )
+            sale_price = st.number_input(
+                "Cena sprzedaży za akcję", min_value=0.0, step=0.01, format="%.2f", key=f"es_price_{position_id}",
+            )
+            currency = st.text_input(
+                "Waluta transakcji", value=position["instrument_currency"] or "", key=f"es_currency_{position_id}",
+            )
+            fees = st.number_input(
+                "Opłaty (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f", key=f"es_fees_{position_id}",
+            )
+            note = st.text_input("Notatka (opcjonalnie)", key=f"es_note_{position_id}")
+
+            submitted = st.form_submit_button("Zapisz sprzedaż")
+            if submitted:
+                errors = []
+                if shares <= 0:
+                    errors.append("Liczba sprzedanych akcji musi być większa od zera.")
+                if sale_price <= 0:
+                    errors.append("Cena sprzedaży musi być większa od zera.")
+                if not currency.strip():
+                    errors.append("Waluta transakcji jest wymagana.")
+                if not errors:
+                    # Sekcja 7 specyfikacji: "Nie pozwalaj, aby sprzedaż na
+                    # jednym brokerze tworzyła ujemną subpozycję tylko
+                    # dlatego, że akcje istnieją na drugim brokerze." --
+                    # realny bug znaleziony przy weryfikacji wizualnej (Faza
+                    # 7 KROK 7): sprzedaż z brokera bez wystarczających akcji
+                    # cicho tworzyła "-4 akcje" w tabeli. Sprawdzane TUTAJ
+                    # (nie w ui/portfolio.py, które poprawnie liczy to, co
+                    # dostanie) -- to warstwa walidacji formularza.
+                    existing_subpositions = {
+                        (s.broker, s.currency): s.shares_held
+                        for s in compute_broker_currency_subpositions(
+                            get_purchase_transactions(conn, position_id),
+                            get_sale_transactions(conn, position_id),
+                        )
+                    }
+                    held = existing_subpositions.get((broker, currency.strip()), 0.0)
+                    if shares > held:
+                        errors.append(
+                            f"Na {broker_label(broker)} w walucie {currency.strip()} posiadasz "
+                            f"{held:g} akcji — nie można sprzedać {shares:g}. Sprawdź, czy wybrałaś/eś "
+                            "właściwego brokera i walutę."
+                        )
+                for error in errors:
+                    st.error(error)
+                if not errors:
+                    insert_sale_transaction(
+                        conn, position_id=position_id, broker=broker, sale_date=str(sale_date),
+                        shares=shares, sale_price=sale_price, currency=currency.strip(),
+                        fees=(fees or None), note=(note.strip() or None),
+                    )
+                    conn.commit()
+                    st.toast("Zapisano sprzedaż.")
+                    st.rerun()
+
+
+def _render_add_transaction_tab(conn, user: dict) -> None:
+    """Sekcja 11 specyfikacji -- formularz "Dodaj transakcję". Jedna
+    `position_id` może mieć transakcje na wielu brokerach (sekcja 7) --
+    wybór "istniejąca pozycja" NIGDY nie tworzy drugiej, równoległej
+    pozycji dla tego samego instrumentu."""
+    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"])
+    positions = [dict(p) for p, _ in positions_with_summaries]
+
+    options = ["+ Nowa pozycja"] + [f"{p['ticker']} — {p['company_name']}" for p in positions]
+    choice = st.selectbox("Pozycja", options, key="add_tx_position_choice")
+
+    if choice == "+ Nowa pozycja":
+        _render_new_position_form(conn, user)
+    else:
+        _render_existing_position_transaction_form(conn, positions[options.index(choice) - 1])
+
+
 def _render_portfolio_tab(conn, user: dict) -> None:
     """Sekcja 6 specyfikacji: wewnątrz PORTFEL, drugi poziom zakładek
-    [PODSUMOWANIE] + DYNAMICZNE tickery posiadanych pozycji."""
+    [PODSUMOWANIE][+ Dodaj transakcję] + DYNAMICZNE tickery posiadanych
+    pozycji."""
     positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"])
 
-    inner_labels = ["PODSUMOWANIE"] + [p["ticker"] for p, _ in positions_with_summaries]
+    inner_labels = ["PODSUMOWANIE", "+ Dodaj transakcję"] + [p["ticker"] for p, _ in positions_with_summaries]
     inner_tabs = st.tabs(inner_labels)
 
     with inner_tabs[0]:
         _render_portfolio_summary_tab(conn, positions_with_summaries)
 
-    for tab, (position, summary) in zip(inner_tabs[1:], positions_with_summaries):
+    with inner_tabs[1]:
+        _render_add_transaction_tab(conn, user)
+
+    for tab, (position, summary) in zip(inner_tabs[2:], positions_with_summaries):
         with tab:
             _render_position_card(conn, dict(position), summary)
 
