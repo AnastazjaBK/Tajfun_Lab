@@ -1,0 +1,40 @@
+name: DIAG Cost Audit (one-off, Faza 6 COST AUDIT)
+
+# Jednorazowa diagnostyka. Czyta WYLACZNIE z juz istniejacego artefaktu
+# (zero sieci FMP/SEC, zero nowych wywolan Claude API) -- mierzy REALNY
+# rozmiar llm_raw_output (pelny JSON AnalysisOutput) dla kazdej UDANEJ
+# analizy w podanym runie, rozklada na pola. Decyzja wlascicielki
+# 2026-10-06: COST AUDIT przed kolejnym doladowaniem Anthropic.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "ID uruchomienia GH Actions, ktorego artefakt (phase6-live-scan-result) ma zostac przeczytany"
+        required: true
+
+jobs:
+  cost-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Pobranie artefaktu do audytu
+        uses: actions/download-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: audit-source
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: COST AUDIT (zero sieci, zero nowych wywolan Claude)
+        run: python scripts/diag_cost_audit.py --db audit-source/live_scan_result.db
+        env:
+          PYTHONPATH: .
