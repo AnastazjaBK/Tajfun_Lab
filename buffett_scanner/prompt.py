@@ -36,6 +36,21 @@ jako dane — Claude ma z nich korzystać do oceny tezy/MoS, NIE
 przeliczać DCF samodzielnie i NIE zgadywać innych wskaźników rynkowych
 (P/E, EV/EBITDA itd.), których tu nie podano (dla nich prawidłowa
 odpowiedź to jawne "niedostępne/unknown", nie zgadywanie).
+
+ROOT CAUSE AUDIT — thesis_invalidation (Faza 6g, 2026-10-06): LIVE
+VALIDATION TEST Fazy 6f (`validation-6f-2026-10-06T110249722378Z`, 5
+historycznych finalistów) wykazał 4/5 FAILED z identycznym powodem —
+`thesis_invalidation` semantycznie pusty na OBU próbach. Audyt
+wykazał: (1) instrukcja tego pola opisywała tylko JAKOŚĆ treści
+("konkretne, obserwowalne warunki..."), nigdy nie mówiła wprost "musisz
+podać co najmniej jeden" — w przeciwieństwie do `why_market_may_be_
+right`/`why_this_may_not_be_a_bargain`, które mają explicite "jeśli nie
+widzisz dobrego argumentu, napisz to wprost" (fallback dla niskiej
+pewności); (2) ogólna zasada anty-halucynacyjna ("jeśli czegoś nie
+wiesz, napisz to wprost, zamiast zgadywać") prawdopodobnie była
+nadinterpretowana dla tego pola jako "zwróć pustą listę". Naprawione
+TYLKO instrukcją tekstową niżej (jawny wymóg >=1 + jawny fallback bez
+wymyślonych progów liczbowych) — zero zmiany schematu JSON/typu pola.
 """
 
 from __future__ import annotations
@@ -98,8 +113,15 @@ def build_analysis_prompt(
         "- `why_this_may_not_be_a_bargain`: napisz, dlaczego obecna cena może NIE być "
         "okazją (np. wycena już uwzględnia realne ryzyko, margin of safety jest iluzoryczny "
         "z powodu niepewnych założeń).",
-        "- `thesis_invalidation`: konkretne, obserwowalne warunki/zdarzenia, które "
-        "obaliłyby tezę inwestycyjną (nie ogólne 'jeśli sytuacja się pogorszy').",
+        "- `thesis_invalidation`: MUSISZ podać co najmniej JEDEN konkretny, "
+        "obserwowalny warunek/zdarzenie, które obaliłoby tezę inwestycyjną (nie "
+        "ogólne 'jeśli sytuacja się pogorszy') — np. trwała utrata moat, materialne "
+        "pogorszenie FCF/marży, materializacja konkretnego ryzyka regulacyjnego, "
+        "niepowodzenie kluczowej integracji/akwizycji, utrata istotnego klienta/"
+        "udziału rynkowego, trwałe pogorszenie konkretnego wskaźnika operacyjnego. "
+        "TO POLE NIE MOŻE BYĆ PUSTE — jeśli dostarczone dane nie uzasadniają "
+        "konkretnego progu liczbowego, sformułuj warunek jakościowo (bez "
+        "wymyślonego progu), ale podaj przynajmniej jeden.",
         "- `biggest_unknown`: najważniejsza rzecz, której NIE wiesz z dostarczonych danych "
         "i źródeł, a która mogłaby zmienić ocenę.",
         "- Te pola mają równą wagę z bull_case — ocena, która nie potrafi uczciwie "

@@ -467,6 +467,10 @@ class _CountingClaudeClient:
     # -- symuluje model, który nigdy nie poprawia się przy retry, żeby
     # sprawdzić, że po MAX_ANALYSIS_ATTEMPTS status jest FAILED, NIE COMPLETE.
     semantically_incomplete_tickers: set[str] = set()
+    # Faza 6g: pełna treść promptu każdego wywołania, w kolejności -- do
+    # sprawdzenia, że retry NIE jest ślepym powtórzeniem identycznego
+    # promptu (musi nieść konkretny powód poprzedniego niepowodzenia).
+    received_prompts: list = []
 
     def __init__(self, api_key, *, model, max_output_tokens=4000):
         pass
@@ -490,6 +494,7 @@ class _CountingClaudeClient:
         from buffett_scanner.providers.claude import ClaudeAnalysisResult, ClaudeError, ClaudeUsage
 
         type(self).call_count["n"] += 1
+        type(self).received_prompts.append(prompt)
         for ticker in self.fail_tickers:
             if f'"{ticker}"' in prompt:
                 # Realny 400 insufficient-credit: SDK nigdy nie dostaje
@@ -763,6 +768,7 @@ def test_analyze_live_scan_shortlist_semantically_incomplete_response_retries_th
     _CountingClaudeClient.call_count = {"n": 0}
     _CountingClaudeClient.fail_tickers = set()
     _CountingClaudeClient.semantically_incomplete_tickers = {"AAPL"}
+    _CountingClaudeClient.received_prompts = []
     monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
 
     db_path = tmp_path / "test.db"
@@ -770,11 +776,25 @@ def test_analyze_live_scan_shortlist_semantically_incomplete_response_retries_th
     out = capsys.readouterr().out
 
     assert exit_code == 0
-    # MAX_ANALYSIS_ATTEMPTS=2 -- bounded retry, nigdy nieskończona pętla.
+    # MAX_ANALYSIS_ATTEMPTS=2 -- bounded retry, nigdy nieskończona pętla
+    # (test 5, specyfikacja BUGFIX V0 OUTPUT CONTRACT Faza 6g).
+    from buffett_scanner.cli import MAX_ANALYSIS_ATTEMPTS
+
+    assert MAX_ANALYSIS_ATTEMPTS == 2
     assert _CountingClaudeClient.call_count["n"] == 2
     assert "próba 1/2 nie przeszła walidacji" in out
     assert "FAILED (walidacja po 2 próbach)" in out
     assert "INCOMPLETE_LLM_ANALYSIS" in out
+
+    # Testy 3/4 (ROOT CAUSE AUDIT Faza 6g): retry NIE jest ślepym
+    # powtórzeniem identycznego promptu -- druga próba dostaje konkretny
+    # powód poprzedniego niepowodzenia.
+    assert len(_CountingClaudeClient.received_prompts) == 2
+    first_prompt, second_prompt = _CountingClaudeClient.received_prompts
+    assert first_prompt != second_prompt
+    assert "POPRZEDNIA ODPOWIEDŹ ODRZUCONA" not in first_prompt
+    assert "POPRZEDNIA ODPOWIEDŹ ODRZUCONA" in second_prompt
+    assert "thesis_invalidation jest semantycznie pusty" in second_prompt
 
     from buffett_scanner.db import connect, get_live_scan_candidates, get_live_scan_run
 
@@ -836,3 +856,33 @@ def test_analyze_live_scan_shortlist_existing_resume_and_telemetry_still_work(
     # (zdefiniowane w _CountingClaudeClient).
     assert "Telemetria Anthropic API usage" in out
     assert "input_tokens: 1800, output_tokens: 300" in out
+
+
+# ---------------------------------------------------------------------------
+# BUGFIX V0 OUTPUT CONTRACT (Faza 6g, 2026-10-06) -- ROOT CAUSE AUDIT po
+# LIVE VALIDATION TEST Fazy 6f (4/5 FAILED, identyczny powód: thesis_
+# invalidation semantycznie pusty na OBU próbach). Root cause: (1) prompt
+# nigdy nie mówił wprost "musisz podać co najmniej jeden" dla tego pola
+# (test w test_prompt.py), (2) retry był ślepym powtórzeniem identycznego
+# promptu, zero informacji o tym, co zawiodło. Testy niżej pokrywają
+# punkt 3/4 ze specyfikacji na poziomie samej funkcji pomocniczej.
+# ---------------------------------------------------------------------------
+
+
+def test_append_validation_retry_feedback_carries_concrete_failure_reason():
+    from buffett_scanner.analysis_schema import AnalysisValidationError
+
+    original = "ORYGINALNY PROMPT TREŚĆ"
+    error = AnalysisValidationError(
+        'thesis_invalidation jest semantycznie pusty — wymagany co najmniej jeden '
+        'konkretny punkt (nie ""/null/[]/"brak"/"N/A")'
+    )
+    augmented = cli._append_validation_retry_feedback(original, error)
+
+    # Test 3: konkretny powód poprzedniego niepowodzenia jest obecny.
+    assert "thesis_invalidation jest semantycznie pusty" in augmented
+    # Test 4: to NIE jest identyczny prompt -- oryginał jest zachowany
+    # (kontekst/dane niezmienione), ale coś nowego zostało dołączone.
+    assert augmented != original
+    assert original in augmented
+    assert "POPRZEDNIA ODPOWIEDŹ ODRZUCONA" in augmented

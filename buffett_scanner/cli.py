@@ -915,6 +915,29 @@ def _sum_claude_usage(attempts: list) -> "ClaudeUsage | None":
     )
 
 
+# BUGFIX V0 OUTPUT CONTRACT (Faza 6g, 2026-10-06): ROOT CAUSE AUDIT po
+# LIVE VALIDATION TEST Fazy 6f (4/5 FAILED, identyczny powód na OBU
+# próbach: `thesis_invalidation` semantycznie pusty) ujawnił, że retry
+# wprowadzony w Fazie 6f był ŚLEPYM powtórzeniem IDENTYCZNEGO promptu —
+# zero informacji o tym, co konkretnie zawiodło, więc druga próba miała
+# szansę powodzenia tylko z czystego losu próbkowania modelu (zero
+# korekty systematycznej tendencji). Ta funkcja dołącza do promptu
+# retry KONKRETNY powód poprzedniego niepowodzenia (treść
+# `AnalysisValidationError`, która już nazywa zawodzące pole) + jawne
+# żądanie poprawionej, kompletnej odpowiedzi — żeby druga próba miała
+# realną szansę naprawić DOKŁADNIE to, co zawiodło, nie zgadywać od
+# nowa. Nie zmienia MAX_ANALYSIS_ATTEMPTS (wciąż 2) ani walidatora.
+def _append_validation_retry_feedback(prompt: str, validation_error: AnalysisValidationError) -> str:
+    return (
+        prompt
+        + "\n\nUWAGA — POPRZEDNIA ODPOWIEDŹ ODRZUCONA PRZEZ WALIDACJĘ:\n"
+        f"{validation_error}\n"
+        "Zwróć POPRAWIONĄ, kompletną odpowiedź zgodną z instrukcjami powyżej. "
+        "Pole, które zawiodło walidację, MUSI być semantycznie niepuste (nie "
+        '""/null/[]/"brak"/"N/A") i zawierać konkretną, materialną treść.'
+    )
+
+
 def _analyze_shortlist_and_report(
     conn, *, run_id: str, config, config_version: str, user_agent: str, claude_key: str,
     final_limit: int, markdown_out: str | None,
@@ -1029,14 +1052,21 @@ def _analyze_shortlist_and_report(
                 # natychmiast, bez retry, zachowując istniejący fail-fast
                 # (Faza 6c). Usage WSZYSTKICH realnych prób jest sumowane
                 # (_sum_claude_usage), żeby telemetria nie zaniżała
-                # realnego kosztu tego kandydata.
+                # realnego kosztu tego kandydata. Faza 6g: retry NIE jest
+                # ślepym powtórzeniem -- każda próba > 1 dostaje konkretny
+                # powód poprzedniego niepowodzenia dołączony do promptu
+                # (_append_validation_retry_feedback).
                 analysis = None
                 usage_attempts: list = []
                 claude_error: ClaudeError | None = None
                 validation_error: AnalysisValidationError | None = None
                 for attempt in range(1, MAX_ANALYSIS_ATTEMPTS + 1):
+                    attempt_prompt = (
+                        prompt if validation_error is None
+                        else _append_validation_retry_feedback(prompt, validation_error)
+                    )
                     try:
-                        generated = claude_client.generate_analysis(prompt)
+                        generated = claude_client.generate_analysis(attempt_prompt)
                     except ClaudeError as exc:
                         claude_error = exc
                         break

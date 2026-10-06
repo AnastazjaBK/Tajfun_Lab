@@ -83,6 +83,20 @@ def test_prompt_includes_anti_confirmation_bias_instructions():
     assert "PRZECIW" in prompt
 
 
+def test_prompt_explicitly_requires_at_least_one_thesis_invalidation_condition():
+    """Test 1 (specyfikacja właścicielki, Faza 6g ROOT CAUSE AUDIT):
+    LIVE VALIDATION TEST Fazy 6f wykazał 4/5 FAILED z pustym
+    `thesis_invalidation` -- root cause: instrukcja promptu nigdy nie
+    mówiła wprost "musisz podać co najmniej jeden", w przeciwieństwie
+    do why_market_may_be_right/why_this_may_not_be_a_bargain (które mają
+    jawny fallback dla niskiej pewności). Ten test pilnuje jawnego
+    wymogu kardynalności + jawnego zakazu wymyślonych progów liczbowych."""
+    prompt, _ = build_analysis_prompt(ticker="AAPL", metrics={}, prefilter_flags=[], sources=[])
+    assert "MUSISZ podać co najmniej JEDEN" in prompt
+    assert "TO POLE NIE MOŻE BYĆ PUSTE" in prompt
+    assert "bez wymyślonego progu" in prompt
+
+
 def test_prompt_includes_metric_values():
     prompt, _ = build_analysis_prompt(
         ticker="AAPL", metrics={"fcf_ttm": 12345.0, "current_ratio": None},
