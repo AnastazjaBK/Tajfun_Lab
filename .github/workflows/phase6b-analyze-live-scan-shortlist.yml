@@ -1,0 +1,84 @@
+name: Phase 6b Analyze Live Scan Shortlist (resume, Faza 6c)
+
+# Reczne uruchomienie z przegladarki. Kontynuuje/wznawia etap 2
+# (`analyze-live-scan-shortlist`) dla JUZ istniejacego `run_id` z
+# wczesniejszego "Phase 6 Live End-to-End Scan" (`live_scan_run_id` =
+# ID TEGO uruchomienia GH Actions, do pobrania jego artefaktu z baza).
+#
+# Decyzja wlascicielki 2026-10-06 (OPCJA 3): shortlist jest TOP N po
+# deterministic_score_pct (zero LLM, Faza 6c), zapisana w `live_scan_
+# candidates` -- ten workflow analizuje WYLACZNIE kandydatow ze
+# statusem PENDING/FAILED (nigdy ponownie COMPLETE, nigdy nie placi
+# drugi raz za Claude) -- typowy uzytek: limit Anthropic sie wyczerpal
+# w trakcie pierwszego runu, wlascicielka uzupelnia kredyt, potem
+# odpala TEN workflow z `run_id` i `source_run_id` z tamtego runu.
+#
+# Finalny raport (0-N kandydatow) generowany TYLKO, gdy CALA shortlist
+# jest COMPLETE -- w przeciwnym razie status INCOMPLETE_LLM_ANALYSIS,
+# nigdy partial top-N.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: >
+          ID uruchomienia GH Actions "Phase 6 Live End-to-End Scan"
+          (lub wczesniejszego "Phase 6b"), ktorego artefakt
+          (phase6-live-scan-result, zawiera live_scan_result.db z
+          zapisanym run_id/shortlista) ma zostac pobrany.
+        required: true
+      run_id:
+        description: >
+          `run_id` (string z bazy, np. "live-scan-2026-10-06T...Z") do
+          kontynuacji -- wypisany w logach/raporcie oryginalnego runu.
+        required: true
+      limit:
+        description: "Maks. liczba finalnych kandydatow w raporcie (domyslnie 5)"
+        required: false
+        default: "5"
+
+jobs:
+  analyze-shortlist:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe (pelny zestaw przed wznowieniem)
+        run: python -m pytest -q
+
+      - name: Pobranie bazy z poprzedniego live scanu (zawiera run_id/shortliste)
+        uses: actions/download-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: previous-result
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Kopia bazy do kontynuacji (previous-result/live_scan_result.db zostaje nietknięty jako audyt)
+        run: cp previous-result/live_scan_result.db live_scan_result.db
+
+      - name: Wznowienie analizy shortlisty (TYLKO PENDING/FAILED, resumable + cache)
+        run: |
+          python -m buffett_scanner.cli --db live_scan_result.db analyze-live-scan-shortlist \
+            --run-id "${{ inputs.run_id }}" --limit ${{ inputs.limit }} --markdown-out reports
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+      - name: Upload wyniku (raport jesli COMPLETE + baza do dalszego resume, jesli trzeba)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: |
+            reports/
+            live_scan_result.db
+          if-no-files-found: warn
+          retention-days: 30
