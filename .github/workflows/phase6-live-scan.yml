@@ -29,6 +29,18 @@ name: Phase 6 Live End-to-End Scan (CURRENT MARKET, domkniecie MVP V0)
 # wyczerpaniem kredytu Anthropic w polowie, nie timeoutem). 350 min =
 # ta sama wartosc, co `phase5-3c-baseline-walk-forward.yml` dla
 # analogicznie dlugich, pelnych-uniwersum runow.
+#
+# Faza 6c (2026-10-06, Decyzja wlascicielki OPCJA 3): pelna analiza
+# Claude jest teraz ograniczona do SHORTLISTY (domyslnie TOP 20 po
+# deterministic_score_pct, zero LLM -- operacyjny/kosztowy budget, NIE
+# nowy prog inwestycyjny), nie do wszystkich decline-surfaced
+# kandydatow -- dramatycznie krotszy/tanszy run niz wczesniej. Jesli
+# limit Anthropic i tak wyczerpie sie w trakcie (lub trzeba
+# `--rank-only` na sam etap 1), uzyj OSOBNEGO workflow
+# `phase6b-analyze-live-scan-shortlist.yml` z `run_id` z tego runu i
+# ID TEGO uruchomienia (do pobrania artefaktu z baza, ktora ma juz
+# zapisany pelny ranking/shortliste) -- analizuje TYLKO
+# PENDING/FAILED, nigdy nie placi drugi raz za COMPLETE.
 
 on:
   workflow_dispatch:
@@ -37,14 +49,29 @@ on:
         description: >
           Lista tickerow po przecinku (puste = pelne aktualne S&P 500).
           Uzyj malej próbki (np. "AAPL,KO,INTC") na pierwszy test --
-          kazdy kandydat, ktory przejdzie decline screening + prefilter,
-          kosztuje realne wywolanie Claude API.
+          kazdy kandydat z SHORTLISTY (TOP `shortlist_limit`) kosztuje
+          realne wywolanie Claude API.
         required: false
         default: ""
       limit:
-        description: "Maks. liczba finalnych kandydatow w raporcie"
+        description: "Maks. liczba finalnych kandydatow w raporcie (domyslnie 5)"
         required: false
         default: "5"
+      shortlist_limit:
+        description: >
+          TOP N po deterministic_score_pct (zero LLM) wysylanych do
+          pelnej analizy Claude -- remisy na granicy zachowane.
+          Operacyjny/kosztowy budget warstwy research (Faza 6c), NIE
+          prog inwestycyjny. Domyslnie 20.
+        required: false
+        default: "20"
+      rank_only:
+        description: >
+          true = STOP po etapie 1 (deterministic ranking + shortlist),
+          bez wywolania Claude -- do inspekcji przed kosztownym etapem
+          2 albo gdy limit Anthropic jest aktualnie wyczerpany.
+        required: false
+        default: "false"
       price_days:
         description: "Okno historii cen do decline scanningu (dni)"
         required: false
@@ -75,12 +102,15 @@ jobs:
 
       - name: LIVE END-TO-END RUN (CURRENT MARKET)
         run: |
-          ARGS="--db live_scan_result.db run-live-scan --limit ${{ inputs.limit }} --price-days ${{ inputs.price_days }} --markdown-out reports"
+          ARGS="--db live_scan_result.db run-live-scan --limit ${{ inputs.limit }} --shortlist-limit ${{ inputs.shortlist_limit }} --price-days ${{ inputs.price_days }} --markdown-out reports"
           if [ -n "${{ inputs.sample }}" ]; then
             ARGS="$ARGS --sample ${{ inputs.sample }}"
           fi
           if [ "${{ inputs.skip_universe_refresh }}" = "true" ]; then
             ARGS="$ARGS --skip-universe-refresh"
+          fi
+          if [ "${{ inputs.rank_only }}" = "true" ]; then
+            ARGS="$ARGS --rank-only"
           fi
           python -m buffett_scanner.cli $ARGS
         env:

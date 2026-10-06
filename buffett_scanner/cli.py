@@ -18,8 +18,11 @@
     python -m buffett_scanner.cli fetch-spy-benchmark-prices [--cutoff YYYY-MM-DD]
     python -m buffett_scanner.cli run-baseline-walk-forward [--window-start YYYY-MM-DD]
         [--window-end YYYY-MM-DD] [--sample CIK1,CIK2,...]
-    python -m buffett_scanner.cli run-live-scan [--limit N] [--price-days N]
-        [--sample TICK1,TICK2,...] [--skip-universe-refresh] [--markdown-out DIR]
+    python -m buffett_scanner.cli run-live-scan [--limit N] [--shortlist-limit N]
+        [--price-days N] [--sample TICK1,TICK2,...] [--skip-universe-refresh]
+        [--rank-only] [--markdown-out DIR]
+    python -m buffett_scanner.cli analyze-live-scan-shortlist --run-id ID
+        [--limit N] [--markdown-out DIR]
 
 Bez dopracowanego UI — zgodnie z Fazą 0 ("NO polished dashboard
 required. Goal: prove that the analysis pipeline works.").
@@ -44,7 +47,9 @@ from buffett_scanner.backfill import (
 from buffett_scanner.backtest_harness import (
     attach_forward_returns,
     classify_data_sufficiency,
+    compute_deterministic_score,
     evaluate_candidate_at_date,
+    evaluate_deterministic_hard_gates,
     generate_rebalance_dates,
 )
 from buffett_scanner.benchmark import compute_benchmark_snapshot
@@ -62,9 +67,14 @@ from buffett_scanner.calibration_round2b import ROUND_2B_CANDIDATES
 from buffett_scanner.config import DEFAULT_CONFIG_PATH, load_config
 from buffett_scanner.db import (
     clear_universe_membership_for_rebuild,
+    find_cached_live_scan_analysis,
+    get_analysis,
+    get_analysis_sources,
     get_cik_for_active_ticker,
     get_companies_sector_profiles,
     get_fundamentals_periods,
+    get_live_scan_candidates,
+    get_live_scan_run,
     get_price_series,
     get_sec_company_facts_cache,
     get_universe_membership_as_of,
@@ -76,12 +86,16 @@ from buffett_scanner.db import (
     insert_backtest_coverage,
     insert_calibration_run,
     insert_fundamentals_rows,
+    insert_live_scan_candidate,
+    insert_live_scan_run,
     insert_price_rows,
     insert_unresolved_ticker,
     insert_universe_membership_conflict,
     list_active_tickers,
     list_universe_membership_ciks,
     update_company_sector_profile,
+    update_live_scan_candidate_llm_status,
+    update_live_scan_run_status,
     upsert_company,
     upsert_derived_metric,
     upsert_scoring_model_version,
@@ -99,6 +113,16 @@ from buffett_scanner.fmp_sp500_events import (
 )
 from buffett_scanner.fundamentals import compute_metrics, evaluate_prefilter
 from buffett_scanner.live_scan import LiveCandidate, rank_candidates, render_live_scan_report
+from buffett_scanner.live_scan_pipeline import (
+    DEFAULT_SHORTLIST_LIMIT,
+    RankedCandidate,
+    build_cache_key,
+    rank_all_candidates,
+    render_full_ranking_table,
+    render_shortlist_status_table,
+    select_shortlist,
+    source_fingerprint,
+)
 from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_as_of
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
 from buffett_scanner.price_history_plan import build_price_fetch_plan
@@ -571,22 +595,32 @@ def cmd_score(args: argparse.Namespace) -> int:
 
 
 def cmd_run_live_scan(args: argparse.Namespace) -> int:
-    """Faza 6 — LIVE END-TO-END RUN na aktualnym rynku (domknięcie MVP
-    V0, Decyzja właścicielki 2026-10-05, po formalnym zamknięciu Fazy
-    5.4/5.6). CURRENT MARKET -> current universe -> fundamentals ->
-    decline/opportunity screening -> deterministic scoring + hard
-    gates -> valuation -> Claude qualitative analysis ->
-    anti-confirmation-bias layer -> source assembly/validation ->
-    final candidate report (0-5 kandydatów, "No qualifying
-    opportunities today" jest prawidłowym wynikiem).
+    """Faza 6/6c — LIVE END-TO-END RUN na aktualnym rynku (domknięcie
+    MVP V0). Decyzja właścicielki 2026-10-05 (Faza 6) + 2026-10-06
+    (Faza 6c, OPCJA 3, po realnym znalezisku: pełna analiza Claude dla
+    WSZYSTKICH decline-surfaced kandydatów — 150-156/501 w kolejnych
+    live runach — jest operacyjnie/kosztowo niewykonalna w jednym
+    przebiegu, 2 kolejne runy wyczerpały limit Anthropic w połowie).
 
-    W przeciwieństwie do `scan`/`score`/`analyze` (jawna lista
-    tickerów) ten command operuje na CAŁYM aktualnym uniwersum S&P 500
-    automatycznie — `--sample` ogranicza zakres tylko do małego testu.
-    Ten live run jest testem operacyjnym MVP, NIE kolejną rundą
-    kalibracji — wynik nigdy nie zmienia `config/config.yaml` ani
-    metodologii scoringu/wyceny/hard gates/prefiltra/decline
-    thresholds."""
+    DWA ETAPY, zero zmiany scoring weights/valuation mechanics/hard
+    gates/decline thresholds/prefilter rules/PIT methodology:
+    1. Deterministic ranking WSZYSTKICH kandydatów po decline
+       screening + prefilter — zero LLM, przez zamrożony
+       `backtest_harness.compute_deterministic_score`/
+       `evaluate_deterministic_hard_gates` (ten sam kod co kalibracja/
+       holdout, Faza 5.3-5.6 — żaden nowy "proxy score"). Pełny
+       ranking zapisywany do `live_scan_candidates` PRZED jakimkolwiek
+       wywołaniem Claude.
+    2. Shortlist = TOP `--shortlist-limit` (domyślnie 20, remisy na
+       granicy zachowane) — operacyjny/kosztowy budget warstwy
+       research, NIE nowy próg inwestycyjny. Pełna analiza Claude
+       WYŁĄCZNIE dla shortlisty (`_analyze_shortlist_and_report`),
+       resumable (PENDING/COMPLETE/FAILED) i cache'owana — patrz
+       `analyze-live-scan-shortlist` do wznowienia bez tego etapu 1.
+
+    Finalny raport (0-N kandydatów) generowany TYLKO, gdy CAŁA
+    shortlist ma status COMPLETE — w przeciwnym razie status
+    `INCOMPLETE_LLM_ANALYSIS`, nigdy partial top-N."""
     config = load_config()
     fmp_key = config.data_provider.resolve_api_key()
     user_agent = config.sources.sec_edgar.resolve_user_agent()
@@ -603,6 +637,14 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
         gates_json=json.dumps(config.hard_gates.model_dump()),
     )
     conn.commit()
+
+    config_text = Path(DEFAULT_CONFIG_PATH).read_text(encoding="utf-8")
+    config_version = f"config.yaml:{hashlib.sha256(config_text.encode()).hexdigest()[:16]}"
+    # Mikrosekundy (nie tylko sekundy) -- dwa `run-live-scan` w tym samym
+    # procesie/sekundzie (np. testy) inaczej kolidowałyby na UNIQUE
+    # constraint `live_scan_runs.run_id` (realny błąd znaleziony przy
+    # pisaniu testów Fazy 6c).
+    run_id = "live-scan-" + dt.datetime.utcnow().strftime("%Y-%m-%dT%H%M%S%fZ")
 
     if not args.skip_universe_refresh:
         with FMPClient(fmp_key) as client:
@@ -692,91 +734,343 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
 
     print(f"Prefilter: {len(survivors)} przeszło, {prefilter_excluded} wykluczonych.")
 
+    # --- Etap 1: deterministic ranking WSZYSTKICH survivors, zero LLM ---
+    ranked: list[RankedCandidate] = []
+    for ticker, cik, snapshot, flags in survivors:
+        periods = get_fundamentals_periods(conn, cik)
+        price_rows = get_price_series(conn, cik)
+        current_price = price_rows[-1]["close"]
+        company_row = conn.execute(
+            "SELECT sector_profile FROM companies WHERE cik = ?", (cik,)
+        ).fetchone()
+        sector_profile = company_row["sector_profile"] if company_row else "GENERAL"
+
+        score = compute_deterministic_score(
+            periods=periods, sector_profile=sector_profile, current_price=current_price, config=config,
+        )
+        hard_gates = evaluate_deterministic_hard_gates(
+            safety=score.safety_score, margin_of_safety_base_pct=score.margin_of_safety_base_pct,
+            config=config,
+        )
+        ranked.append(RankedCandidate(
+            ticker=ticker, cik=cik, current_price=current_price, decline_snapshot=snapshot,
+            triggered_decline_flags=flags, score=score, hard_gate_result=hard_gates,
+        ))
+
+    ranked = rank_all_candidates(ranked)
+    shortlist = select_shortlist(ranked, limit=args.shortlist_limit)
+    shortlist_ciks = {c.cik for c in shortlist}
+
+    insert_live_scan_run(
+        conn, run_id=run_id, run_date=run_date, config_version=config_version,
+        universe_size=len(tickers), decline_surfaced=len(surfaced),
+        prefilter_excluded=prefilter_excluded, shortlist_limit=args.shortlist_limit,
+        shortlist_size=len(shortlist),
+    )
+    for i, c in enumerate(ranked, start=1):
+        insert_live_scan_candidate(
+            conn, run_id=run_id, cik=c.cik, ticker=c.ticker, rank=i, current_price=c.current_price,
+            decline_flags=c.triggered_decline_flags,
+            deterministic_score_pct=c.score.deterministic_score_pct,
+            deterministic_partial_score=c.score.deterministic_partial_score,
+            available_components=c.score.available_components,
+            missing_components=c.score.missing_components,
+            safety_score=c.score.safety_score, valuation_score=c.score.valuation_score,
+            dividend_score=c.score.dividend_score,
+            margin_of_safety_base_pct=c.score.margin_of_safety_base_pct,
+            hard_gate_passed_deterministic=c.hard_gate_result.passed,
+            hard_gate_triggered_deterministic=tuple(c.hard_gate_result.triggered),
+            in_shortlist=c.cik in shortlist_ciks,
+        )
+    conn.commit()
+
+    print(f"\n== Pełny deterministyczny ranking ({len(ranked)} kandydatów) — run_id={run_id} ==\n")
+    print(render_full_ranking_table(ranked))
+    print(
+        f"\n== Shortlist (TOP {args.shortlist_limit} po deterministic_score_pct + remisy "
+        f"na granicy): {len(shortlist)} kandydatów — operacyjny/kosztowy budget, NIE próg "
+        "inwestycyjny ==\n"
+    )
+    print(", ".join(c.ticker for c in shortlist) if shortlist else "(shortlist pusta)")
+
+    if args.rank_only:
+        print(
+            f"\n--rank-only: STOP po etapie 1. Wznów analizę Claude shortlisty przez:\n"
+            f"  python -m buffett_scanner.cli --db {args.db} analyze-live-scan-shortlist "
+            f"--run-id {run_id}"
+        )
+        return 0
+
+    return _analyze_shortlist_and_report(
+        conn, run_id=run_id, config=config, config_version=config_version,
+        user_agent=user_agent, claude_key=claude_key, final_limit=args.limit,
+        markdown_out=args.markdown_out,
+    )
+
+
+def cmd_analyze_live_scan_shortlist(args: argparse.Namespace) -> int:
+    """Faza 6c — wznawia/kontynuuje etap 2 (`run-live-scan` stworzył
+    `--run-id` z zapisaną shortlistą) — analizuje WYŁĄCZNIE kandydatów
+    z `llm_status IN ('PENDING','FAILED')` (nigdy ponownie `COMPLETE`,
+    nigdy nie zaczyna od nowa etapu 1). Ten command wymaga tej samej
+    bazy (`--db`), co oryginalny `run-live-scan` — w GitHub Actions to
+    znaczy pobranie jej artefaktu z poprzedniego runu."""
+    config = load_config()
+    user_agent = config.sources.sec_edgar.resolve_user_agent()
+    claude_key = config.llm.resolve_api_key()
+    conn = init_db(args.db)
+
+    upsert_scoring_model_version(
+        conn,
+        version=config.scoring.version,
+        description=f"status={config.scoring.status}",
+        weights_json=json.dumps(config.scoring.weights.model_dump()),
+        gates_json=json.dumps(config.hard_gates.model_dump()),
+    )
+    conn.commit()
+
+    run_row = get_live_scan_run(conn, args.run_id)
+    if run_row is None:
+        print(f"BŁĄD: run_id '{args.run_id}' nie istnieje w tej bazie.", file=sys.stderr)
+        return 1
+
+    return _analyze_shortlist_and_report(
+        conn, run_id=args.run_id, config=config, config_version=run_row["config_version"],
+        user_agent=user_agent, claude_key=claude_key, final_limit=args.limit,
+        markdown_out=args.markdown_out,
+    )
+
+
+def _analyze_shortlist_and_report(
+    conn, *, run_id: str, config, config_version: str, user_agent: str, claude_key: str,
+    final_limit: int, markdown_out: str | None,
+) -> int:
+    """Faza 6c, etap 2 — pełna analiza Claude (jakościowa +
+    anti-confirmation-bias + source assembly) WYŁĄCZNIE dla kandydatów
+    shortlisty `run_id` ze statusem `PENDING`/`FAILED`. Cache po
+    (cik, data_timestamp, config_version, prompt_schema_version,
+    source_fingerprint) — identyczne wejście nigdy nie płaci za Claude
+    drugi raz. Na błąd Claude API (insufficient credits/rate limit/
+    transient) ZATRZYMUJE dalsze NOWE wywołania w tym przebiegu
+    (pozostali kandydaci zostają PENDING, resumable) — błąd walidacji
+    deterministycznej / brak zweryfikowanych źródeł jest per-kandydat,
+    NIE zatrzymuje reszty. Finalny raport generowany TYLKO, gdy CAŁA
+    shortlist jest COMPLETE — inaczej status INCOMPLETE_LLM_ANALYSIS,
+    nigdy partial top-N."""
+    run_row = get_live_scan_run(conn, run_id)
+    shortlist_rows = get_live_scan_candidates(conn, run_id, only_shortlist=True)
+    pending_or_failed = [r for r in shortlist_rows if r["llm_status"] in ("PENDING", "FAILED")]
+
+    if pending_or_failed:
+        stop_early = False
+        with SecEdgarClient(user_agent) as edgar_client, ClaudeClient(
+            claude_key, model=config.llm.model, max_output_tokens=config.llm.max_output_tokens,
+        ) as claude_client:
+            for row in pending_or_failed:
+                if stop_early:
+                    break
+                cik, ticker = row["cik"], row["ticker"]
+                periods = get_fundamentals_periods(conn, cik)
+                if not periods:
+                    update_live_scan_candidate_llm_status(
+                        conn, run_id=run_id, cik=cik, llm_status="FAILED",
+                        llm_error="brak fundamentals periods",
+                    )
+                    conn.commit()
+                    print(f"  {ticker}: FAILED (brak fundamentals periods)")
+                    continue
+                latest = periods[-1]
+                data_timestamp = f"{run_row['run_date']}|{latest.period_end_date}|{latest.filed_date}"
+
+                company_row = conn.execute(
+                    "SELECT name FROM companies WHERE cik = ?", (cik,)
+                ).fetchone()
+                issuer = company_row["name"] if company_row else ticker
+                packet = build_sec_source_packet(edgar_client, cik=cik, issuer=issuer)
+                verified_sources = [s for s in packet if s.verified]
+                fingerprint = source_fingerprint(packet)
+                cache_key = build_cache_key(
+                    cik=cik, data_timestamp=data_timestamp, config_version=config_version,
+                    prompt_schema_version=config.llm.schema_version, source_fingerprint=fingerprint,
+                )
+
+                cached_analysis_id = find_cached_live_scan_analysis(conn, cache_key)
+                if cached_analysis_id is not None:
+                    update_live_scan_candidate_llm_status(
+                        conn, run_id=run_id, cik=cik, llm_status="COMPLETE",
+                        cache_key=cache_key, analysis_id=cached_analysis_id,
+                    )
+                    conn.commit()
+                    print(f"  {ticker}: CACHE HIT (analysis_id={cached_analysis_id}) — zero nowego wywołania Claude.")
+                    continue
+
+                if not verified_sources:
+                    update_live_scan_candidate_llm_status(
+                        conn, run_id=run_id, cik=cik, llm_status="FAILED",
+                        llm_error="brak zweryfikowanych źródeł", cache_key=cache_key,
+                    )
+                    conn.commit()
+                    print(f"  {ticker}: FAILED (brak zweryfikowanych źródeł)")
+                    continue
+
+                metrics = compute_metrics(periods)
+                prefilter_result = evaluate_prefilter(metrics, config.prefilter)
+                prompt, source_id_map = build_analysis_prompt(
+                    ticker=ticker, metrics=metrics, prefilter_flags=prefilter_result.flags,
+                    sources=verified_sources,
+                )
+                try:
+                    analysis = claude_client.generate_analysis(prompt)
+                except ClaudeError as exc:
+                    update_live_scan_candidate_llm_status(
+                        conn, run_id=run_id, cik=cik, llm_status="FAILED",
+                        llm_error=str(exc), cache_key=cache_key,
+                    )
+                    conn.commit()
+                    print(f"  {ticker}: FAILED (Claude API error): {exc}")
+                    print(
+                        "  STOP: błąd Claude API — zatrzymuję dalsze NOWE wywołania w tym "
+                        f"przebiegu. Pozostali kandydaci zostają PENDING/FAILED — wznów przez "
+                        f"'analyze-live-scan-shortlist --run-id {run_id}' po usunięciu przyczyny."
+                    )
+                    stop_early = True
+                    continue
+
+                try:
+                    validate_analysis_output(
+                        analysis, allowed_source_ids=set(source_id_map), pdf_paginated_source_ids=set(),
+                    )
+                except AnalysisValidationError as exc:
+                    update_live_scan_candidate_llm_status(
+                        conn, run_id=run_id, cik=cik, llm_status="FAILED",
+                        llm_error=str(exc), cache_key=cache_key,
+                    )
+                    conn.commit()
+                    print(f"  {ticker}: FAILED (walidacja deterministyczna): {exc}")
+                    continue
+
+                current_price = row["current_price"]
+                sector_row = conn.execute(
+                    "SELECT sector_profile FROM companies WHERE cik = ?", (cik,)
+                ).fetchone()
+                sector_profile = sector_row["sector_profile"] if sector_row else "GENERAL"
+                score = compute_score(
+                    analysis=analysis, periods=periods, sector_profile=sector_profile,
+                    current_price=current_price, config=config,
+                )
+                base_scenario = (
+                    score.valuation_result.scenarios.get("base") if score.valuation_result.implemented else None
+                )
+                bear_scenario = (
+                    score.valuation_result.scenarios.get("bear") if score.valuation_result.implemented else None
+                )
+                bull_scenario = (
+                    score.valuation_result.scenarios.get("bull") if score.valuation_result.implemented else None
+                )
+                analysis_id = insert_analysis(
+                    conn,
+                    cik=cik, run_date=run_row["run_date"], price_at_analysis=current_price,
+                    scoring_model_version=config.scoring.version,
+                    business_quality_score=score.business_quality_score,
+                    moat_score=score.moat_score,
+                    financial_quality_score=score.financial_quality_score,
+                    management_score=score.management_score,
+                    safety_score=score.safety_score,
+                    valuation_score=score.valuation_score,
+                    fear_score=score.fear_score,
+                    dividend_score=score.dividend_score,
+                    total_score=score.total_score,
+                    hard_flags=json.dumps(score.hard_gate_result.triggered),
+                    hard_gates_passed=int(score.hard_gate_result.passed),
+                    valuation_range_low=bear_scenario.intrinsic_value_per_share if bear_scenario else None,
+                    valuation_range_base=base_scenario.intrinsic_value_per_share if base_scenario else None,
+                    valuation_range_high=bull_scenario.intrinsic_value_per_share if bull_scenario else None,
+                    margin_of_safety_pct=base_scenario.margin_of_safety_pct if base_scenario else None,
+                    margin_of_safety_bear_pct=bear_scenario.margin_of_safety_pct if bear_scenario else None,
+                    margin_of_safety_bull_pct=bull_scenario.margin_of_safety_pct if bull_scenario else None,
+                    fear_classification=analysis.fear_analysis.classification,
+                    fear_confidence=analysis.fear_analysis.confidence,
+                    llm_model_id=config.llm.model,
+                    llm_schema_version=analysis.schema_version,
+                    llm_raw_output=json.dumps(analysis.model_dump()),
+                )
+                insert_analysis_sources(conn, analysis_id, packet)
+                update_live_scan_candidate_llm_status(
+                    conn, run_id=run_id, cik=cik, llm_status="COMPLETE",
+                    cache_key=cache_key, analysis_id=analysis_id,
+                )
+                conn.commit()
+                print(f"  {ticker}: COMPLETE (analysis_id={analysis_id})")
+
+    shortlist_rows = get_live_scan_candidates(conn, run_id, only_shortlist=True)
+    print(f"\n== Status shortlisty (run_id={run_id}) ==\n")
+    print(render_shortlist_status_table(shortlist_rows))
+
+    n_complete = sum(1 for r in shortlist_rows if r["llm_status"] == "COMPLETE")
+    n_failed = sum(1 for r in shortlist_rows if r["llm_status"] == "FAILED")
+    n_pending = sum(1 for r in shortlist_rows if r["llm_status"] == "PENDING")
+
+    if n_complete < len(shortlist_rows):
+        update_live_scan_run_status(conn, run_id, "INCOMPLETE_LLM_ANALYSIS")
+        conn.commit()
+        print(
+            f"\n## STATUS: INCOMPLETE_LLM_ANALYSIS "
+            f"({n_complete}/{len(shortlist_rows)} COMPLETE, {n_failed} FAILED, {n_pending} PENDING)"
+        )
+        print(
+            "Finalne 0-N kandydatów NIE jest generowane — shortlist nie jest w pełni "
+            "przeanalizowana (Decyzja właścicielki, Faza 6c: nigdy partial top-N)."
+        )
+        print(
+            f"Wznowienie (analizuje TYLKO PENDING/FAILED, nigdy ponownie COMPLETE): "
+            f"analyze-live-scan-shortlist --run-id {run_id}"
+        )
+        return 0
+
     candidates: list[LiveCandidate] = []
-    analysis_failed = 0
-    with SecEdgarClient(user_agent) as edgar_client, ClaudeClient(
-        claude_key, model=config.llm.model, max_output_tokens=config.llm.max_output_tokens,
-    ) as claude_client:
-        for ticker, cik, snapshot, flags in survivors:
-            periods = get_fundamentals_periods(conn, cik)
-            outcome = _run_llm_analysis(
-                conn, edgar_client, claude_client, config, cik=cik, ticker=ticker, periods=periods,
+    for row in shortlist_rows:
+        analysis_row = get_analysis(conn, row["analysis_id"])
+        analysis = AnalysisOutput.model_validate(json.loads(analysis_row["llm_raw_output"]))
+        periods = get_fundamentals_periods(conn, row["cik"])
+        sector_row = conn.execute(
+            "SELECT sector_profile FROM companies WHERE cik = ?", (row["cik"],)
+        ).fetchone()
+        sector_profile = sector_row["sector_profile"] if sector_row else "GENERAL"
+        score = compute_score(
+            analysis=analysis, periods=periods, sector_profile=sector_profile,
+            current_price=row["current_price"], config=config,
+        )
+        price_rows = get_price_series(conn, row["cik"])
+        bars = [
+            PriceBar(
+                date=r["date"], open=r["open"], high=r["high"], low=r["low"],
+                close=r["close"], adj_close=r["adj_close"], volume=r["volume"],
             )
-            if outcome is None:
-                analysis_failed += 1
-                continue
-            analysis, packet = outcome
+            for r in price_rows
+        ]
+        snapshot = compute_price_changes(bars)
+        flags = json.loads(row["decline_flags_json"])
+        source_packet = get_analysis_sources(conn, row["analysis_id"])
+        candidates.append(LiveCandidate(
+            ticker=row["ticker"], cik=row["cik"], run_date=run_row["run_date"],
+            current_price=row["current_price"], decline_snapshot=snapshot,
+            triggered_decline_flags=flags, analysis=analysis, score=score,
+            source_packet=source_packet,
+        ))
 
-            price_rows = get_price_series(conn, cik)
-            current_price = price_rows[-1]["close"]
-
-            company_row = conn.execute(
-                "SELECT sector_profile FROM companies WHERE cik = ?", (cik,)
-            ).fetchone()
-            sector_profile = company_row["sector_profile"] if company_row else "GENERAL"
-
-            score = compute_score(
-                analysis=analysis, periods=periods, sector_profile=sector_profile,
-                current_price=current_price, config=config,
-            )
-
-            base_scenario = (
-                score.valuation_result.scenarios.get("base") if score.valuation_result.implemented else None
-            )
-            bear_scenario = (
-                score.valuation_result.scenarios.get("bear") if score.valuation_result.implemented else None
-            )
-            bull_scenario = (
-                score.valuation_result.scenarios.get("bull") if score.valuation_result.implemented else None
-            )
-
-            analysis_id = insert_analysis(
-                conn,
-                cik=cik, run_date=run_date, price_at_analysis=current_price,
-                scoring_model_version=config.scoring.version,
-                business_quality_score=score.business_quality_score,
-                moat_score=score.moat_score,
-                financial_quality_score=score.financial_quality_score,
-                management_score=score.management_score,
-                safety_score=score.safety_score,
-                valuation_score=score.valuation_score,
-                fear_score=score.fear_score,
-                dividend_score=score.dividend_score,
-                total_score=score.total_score,
-                hard_flags=json.dumps(score.hard_gate_result.triggered),
-                hard_gates_passed=int(score.hard_gate_result.passed),
-                valuation_range_low=bear_scenario.intrinsic_value_per_share if bear_scenario else None,
-                valuation_range_base=base_scenario.intrinsic_value_per_share if base_scenario else None,
-                valuation_range_high=bull_scenario.intrinsic_value_per_share if bull_scenario else None,
-                margin_of_safety_pct=base_scenario.margin_of_safety_pct if base_scenario else None,
-                margin_of_safety_bear_pct=bear_scenario.margin_of_safety_pct if bear_scenario else None,
-                margin_of_safety_bull_pct=bull_scenario.margin_of_safety_pct if bull_scenario else None,
-                fear_classification=analysis.fear_analysis.classification,
-                fear_confidence=analysis.fear_analysis.confidence,
-                llm_model_id=config.llm.model,
-                llm_schema_version=analysis.schema_version,
-                llm_raw_output=json.dumps(analysis.model_dump()),
-            )
-            insert_analysis_sources(conn, analysis_id, packet)
-            conn.commit()
-
-            candidates.append(LiveCandidate(
-                ticker=ticker, cik=cik, run_date=run_date, current_price=current_price,
-                decline_snapshot=snapshot, triggered_decline_flags=flags,
-                analysis=analysis, score=score, source_packet=packet,
-            ))
-
-    ranked = rank_candidates(candidates, limit=args.limit)
+    final_candidates = rank_candidates(candidates, limit=final_limit)
     report = render_live_scan_report(
-        run_date=run_date, universe_size=len(tickers), decline_surfaced=len(surfaced),
-        prefilter_excluded=prefilter_excluded, analysis_failed=analysis_failed,
-        candidates=ranked, config=config,
+        run_date=run_row["run_date"], universe_size=run_row["universe_size"],
+        decline_surfaced=run_row["decline_surfaced"], prefilter_excluded=run_row["prefilter_excluded"],
+        analysis_failed=0, candidates=final_candidates, config=config,
     )
     print(f"\n{report}")
-    if args.markdown_out:
-        out_dir = Path(args.markdown_out)
+    update_live_scan_run_status(conn, run_id, "COMPLETE")
+    conn.commit()
+    if markdown_out:
+        out_dir = Path(markdown_out)
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"live_scan_{run_date}.md"
+        out_path = out_dir / f"live_scan_{run_row['run_date']}_{run_id}.md"
         out_path.write_text(report, encoding="utf-8")
         print(f"(zapisano raport: {out_path})")
     return 0
@@ -1892,8 +2186,31 @@ def build_parser() -> argparse.ArgumentParser:
         "--skip-universe-refresh", action="store_true",
         help="Nie odpytuj FMP o aktualne S&P 500 — użyj już zapisanego ticker_history.",
     )
+    p_live_scan.add_argument(
+        "--shortlist-limit", type=int, default=DEFAULT_SHORTLIST_LIMIT,
+        help="TOP N po deterministic_score_pct wysyłanych do pełnej analizy Claude "
+        "(domyślnie 20, remisy na granicy zachowane) — operacyjny/kosztowy budget, "
+        "NIE próg inwestycyjny (Faza 6c).",
+    )
+    p_live_scan.add_argument(
+        "--rank-only", action="store_true",
+        help="STOP po etapie 1 (deterministic ranking + shortlist) — bez wywołania Claude. "
+        "Użyj 'analyze-live-scan-shortlist --run-id <id>' do kontynuacji.",
+    )
     p_live_scan.add_argument("--markdown-out", default=None, help="Katalog na finalny raport .md")
     p_live_scan.set_defaults(func=cmd_run_live_scan)
+
+    p_analyze_shortlist = sub.add_parser("analyze-live-scan-shortlist")
+    p_analyze_shortlist.add_argument(
+        "--run-id", required=True,
+        help="run_id z poprzedniego 'run-live-scan' (ta sama baza --db) — analizuje TYLKO "
+        "shortlistę tego runu, ze statusem PENDING/FAILED (resumable, Faza 6c).",
+    )
+    p_analyze_shortlist.add_argument(
+        "--limit", type=int, default=5, help="Maks. liczba finalnych kandydatów (domyślnie 5).",
+    )
+    p_analyze_shortlist.add_argument("--markdown-out", default=None, help="Katalog na finalny raport .md")
+    p_analyze_shortlist.set_defaults(func=cmd_analyze_live_scan_shortlist)
 
     p_pit = sub.add_parser("pit-prototype")
     p_pit.add_argument("tickers", nargs="+")

@@ -382,3 +382,278 @@ def test_run_live_scan_reports_no_qualifying_opportunities_when_nothing_surfaces
     out = capsys.readouterr().out
     assert exit_code == 0
     assert "No qualifying opportunities today" in out
+
+
+# ---------------------------------------------------------------------------
+# Faza 6c (OPCJA 3, 2026-10-06) -- dwustopniowy pipeline: deterministic
+# ranking WSZYSTKICH screened kandydatów (zero LLM) -> shortlist (TOP N +
+# remisy, operacyjny/kosztowy budget) -> pełna analiza Claude WYŁĄCZNIE
+# dla shortlisty, resumable (PENDING/COMPLETE/FAILED) + cache'owana.
+# ---------------------------------------------------------------------------
+
+
+class _TwoTickerFMPClient(_FakeFMPClient):
+    """AAPL i MSFT, z RÓŻNYMI finalnymi cenami (-> różny Margin of Safety
+    -> różny deterministic_score_pct, zero przypadkowego remisu) --
+    niezbędne do testowania obcięcia shortlisty do konkretnego `limit`."""
+
+    FINAL_CLOSE = {"AAPL": 70.0, "MSFT": 50.0}
+
+    def get_sp500_constituents(self):
+        return [
+            {"cik": "0000320193", "symbol": "AAPL", "name": "Apple Inc.",
+             "sector": "Technology", "subSector": "Consumer Electronics"},
+            {"cik": "0000789019", "symbol": "MSFT", "name": "Microsoft Corp.",
+             "sector": "Technology", "subSector": "Software"},
+        ]
+
+    def get_historical_prices(self, symbol, *, from_date, to_date):
+        return _flat_then_drop_price_rows_with_close(self.FINAL_CLOSE[symbol])
+
+
+def _flat_then_drop_price_rows_with_close(final_close: float, n_flat: int = 260) -> list[dict]:
+    import datetime as _dt
+
+    start = _dt.date(2024, 1, 2)
+    rows = []
+    for i in range(n_flat):
+        d = start + _dt.timedelta(days=i)
+        rows.append({"date": d.isoformat(), "open": 100.0, "high": 101.0, "low": 99.0,
+                     "close": 100.0, "adj_close": 100.0, "volume": 1_000_000})
+    last = start + _dt.timedelta(days=n_flat)
+    rows.append({"date": last.isoformat(), "open": 100.0, "high": 100.0, "low": final_close - 1,
+                 "close": final_close, "adj_close": final_close, "volume": 5_000_000})
+    return rows
+
+
+class _CountingClaudeClient:
+    """Fejkowy ClaudeClient liczący wywołania w module-level liczniku
+    (przetrwa wiele osobnych `cli.main()` -- np. run-live-scan +
+    analyze-live-scan-shortlist w jednym teście) i opcjonalnie failujący
+    dla tickerów podanych w `fail_tickers` (rozpoznawanych po treści
+    promptu, który zawsze zawiera dokładny ticker -- patrz prompt.py)."""
+
+    call_count = {"n": 0}
+    fail_tickers: set[str] = set()
+
+    def __init__(self, api_key, *, model, max_output_tokens=4000):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def generate_analysis(self, prompt):
+        from buffett_scanner.analysis_schema import (
+            AnalysisOutput,
+            DividendTrapAlert,
+            FearAnalysis,
+            FinancialQualityCommentary,
+            ManagementSection,
+            MoatSection,
+            ScoredSection,
+        )
+        from buffett_scanner.providers.claude import ClaudeError
+
+        type(self).call_count["n"] += 1
+        for ticker in self.fail_tickers:
+            if f'"{ticker}"' in prompt:
+                raise ClaudeError(
+                    f"Claude API zwróciło błąd (400): Your credit balance is too low ({ticker})"
+                )
+
+        return AnalysisOutput(
+            ticker="X", schema_version="1.0",
+            business_understandability=ScoredSection(score=5, confidence="MEDIUM"),
+            moat=MoatSection(score=6, confidence="MEDIUM"),
+            financial_quality_commentary=FinancialQualityCommentary(confidence="MEDIUM"),
+            management_capital_allocation=ManagementSection(score=6, confidence="MEDIUM"),
+            fear_analysis=FearAnalysis(classification="TEMPORARY", confidence="MEDIUM", trigger="x"),
+            dividend_trap_alert=DividendTrapAlert(triggered=False),
+            bull_case=["Bull"], bear_case=["Bear"], cited_source_ids=["src-1"],
+        )
+
+
+def _set_live_scan_env(monkeypatch):
+    monkeypatch.setenv("FMP_API_KEY", "dummy")
+    monkeypatch.setenv("SEC_EDGAR_USER_AGENT", "Tajfun Lab test test@example.com")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "dummy")
+
+
+def test_run_live_scan_rank_only_stops_before_claude(tmp_path, monkeypatch, capsys):
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+
+    db_path = tmp_path / "test.db"
+    exit_code = cli.main([
+        "--db", str(db_path), "run-live-scan", "--sample", "AAPL", "--rank-only",
+    ])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "Pełny deterministyczny ranking" in out
+    assert "Shortlist" in out
+    assert "--rank-only: STOP po etapie 1" in out
+
+    from buffett_scanner.db import connect, get_live_scan_candidates, get_live_scan_run
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 0
+
+    run_row = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()
+    run_id = run_row["run_id"]
+    assert get_live_scan_run(conn, run_id)["status"] == "RANKED"
+    candidates = get_live_scan_candidates(conn, run_id)
+    assert len(candidates) == 1
+    assert candidates[0]["ticker"] == "AAPL"
+    assert candidates[0]["llm_status"] == "PENDING"
+    assert candidates[0]["in_shortlist"] == 1
+
+
+def test_run_live_scan_shortlist_limit_only_analyzes_top_n(tmp_path, monkeypatch, capsys):
+    """AAPL (cena 70 -> MoS ujemny -> valuation_score=0) i MSFT (cena 50
+    -> MoS ~21% -> valuation_score>0) oba surfacują decline, ale MSFT ma
+    wyższy deterministic_score_pct -- `--shortlist-limit 1` wysyła do
+    Claude TYLKO MSFT, AAPL zostaje NOT_SHORTLISTED, zero wywołania
+    Claude dla niego."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _TwoTickerFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = set()
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    exit_code = cli.main([
+        "--db", str(db_path), "run-live-scan", "--sample", "AAPL,MSFT", "--shortlist-limit", "1",
+    ])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert _CountingClaudeClient.call_count["n"] == 1
+
+    from buffett_scanner.db import connect, get_live_scan_candidates
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+    by_ticker = {r["ticker"]: r for r in get_live_scan_candidates(conn, run_id)}
+    assert by_ticker["MSFT"]["in_shortlist"] == 1
+    assert by_ticker["MSFT"]["llm_status"] == "COMPLETE"
+    assert by_ticker["AAPL"]["in_shortlist"] == 0
+    assert by_ticker["AAPL"]["llm_status"] == "NOT_SHORTLISTED"
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 1
+
+
+def test_analyze_live_scan_shortlist_incomplete_status_never_emits_partial_report(
+    tmp_path, monkeypatch, capsys,
+):
+    """MSFT (ranga 1, lepszy score) COMPLETE, AAPL (ranga 2, symulowane
+    wyczerpanie kredytu Claude) FAILED -> status INCOMPLETE_LLM_ANALYSIS,
+    ZERO finalnego raportu top-N (Decyzja właścicielki, Faza 6c: nigdy
+    partial top-N). AAPL jako DRUGI/ostatni w kolejce przetwarzania —
+    fail-fast po jego błędzie nie gubi niczego ukrytego."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _TwoTickerFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = {"AAPL"}
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    exit_code = cli.main([
+        "--db", str(db_path), "run-live-scan", "--sample", "AAPL,MSFT", "--shortlist-limit", "20",
+    ])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert "INCOMPLETE_LLM_ANALYSIS" in out
+    assert "Kandydat 1:" not in out  # żaden finalny top-N raport
+
+    from buffett_scanner.db import connect, get_live_scan_candidates, get_live_scan_run
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+    assert get_live_scan_run(conn, run_id)["status"] == "INCOMPLETE_LLM_ANALYSIS"
+    by_ticker = {r["ticker"]: r for r in get_live_scan_candidates(conn, run_id)}
+    assert by_ticker["MSFT"]["llm_status"] == "COMPLETE"
+    assert by_ticker["AAPL"]["llm_status"] == "FAILED"
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 1
+
+
+def test_analyze_live_scan_shortlist_resume_skips_complete_and_finishes(
+    tmp_path, monkeypatch, capsys,
+):
+    """Kontynuacja powyższego scenariusza: po 'uzupełnieniu kredytu'
+    (fail_tickers wyczyszczony), `analyze-live-scan-shortlist --run-id`
+    analizuje TYLKO AAPL (PENDING/FAILED) -- MSFT (już COMPLETE) nie
+    wywołuje Claude drugi raz -- i generuje finalny raport."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _TwoTickerFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = {"AAPL"}
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    cli.main([
+        "--db", str(db_path), "run-live-scan", "--sample", "AAPL,MSFT", "--shortlist-limit", "20",
+    ])
+    capsys.readouterr()
+    assert _CountingClaudeClient.call_count["n"] == 2  # MSFT (COMPLETE) + AAPL (FAILED)
+
+    from buffett_scanner.db import connect
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+
+    _CountingClaudeClient.fail_tickers = set()  # "kredyt uzupełniony"
+    exit_code = cli.main([
+        "--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+    ])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert _CountingClaudeClient.call_count["n"] == 3  # TYLKO +1 (AAPL) -- MSFT nie ponownie
+    assert "INCOMPLETE_LLM_ANALYSIS" not in out
+    assert "Kandydat" in out  # finalny raport wygenerowany
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 2
+
+
+def test_analyze_live_scan_shortlist_cache_hit_reuses_prior_analysis(
+    tmp_path, monkeypatch, capsys,
+):
+    """Dwa OSOBNE run_id na tej samej bazie, identyczny ticker/dane/config
+    -> identyczny cache_key -> drugi run_id dostaje COMPLETE przez cache,
+    ZERO nowego wywołania Claude (nawet gdy fake zawsze by rzucił błąd)."""
+    _set_live_scan_env(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)
+    _CountingClaudeClient.call_count = {"n": 0}
+    _CountingClaudeClient.fail_tickers = set()
+    monkeypatch.setattr(cli, "ClaudeClient", _CountingClaudeClient)
+
+    db_path = tmp_path / "test.db"
+    cli.main(["--db", str(db_path), "run-live-scan", "--sample", "AAPL"])
+    capsys.readouterr()
+    assert _CountingClaudeClient.call_count["n"] == 1
+
+    from buffett_scanner.db import connect
+
+    conn = connect(db_path)
+    first_analysis_id = conn.execute("SELECT analysis_id FROM analyses").fetchone()["analysis_id"]
+
+    # Druga runda tego samego dnia, identyczne dane -- fake Claude TERAZ
+    # ZAWSZE failuje, żeby dowieść, że cache hit nie woła API wcale.
+    _CountingClaudeClient.fail_tickers = {"AAPL"}
+    exit_code = cli.main([
+        "--db", str(db_path), "run-live-scan", "--sample", "AAPL", "--skip-universe-refresh",
+    ])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert _CountingClaudeClient.call_count["n"] == 1  # BEZ zmiany -- cache hit, zero nowego wywołania
+    assert "CACHE HIT" in out
+    assert "INCOMPLETE_LLM_ANALYSIS" not in out
+
+    rows = conn.execute("SELECT analysis_id FROM live_scan_candidates WHERE llm_status='COMPLETE'").fetchall()
+    assert all(r["analysis_id"] == first_analysis_id for r in rows)
+    assert conn.execute("SELECT COUNT(*) AS n FROM analyses").fetchone()["n"] == 1

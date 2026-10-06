@@ -447,6 +447,61 @@ CREATE TABLE IF NOT EXISTS calibration_runs (
     n_spearman_folds_with_data INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_calibration_runs_round ON calibration_runs(round);
+
+-- Faza 6c (2026-10-06, Decyzja właścicielki OPCJA 3, po realnym
+-- znalezisku: pełna analiza Claude dla WSZYSTKICH decline-surfaced
+-- kandydatów jest kosztowo/czasowo niewykonalna w jednym przebiegu —
+-- patrz docs „Faza 6c"). Dwa jasne etapy: (1) deterministyczny ranking
+-- WSZYSTKICH przefiltrowanych kandydatów (zero LLM, `backtest_harness.
+-- compute_deterministic_score`/`evaluate_deterministic_hard_gates` —
+-- ten sam frozen kod co kalibracja/holdout, zero nowego proxy score),
+-- (2) pełna analiza Claude WYŁĄCZNIE dla shortlisty (operacyjny/
+-- kosztowy budget, NIE nowy próg inwestycyjny). `live_scan_candidates.
+-- llm_status` umożliwia RESUME (po uzupełnieniu kredytu analizuje
+-- tylko PENDING/FAILED, nigdy ponownie COMPLETE) i cache (`cache_key`
+-- identyczny -> `analysis_id` skopiowany bez nowego wywołania API).
+CREATE TABLE IF NOT EXISTS live_scan_runs (
+    run_id              TEXT PRIMARY KEY,
+    run_date            TEXT NOT NULL,
+    config_version      TEXT NOT NULL,
+    universe_size       INTEGER NOT NULL,
+    decline_surfaced    INTEGER NOT NULL,
+    prefilter_excluded  INTEGER NOT NULL,
+    shortlist_limit     INTEGER NOT NULL,
+    shortlist_size      INTEGER NOT NULL,
+    status              TEXT NOT NULL DEFAULT 'RANKED'
+                         CHECK (status IN ('RANKED', 'INCOMPLETE_LLM_ANALYSIS', 'COMPLETE')),
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS live_scan_candidates (
+    run_id                      TEXT NOT NULL REFERENCES live_scan_runs(run_id),
+    cik                         TEXT NOT NULL REFERENCES companies(cik),
+    ticker                      TEXT NOT NULL,
+    rank                        INTEGER NOT NULL,
+    current_price               REAL NOT NULL,
+    decline_flags_json          TEXT NOT NULL,
+    deterministic_score_pct     REAL,
+    deterministic_partial_score REAL NOT NULL,
+    available_components_json   TEXT NOT NULL,
+    missing_components_json     TEXT NOT NULL,
+    safety_score                REAL NOT NULL,
+    valuation_score             REAL,
+    dividend_score               REAL NOT NULL,
+    margin_of_safety_base_pct   REAL,
+    hard_gate_passed_deterministic    INTEGER NOT NULL,
+    hard_gate_triggered_deterministic_json TEXT NOT NULL,
+    in_shortlist                INTEGER NOT NULL,
+    llm_status                  TEXT NOT NULL DEFAULT 'NOT_SHORTLISTED'
+                                 CHECK (llm_status IN
+                                 ('NOT_SHORTLISTED', 'PENDING', 'COMPLETE', 'FAILED')),
+    llm_error                   TEXT,
+    cache_key                   TEXT,
+    analysis_id                 INTEGER REFERENCES analyses(analysis_id),
+    PRIMARY KEY (run_id, cik)
+);
+CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_run_id ON live_scan_candidates(run_id);
+CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_cache_key ON live_scan_candidates(cache_key);
 """
 
 
@@ -859,6 +914,33 @@ def get_universe_membership_as_of(conn: sqlite3.Connection, index_name: str, as_
     return [r["cik"] for r in rows]
 
 
+def get_analysis(conn: sqlite3.Connection, analysis_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM analyses WHERE analysis_id = ?", (analysis_id,)
+    ).fetchone()
+
+
+def get_analysis_sources(conn: sqlite3.Connection, analysis_id: int) -> list:
+    """Odwraca `insert_analysis_sources` — rekonstruuje
+    `sources.VerifiedSource` z już zapisanych wierszy (Faza 6c: resume/
+    cache musi móc odtworzyć pełny source packet bez ponownego
+    odpytywania SEC EDGAR)."""
+    from buffett_scanner.sources import VerifiedSource
+
+    rows = conn.execute(
+        "SELECT * FROM analysis_sources WHERE analysis_id = ? ORDER BY source_id", (analysis_id,)
+    ).fetchall()
+    return [
+        VerifiedSource(
+            source_type=r["source_type"], title=r["title"], issuer=r["issuer"],
+            doc_date=r["doc_date"], url=r["url"], accession_number=r["accession_number"],
+            section=r["section"], content_hash=r["content_hash"],
+            verified=bool(r["verified"]), reason=r["reason"],
+        )
+        for r in rows
+    ]
+
+
 def insert_analysis_sources(conn: sqlite3.Connection, analysis_id: int, sources: list) -> int:
     """sources: lista `sources.VerifiedSource`. Jedyny sposób, w jaki
     wiersze tu powstają — nigdy na podstawie twierdzenia LLM (BLOCKER 3).
@@ -1220,3 +1302,141 @@ def mark_calibration_winner(conn: sqlite3.Connection, calibration_run_id: str) -
         "UPDATE calibration_runs SET status = 'frozen_winner' WHERE calibration_run_id = ?",
         (calibration_run_id,),
     )
+
+
+# ---------------------------------------------------------------------------
+# Faza 6c — live scan dwustopniowy pipeline (deterministic ranking +
+# resumable/cache'owana analiza Claude WYŁĄCZNIE dla shortlisty)
+# ---------------------------------------------------------------------------
+
+
+def insert_live_scan_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    run_date: str,
+    config_version: str,
+    universe_size: int,
+    decline_surfaced: int,
+    prefilter_excluded: int,
+    shortlist_limit: int,
+    shortlist_size: int,
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO live_scan_runs (
+            run_id, run_date, config_version, universe_size, decline_surfaced,
+            prefilter_excluded, shortlist_limit, shortlist_size
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id, run_date, config_version, universe_size, decline_surfaced,
+            prefilter_excluded, shortlist_limit, shortlist_size,
+        ),
+    )
+
+
+def insert_live_scan_candidate(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    cik: str,
+    ticker: str,
+    rank: int,
+    current_price: float,
+    decline_flags: dict[str, bool],
+    deterministic_score_pct: float | None,
+    deterministic_partial_score: float,
+    available_components: tuple[str, ...],
+    missing_components: tuple[str, ...],
+    safety_score: float,
+    valuation_score: float | None,
+    dividend_score: float,
+    margin_of_safety_base_pct: float | None,
+    hard_gate_passed_deterministic: bool,
+    hard_gate_triggered_deterministic: tuple[str, ...],
+    in_shortlist: bool,
+) -> None:
+    """Jeden wiersz pełnego deterministycznego rankingu (Faza 6c, etap 1)
+    — zapisywany dla WSZYSTKICH kandydatów, którzy przeszli decline
+    screening + prefilter, niezależnie od tego, czy wejdą do shortlisty.
+    `llm_status` startuje jako `'PENDING'` dla shortlisty, `'NOT_SHORTLISTED'`
+    dla resztę — nigdy nie wywołuje Claude tutaj."""
+    conn.execute(
+        """
+        INSERT INTO live_scan_candidates (
+            run_id, cik, ticker, rank, current_price, decline_flags_json,
+            deterministic_score_pct, deterministic_partial_score,
+            available_components_json, missing_components_json,
+            safety_score, valuation_score, dividend_score, margin_of_safety_base_pct,
+            hard_gate_passed_deterministic, hard_gate_triggered_deterministic_json,
+            in_shortlist, llm_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id, cik, ticker, rank, current_price, json.dumps(decline_flags),
+            deterministic_score_pct, deterministic_partial_score,
+            json.dumps(list(available_components)), json.dumps(list(missing_components)),
+            safety_score, valuation_score, dividend_score, margin_of_safety_base_pct,
+            int(hard_gate_passed_deterministic), json.dumps(list(hard_gate_triggered_deterministic)),
+            int(in_shortlist), "PENDING" if in_shortlist else "NOT_SHORTLISTED",
+        ),
+    )
+
+
+def get_live_scan_run(conn: sqlite3.Connection, run_id: str) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM live_scan_runs WHERE run_id = ?", (run_id,)).fetchone()
+
+
+def get_live_scan_candidates(
+    conn: sqlite3.Connection, run_id: str, *, only_shortlist: bool = False,
+) -> list[sqlite3.Row]:
+    if only_shortlist:
+        return conn.execute(
+            "SELECT * FROM live_scan_candidates WHERE run_id = ? AND in_shortlist = 1 ORDER BY rank",
+            (run_id,),
+        ).fetchall()
+    return conn.execute(
+        "SELECT * FROM live_scan_candidates WHERE run_id = ? ORDER BY rank", (run_id,)
+    ).fetchall()
+
+
+def find_cached_live_scan_analysis(conn: sqlite3.Connection, cache_key: str) -> int | None:
+    """Szuka JUŻ ukończonej (`llm_status='COMPLETE'`) analizy z identycznym
+    `cache_key`, z JAKIEGOKOLWIEK poprzedniego run_id — zwraca jej
+    `analysis_id` do ponownego użycia bez nowego wywołania Claude API,
+    albo `None`, jeśli nie ma trafienia (Decyzja właścicielki, Faza 6c:
+    "nie wywołuj API ponownie bez potrzeby")."""
+    row = conn.execute(
+        """
+        SELECT analysis_id FROM live_scan_candidates
+        WHERE cache_key = ? AND llm_status = 'COMPLETE' AND analysis_id IS NOT NULL
+        LIMIT 1
+        """,
+        (cache_key,),
+    ).fetchone()
+    return row["analysis_id"] if row else None
+
+
+def update_live_scan_candidate_llm_status(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    cik: str,
+    llm_status: str,
+    llm_error: str | None = None,
+    cache_key: str | None = None,
+    analysis_id: int | None = None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE live_scan_candidates
+        SET llm_status = ?, llm_error = ?, cache_key = ?, analysis_id = ?
+        WHERE run_id = ? AND cik = ?
+        """,
+        (llm_status, llm_error, cache_key, analysis_id, run_id, cik),
+    )
+
+
+def update_live_scan_run_status(conn: sqlite3.Connection, run_id: str, status: str) -> None:
+    conn.execute("UPDATE live_scan_runs SET status = ? WHERE run_id = ?", (status, run_id))

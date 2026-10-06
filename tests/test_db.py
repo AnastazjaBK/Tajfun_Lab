@@ -890,3 +890,210 @@ def test_backtest_benchmark_isolated_by_run_id(conn):
     conn.commit()
     assert len(get_backtest_benchmark(conn, "run-1")) == 1
     assert len(get_backtest_benchmark(conn, "run-2")) == 1
+
+
+# ---------------------------------------------------------------------------
+# Faza 6c — live scan dwustopniowy pipeline (deterministic ranking +
+# resumable/cache'owana analiza Claude wyłącznie dla shortlisty)
+# ---------------------------------------------------------------------------
+
+
+def test_insert_and_get_live_scan_run(conn):
+    from buffett_scanner.db import get_live_scan_run, insert_live_scan_run
+
+    insert_live_scan_run(
+        conn, run_id="live-1", run_date="2026-10-06", config_version="config.yaml:abc123",
+        universe_size=501, decline_surfaced=156, prefilter_excluded=0,
+        shortlist_limit=20, shortlist_size=21,
+    )
+    conn.commit()
+
+    row = get_live_scan_run(conn, "live-1")
+    assert row["universe_size"] == 501
+    assert row["decline_surfaced"] == 156
+    assert row["shortlist_size"] == 21
+    assert row["status"] == "RANKED"
+
+
+def test_get_live_scan_run_missing_returns_none(conn):
+    from buffett_scanner.db import get_live_scan_run
+
+    assert get_live_scan_run(conn, "nope") is None
+
+
+def test_update_live_scan_run_status(conn):
+    from buffett_scanner.db import get_live_scan_run, insert_live_scan_run, update_live_scan_run_status
+
+    insert_live_scan_run(
+        conn, run_id="live-1", run_date="2026-10-06", config_version="config.yaml:abc123",
+        universe_size=10, decline_surfaced=3, prefilter_excluded=0, shortlist_limit=20, shortlist_size=3,
+    )
+    conn.commit()
+    update_live_scan_run_status(conn, "live-1", "COMPLETE")
+    conn.commit()
+    assert get_live_scan_run(conn, "live-1")["status"] == "COMPLETE"
+
+
+def test_insert_live_scan_candidate_sets_pending_for_shortlist_and_not_shortlisted_otherwise(conn):
+    from buffett_scanner.db import get_live_scan_candidates, insert_live_scan_candidate, insert_live_scan_run
+
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_company(conn, cik="0000789019", name="Microsoft Corp.")
+    insert_live_scan_run(
+        conn, run_id="live-1", run_date="2026-10-06", config_version="config.yaml:abc123",
+        universe_size=10, decline_surfaced=2, prefilter_excluded=0, shortlist_limit=1, shortlist_size=1,
+    )
+    insert_live_scan_candidate(
+        conn, run_id="live-1", cik="0000320193", ticker="AAPL", rank=1, current_price=150.0,
+        decline_flags={"month_decline": True}, deterministic_score_pct=80.0,
+        deterministic_partial_score=36.0, available_components=("safety", "valuation", "dividend"),
+        missing_components=("business_quality", "fear"), safety_score=15.0, valuation_score=16.0,
+        dividend_score=5.0, margin_of_safety_base_pct=40.0, hard_gate_passed_deterministic=True,
+        hard_gate_triggered_deterministic=(), in_shortlist=True,
+    )
+    insert_live_scan_candidate(
+        conn, run_id="live-1", cik="0000789019", ticker="MSFT", rank=2, current_price=300.0,
+        decline_flags={"month_decline": True}, deterministic_score_pct=50.0,
+        deterministic_partial_score=20.0, available_components=("safety", "dividend"),
+        missing_components=("business_quality", "fear", "valuation"), safety_score=12.0,
+        valuation_score=None, dividend_score=8.0, margin_of_safety_base_pct=None,
+        hard_gate_passed_deterministic=True, hard_gate_triggered_deterministic=(), in_shortlist=False,
+    )
+    conn.commit()
+
+    rows = get_live_scan_candidates(conn, "live-1")
+    by_ticker = {r["ticker"]: r for r in rows}
+    assert by_ticker["AAPL"]["llm_status"] == "PENDING"
+    assert by_ticker["AAPL"]["in_shortlist"] == 1
+    assert by_ticker["MSFT"]["llm_status"] == "NOT_SHORTLISTED"
+    assert by_ticker["MSFT"]["in_shortlist"] == 0
+    assert by_ticker["MSFT"]["valuation_score"] is None
+
+    shortlist_only = get_live_scan_candidates(conn, "live-1", only_shortlist=True)
+    assert [r["ticker"] for r in shortlist_only] == ["AAPL"]
+
+
+def test_update_live_scan_candidate_llm_status(conn):
+    from buffett_scanner.db import (
+        get_live_scan_candidates,
+        insert_live_scan_candidate,
+        insert_live_scan_run,
+        update_live_scan_candidate_llm_status,
+    )
+
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    insert_live_scan_run(
+        conn, run_id="live-1", run_date="2026-10-06", config_version="config.yaml:abc123",
+        universe_size=1, decline_surfaced=1, prefilter_excluded=0, shortlist_limit=20, shortlist_size=1,
+    )
+    insert_live_scan_candidate(
+        conn, run_id="live-1", cik="0000320193", ticker="AAPL", rank=1, current_price=150.0,
+        decline_flags={}, deterministic_score_pct=80.0, deterministic_partial_score=36.0,
+        available_components=("safety", "valuation", "dividend"), missing_components=(),
+        safety_score=15.0, valuation_score=16.0, dividend_score=5.0, margin_of_safety_base_pct=40.0,
+        hard_gate_passed_deterministic=True, hard_gate_triggered_deterministic=(), in_shortlist=True,
+    )
+    conn.commit()
+
+    update_live_scan_candidate_llm_status(
+        conn, run_id="live-1", cik="0000320193", llm_status="FAILED",
+        llm_error="Claude API zwróciło błąd (400): ...", cache_key="deadbeef",
+    )
+    conn.commit()
+
+    row = get_live_scan_candidates(conn, "live-1")[0]
+    assert row["llm_status"] == "FAILED"
+    assert row["llm_error"] == "Claude API zwróciło błąd (400): ..."
+    assert row["cache_key"] == "deadbeef"
+    assert row["analysis_id"] is None
+
+
+def test_find_cached_live_scan_analysis_hits_only_on_complete_with_matching_key(conn):
+    from buffett_scanner.db import (
+        find_cached_live_scan_analysis,
+        get_live_scan_candidates,
+        insert_analysis,
+        insert_live_scan_candidate,
+        insert_live_scan_run,
+        update_live_scan_candidate_llm_status,
+    )
+
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_company(conn, cik="0000789019", name="Microsoft Corp.")
+    upsert_scoring_model_version(conn, version="0.1.0-draft", description="x", weights_json="{}", gates_json="{}")
+    analysis_id = insert_analysis(
+        conn, cik="0000320193", run_date="2026-10-06", price_at_analysis=150.0,
+        scoring_model_version="0.1.0-draft", total_score=72.0, hard_gates_passed=1,
+    )
+    for run_id, cik, ticker in (("live-1", "0000320193", "AAPL"), ("live-2", "0000789019", "MSFT")):
+        insert_live_scan_run(
+            conn, run_id=run_id, run_date="2026-10-06", config_version="config.yaml:abc123",
+            universe_size=1, decline_surfaced=1, prefilter_excluded=0, shortlist_limit=20, shortlist_size=1,
+        )
+        insert_live_scan_candidate(
+            conn, run_id=run_id, cik=cik, ticker=ticker, rank=1, current_price=150.0,
+            decline_flags={}, deterministic_score_pct=80.0, deterministic_partial_score=36.0,
+            available_components=("safety",), missing_components=(), safety_score=15.0,
+            valuation_score=None, dividend_score=5.0, margin_of_safety_base_pct=None,
+            hard_gate_passed_deterministic=True, hard_gate_triggered_deterministic=(), in_shortlist=True,
+        )
+    conn.commit()
+
+    # Brak trafień, dopóki nic nie jest COMPLETE.
+    assert find_cached_live_scan_analysis(conn, "shared-key") is None
+
+    # AAPL (live-1) kończy się COMPLETE z tym cache_key.
+    update_live_scan_candidate_llm_status(
+        conn, run_id="live-1", cik="0000320193", llm_status="COMPLETE",
+        cache_key="shared-key", analysis_id=analysis_id,
+    )
+    conn.commit()
+
+    # MSFT (inny run_id) z IDENTYCZNYM cache_key trafia w cache AAPL.
+    assert find_cached_live_scan_analysis(conn, "shared-key") == analysis_id
+    # Inny cache_key -- brak trafienia.
+    assert find_cached_live_scan_analysis(conn, "different-key") is None
+
+
+def test_get_analysis_and_sources_roundtrip(conn):
+    from buffett_scanner.db import get_analysis, get_analysis_sources, insert_analysis, insert_analysis_sources
+    from buffett_scanner.sources import VerifiedSource
+
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    upsert_scoring_model_version(conn, version="0.1.0-draft", description="x", weights_json="{}", gates_json="{}")
+    analysis_id = insert_analysis(
+        conn, cik="0000320193", run_date="2026-10-06", price_at_analysis=150.0,
+        scoring_model_version="0.1.0-draft", total_score=72.0, hard_gates_passed=1,
+        llm_raw_output='{"ticker": "AAPL"}',
+    )
+    sources = [
+        VerifiedSource(
+            source_type="SEC_FILING", title="10-K", issuer="Apple Inc.", doc_date="2026-01-01",
+            url="https://www.sec.gov/doc1.htm", accession_number="0001", section=None,
+            content_hash="abc123", verified=True, reason=None,
+        ),
+        VerifiedSource(
+            source_type="SEC_FILING", title="10-Q", issuer="Apple Inc.", doc_date="2026-04-01",
+            url="", accession_number="0002", section=None, content_hash=None,
+            verified=False, reason="404",
+        ),
+    ]
+    insert_analysis_sources(conn, analysis_id, sources)
+    conn.commit()
+
+    row = get_analysis(conn, analysis_id)
+    assert row["cik"] == "0000320193"
+    assert row["total_score"] == 72.0
+
+    roundtripped = get_analysis_sources(conn, analysis_id)
+    assert len(roundtripped) == 2
+    assert roundtripped[0].title == "10-K"
+    assert roundtripped[0].verified is True
+    assert roundtripped[1].verified is False
+    assert roundtripped[1].reason == "404"
+
+
+def test_get_analysis_missing_returns_none(conn):
+    from buffett_scanner.db import get_analysis
+
+    assert get_analysis(conn, 9999) is None
