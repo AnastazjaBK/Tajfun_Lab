@@ -1,0 +1,36 @@
+name: DIAG Faza 6f Stage 2 validation -- extract results
+
+# Jednorazowy workflow diagnostyczny (Faza 6f). Czyta artefakt
+# `phase6f-validation-result` (wynik LIVE VALIDATION TEST, zero nowej
+# sieci/Claude) i wypisuje do logow pelna treść pol wymaganych przez
+# wlascicielke dla kazdego z 5 tickerow. Narzedzie operacyjne, do
+# usuniecia po uzyciu.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "GH Actions run ID z artefaktem phase6f-validation-result"
+        required: true
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - name: Pobranie wyniku walidacji
+        uses: actions/download-artifact@v4
+        with:
+          name: phase6f-validation-result
+          path: validation-result
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Wypisanie wynikow
+        run: python scripts/extract_stage6f_validation_results.py --db validation-result/live_scan_result.db
+        env:
+          PYTHONPATH: .
