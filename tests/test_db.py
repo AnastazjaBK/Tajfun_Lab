@@ -5,16 +5,31 @@ import pytest
 from buffett_scanner.db import (
     create_user,
     get_fundamentals_periods,
+    get_latest_holding_user_action,
+    get_latest_user_decision,
+    get_latest_user_decisions_for_user,
     get_price_series,
+    get_purchase_transactions,
+    get_position,
+    get_positions_for_user,
+    get_purchase_thesis,
+    get_sale_transactions,
     get_sec_company_facts_cache,
     get_universe_membership_as_of,
+    get_users,
     init_db,
     insert_analysis,
     insert_analysis_sources,
     insert_fundamentals_rows,
+    insert_holding_user_action,
+    insert_position,
     insert_price_rows,
+    insert_purchase_thesis,
+    insert_purchase_transaction,
+    insert_sale_transaction,
     insert_unresolved_ticker,
     insert_universe_membership_conflict,
+    insert_user_decision,
     list_active_tickers,
     upsert_company,
     upsert_derived_metric,
@@ -1283,3 +1298,229 @@ def test_get_analysis_missing_returns_none(conn):
     from buffett_scanner.db import get_analysis
 
     assert get_analysis(conn, 9999) is None
+
+
+# ---------------------------------------------------------------------------
+# Faza 7 (UI + PORTFOLIO V0) -- user_decisions/positions/
+# purchase_transactions/sale_transactions/purchase_thesis/
+# holding_user_actions.
+# ---------------------------------------------------------------------------
+
+
+def test_get_users_returns_all_in_order(conn):
+    id1 = create_user(conn, "Anastazja")
+    id2 = create_user(conn, "Mąż")
+    conn.commit()
+    rows = get_users(conn)
+    assert [r["user_id"] for r in rows] == [id1, id2]
+    assert [r["display_name"] for r in rows] == ["Anastazja", "Mąż"]
+
+
+def test_insert_user_decision_is_append_only_latest_wins(conn):
+    """Test B (specyfikacja właścicielki, Faza 7): korekta decyzji to
+    nowy wiersz, nigdy UPDATE -- `get_latest_user_decision` zwraca
+    NAJNOWSZY status, ale oba wiersze zostają w bazie."""
+    user_id = create_user(conn, "Anastazja")
+    upsert_company(conn, cik="0001652044", name="CBOE Global Markets")
+    insert_user_decision(conn, user_id=user_id, cik="0001652044", status="WATCH")
+    insert_user_decision(conn, user_id=user_id, cik="0001652044", status="REJECT", note="zbyt ryzykowne")
+    conn.commit()
+
+    latest = get_latest_user_decision(conn, user_id=user_id, cik="0001652044")
+    assert latest["status"] == "REJECT"
+    assert latest["note"] == "zbyt ryzykowne"
+
+    all_rows = conn.execute(
+        "SELECT * FROM user_decisions WHERE user_id = ? AND cik = ?", (user_id, "0001652044"),
+    ).fetchall()
+    assert len(all_rows) == 2  # append-only -- WATCH nigdy nie zniknął
+
+
+def test_get_latest_user_decisions_for_user_groups_per_cik(conn):
+    """Test: dwaj różni userzy mogą mieć różny status na tej samej
+    spółce (Decyzja właścicielki, sekcja 16: 'Anastazja może mieć
+    OBSERVING a Mąż REJECTED dla tej samej spółki')."""
+    user_a = create_user(conn, "Anastazja")
+    user_b = create_user(conn, "Mąż")
+    upsert_company(conn, cik="0001652044", name="CBOE Global Markets")
+    upsert_company(conn, cik="0001099800", name="Paychex")
+    insert_user_decision(conn, user_id=user_a, cik="0001652044", status="WATCH")
+    insert_user_decision(conn, user_id=user_a, cik="0001099800", status="REJECT")
+    insert_user_decision(conn, user_id=user_b, cik="0001652044", status="REJECT")
+    conn.commit()
+
+    by_user_a = get_latest_user_decisions_for_user(conn, user_a)
+    by_user_b = get_latest_user_decisions_for_user(conn, user_b)
+    assert by_user_a["0001652044"]["status"] == "WATCH"
+    assert by_user_a["0001099800"]["status"] == "REJECT"
+    assert by_user_b["0001652044"]["status"] == "REJECT"
+    assert "0001099800" not in by_user_b
+
+
+def test_user_decision_rejects_invalid_status(conn):
+    user_id = create_user(conn, "Anastazja")
+    upsert_company(conn, cik="0001652044", name="CBOE Global Markets")
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        insert_user_decision(conn, user_id=user_id, cik="0001652044", status="MAYBE")
+
+
+def test_insert_position_allows_nullable_cik_for_non_sec_instrument(conn):
+    """Test (specyfikacja właścicielki, Faza 7 pkt 5): portfel NIE jest
+    ograniczony do spółek SEC/S&P500 -- Schneider Electric (Euronext
+    Paris) może nie mieć CIK wcale."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(
+        conn, user_id=user_id, ticker="SU.PA", company_name="Schneider Electric SE",
+        exchange="EURONEXT_PARIS", instrument_currency="EUR",
+    )
+    conn.commit()
+    row = get_position(conn, position_id)
+    assert row["cik"] is None
+    assert row["ticker"] == "SU.PA"
+    assert row["exchange"] == "EURONEXT_PARIS"
+    assert row["instrument_currency"] == "EUR"
+    assert row["status"] == "OPEN"
+
+
+def test_get_positions_for_user_never_mixes_users(conn):
+    """Test (specyfikacja właścicielki, sekcja 3): portfel Anastazji i
+    portfel Męża NIE mogą mieszać danych."""
+    user_a = create_user(conn, "Anastazja")
+    user_b = create_user(conn, "Mąż")
+    insert_position(conn, user_id=user_a, ticker="AAPL", company_name="Apple Inc.")
+    insert_position(conn, user_id=user_b, ticker="GSK", company_name="GSK plc")
+    conn.commit()
+
+    positions_a = get_positions_for_user(conn, user_a)
+    positions_b = get_positions_for_user(conn, user_b)
+    assert [p["ticker"] for p in positions_a] == ["AAPL"]
+    assert [p["ticker"] for p in positions_b] == ["GSK"]
+
+
+def test_bonus_purchase_transaction_has_zero_invested_capital(conn):
+    """Test (specyfikacja właścicielki, sekcja 10): BONUS -- shares są
+    normalnie zapisane, own invested capital = 0, nigdy nie udajemy, że
+    użytkownik zapłacił."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BONUS",
+        purchase_date="2026-05-01", shares=3.0, total_invested=0.0, currency="USD",
+    )
+    conn.commit()
+    rows = get_purchase_transactions(conn, position_id)
+    assert len(rows) == 1
+    assert rows[0]["acquisition_type"] == "BONUS"
+    assert rows[0]["shares"] == 3.0
+    assert rows[0]["total_invested"] == 0.0
+    assert rows[0]["price_per_share"] is None
+
+
+def test_purchase_transactions_keep_broker_separate_for_same_position(conn):
+    """Test (specyfikacja właścicielki, sekcja 7): ta sama spółka
+    posiadana jednocześnie na Trade Republic i Revolut pod JEDNĄ
+    position -- dwie odrębne transakcje, broker zachowany na każdej."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BONUS",
+        purchase_date="2026-05-01", shares=3.0, total_invested=0.0, currency="USD",
+    )
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="REVOLUT", acquisition_type="BUY",
+        purchase_date="2026-06-01", shares=2.0, price_per_share=190.0, total_invested=380.0,
+        currency="USD",
+    )
+    conn.commit()
+    rows = get_purchase_transactions(conn, position_id)
+    brokers = {r["broker"] for r in rows}
+    assert brokers == {"TRADE_REPUBLIC", "REVOLUT"}
+
+
+def test_sale_transaction_on_one_broker_does_not_touch_other_brokers_rows(conn):
+    """Test (specyfikacja właścicielki, sekcja 7, "WAŻNA REGUŁA"): SELL
+    z Revolut musi być zapisany jako transakcja Revolut, nigdy jako
+    globalna, bez-brokerowa redukcja -- agregacja per-broker odczytuje to
+    poprawnie w ui/portfolio.py (KROK 2), ten test pilnuje tylko, że dane
+    źródłowe to umożliwiają."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BONUS",
+        purchase_date="2026-05-01", shares=3.0, total_invested=0.0, currency="USD",
+    )
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="REVOLUT", acquisition_type="BUY",
+        purchase_date="2026-06-01", shares=2.0, price_per_share=190.0, total_invested=380.0,
+        currency="USD",
+    )
+    insert_sale_transaction(
+        conn, position_id=position_id, broker="REVOLUT", sale_date="2026-07-01",
+        shares=1.0, sale_price=200.0, currency="USD",
+    )
+    conn.commit()
+    sales = get_sale_transactions(conn, position_id)
+    assert len(sales) == 1
+    assert sales[0]["broker"] == "REVOLUT"
+    # Trade Republic subpozycja (3 BONUS shares) pozostaje nietknięta --
+    # żadnego wiersza sale_transactions z broker=TRADE_REPUBLIC.
+    purchases = get_purchase_transactions(conn, position_id)
+    assert len(purchases) == 2
+
+
+def test_purchase_transaction_rejects_invalid_broker(conn):
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        insert_purchase_transaction(
+            conn, position_id=position_id, broker="XTB", acquisition_type="BUY",
+            purchase_date="2026-05-01", shares=1.0, price_per_share=100.0,
+            total_invested=100.0, currency="USD",
+        )
+
+
+def test_purchase_thesis_unique_per_position_rejects_second_insert(conn):
+    """Immutable snapshot (sekcja 16 design review) -- korekta = nowa
+    pozycja, nigdy edycja tezy."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    insert_purchase_thesis(conn, position_id=position_id, snapshot_json='{"bull_case": ["x"]}')
+    conn.commit()
+    with pytest.raises(sqlite3.IntegrityError):
+        insert_purchase_thesis(conn, position_id=position_id, snapshot_json='{"bull_case": ["y"]}')
+
+
+def test_purchase_thesis_analysis_id_nullable_for_pre_scanner_purchase(conn):
+    """Test (specyfikacja właścicielki, sekcja 14): "Zakup przed analizą
+    scannera -- teza do uzupełnienia." -- analysis_id=None reprezentuje
+    ten przypadek, nigdy fikcyjna teza."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="HMY", company_name="Harmony Gold Mining")
+    conn.commit()
+    insert_purchase_thesis(conn, position_id=position_id)
+    conn.commit()
+    thesis = get_purchase_thesis(conn, position_id)
+    assert thesis["analysis_id"] is None
+    assert thesis["snapshot_json"] is None
+
+
+def test_holding_user_action_append_only_latest_wins(conn):
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    insert_holding_user_action(conn, position_id=position_id, action="HOLD")
+    insert_holding_user_action(conn, position_id=position_id, action="REVIEW_LATER", note="czekam na 10-Q")
+    conn.commit()
+    latest = get_latest_holding_user_action(conn, position_id)
+    assert latest["action"] == "REVIEW_LATER"
+    assert latest["note"] == "czekam na 10-Q"
+    all_rows = conn.execute(
+        "SELECT * FROM holding_user_actions WHERE position_id = ?", (position_id,),
+    ).fetchall()
+    assert len(all_rows) == 2

@@ -5,9 +5,20 @@ ticker_history, price_daily, users. Faza 1 (punkt 1.1): fundamentals_raw
 (format long, surowe dane "as reported"), derived_metrics (wyliczone
 wskaźniki, wersjonowane przez calc_version). Tożsamość spółki to CIK,
 nigdy ticker (patrz sekcja 5 design review — ryzyko "ticker recycling").
-Pozostałe tabele ze zaprojektowanego schematu (analyses, watchlist,
-positions, moduł BIOTECH, ...) należą do późniejszych faz i nie są tu
-tworzone — nie rozszerzamy MVP przed czasem.
+Pozostałe tabele ze zaprojektowanego schematu (analyses, moduł
+BIOTECH, ...) należą do późniejszych faz i nie są tu tworzone — nie
+rozszerzamy MVP przed czasem.
+
+Faza 7 (UI + PORTFOLIO V0, 2026-10-06): `user_decisions`/`positions`/
+`purchase_transactions`/`sale_transactions`/`purchase_thesis`/
+`holding_user_actions` — dokładnie schemat z sekcji 1.1/16 design
+review, z dwoma punktowymi rozszerzeniami zatwierdzonymi przez
+właścicielkę (patrz komentarze przy każdej tabeli): `broker`/
+`acquisition_type` na transakcjach, `positions.cik` NULLABLE.
+`watchlist` celowo NIE tworzone w V0 — żadna funkcja UI jej dziś nie
+wymaga (decyzje kandydatów w pełni pokryte przez `user_decisions`);
+dodać dopiero, gdy pojawi się realna potrzeba (added_price/next_review_
+trigger), nie z góry.
 
 SQLite teraz, Postgres/Supabase od V1 (Decyzja D5) — typy i DDL
 poniżej celowo unikają konstrukcji specyficznych dla SQLite, żeby
@@ -559,6 +570,138 @@ CREATE TABLE IF NOT EXISTS live_scan_candidates (
 );
 CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_run_id ON live_scan_candidates(run_id);
 CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_cache_key ON live_scan_candidates(cache_key);
+
+-- Faza 7 (UI + PORTFOLIO V0) -- decyzje użytkownika na kandydatach
+-- scannera (SHARED analiza spółki, USER-SCOPED decyzja -- sekcja 1.1
+-- design review). Append-only (ten sam wzorzec co `analyses`): korekta
+-- decyzji to nowy wiersz, nigdy UPDATE. "Aktualny" status = NAJNOWSZY
+-- wiersz per (user_id, cik) wg `decided_at`/`decision_id`. Mapowanie
+-- przycisków UI (Decyzja właścicielki): ODRZUCAM=REJECT,
+-- OBSERWUJĘ=WATCH, SPRAWDZAM=SNOOZE, KUPIŁAM/KUPIŁEM=BOUGHT.
+CREATE TABLE IF NOT EXISTS user_decisions (
+    decision_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL REFERENCES users(user_id),
+    cik          TEXT NOT NULL REFERENCES companies(cik),
+    analysis_id  INTEGER REFERENCES analyses(analysis_id),
+    status       TEXT NOT NULL CHECK (status IN ('WATCH','REJECT','SNOOZE','BOUGHT')),
+    decided_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    note         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_user_decisions_user_cik ON user_decisions(user_id, cik);
+
+-- Pozycja = jeden "round trip" posiadania danej spółki PRZEZ JEDNEGO
+-- użytkownika (sekcja 1.1/16 design review). `user_id` jest korzeniem
+-- własności -- ta sama spółka może mieć wiele niezależnych, jednoczesnych
+-- wierszy `positions` dla różnych `user_id`.
+--
+-- `cik` jest NULLABLE (Decyzja właścicielki, Faza 7 pkt 5): portfel NIE
+-- jest ograniczony do spółek SEC/S&P500 -- np. Schneider Electric
+-- (Euronext Paris) może nie mieć CIK wcale. `ticker`/`company_name`/
+-- `exchange`/`instrument_currency` są zachowane WPROST na `positions`
+-- (nie tylko jako join do `companies`, który jest SHARED i scoped do
+-- uniwersum S&P500/spółek kiedyś zeskanowanych) -- to jest tożsamość
+-- INSTRUMENTU z perspektywy posiadania, osobna warstwa od tożsamości
+-- SHARED używanej przez scanner. Gdy `cik` jest ustawione, UI może
+-- DODATKOWO sięgnąć do `companies.name` (SHARED, autorytatywne dla
+-- analiz) -- te pola nie są wzajemnie wyłączne, nie duplikują się
+-- szkodliwie: różne warstwy, różny cel.
+--
+-- `shares_held`/`avg_price`/`current_value`/`unrealized_pl` NIE są
+-- przechowywane jako mutowalne kolumny -- liczone deterministycznie
+-- z transakcji przy każdym odczycie (ui/portfolio.py), żeby wykluczyć
+-- rozjazd cache'u z transakcjami (uzasadnienie w design review, sekcja
+-- 5: przy tej skali narzut obliczeniowy jest pomijalny).
+CREATE TABLE IF NOT EXISTS positions (
+    position_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id             INTEGER NOT NULL REFERENCES users(user_id),
+    cik                 TEXT REFERENCES companies(cik),
+    ticker              TEXT NOT NULL,
+    company_name        TEXT NOT NULL,
+    exchange            TEXT,
+    instrument_currency TEXT,
+    status              TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN','CLOSED')),
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_positions_user_id ON positions(user_id);
+
+-- Transakcje -- WYŁĄCZNIE INSERT, nigdy UPDATE/DELETE (audit trail,
+-- sekcja 11 design review: korekta błędu = nowy wiersz + `superseded_by`
+-- na starym, nigdy edycja).
+--
+-- `broker`/`acquisition_type` to rozszerzenia względem oryginalnego
+-- projektu sekcji 5 (Decyzja właścicielki, Faza 7 pkt 3/4):
+-- `broker` jest właściwością TRANSAKCJI, nie spółki/pozycji -- ta sama
+-- spółka może być posiadana jednocześnie na kilku brokerach pod JEDNĄ
+-- `position_id` (shares per (position_id, broker) liczone w
+-- ui/portfolio.py, PRZED agregacją do łącznej ekspozycji -- SELL na
+-- jednym brokerze nigdy nie zmniejsza subpozycji innego brokera).
+-- `acquisition_type='BONUS'`: `shares` zwiększają pozycję normalnie,
+-- `total_invested=0` (nigdy nie udajemy, że użytkownik zapłacił),
+-- `price_per_share` może być NULL (brak realnej ceny zapłaconej).
+CREATE TABLE IF NOT EXISTS purchase_transactions (
+    transaction_id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id       INTEGER NOT NULL REFERENCES positions(position_id),
+    broker            TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    acquisition_type  TEXT NOT NULL CHECK (acquisition_type IN ('BUY','BONUS')),
+    purchase_date     TEXT NOT NULL,
+    shares            REAL NOT NULL,
+    price_per_share   REAL,
+    total_invested    REAL NOT NULL,
+    currency          TEXT NOT NULL,
+    fees              REAL,
+    note              TEXT,
+    superseded_by     INTEGER REFERENCES purchase_transactions(transaction_id),
+    created_at        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_purchase_transactions_position_id ON purchase_transactions(position_id);
+
+-- Patrz komentarz przy `purchase_transactions` (append-only, `broker`
+-- rozszerzenie Fazy 7 pkt 4 -- dla symetrii, żeby SELL wiedział, z
+-- którego brokera zmniejsza subpozycję).
+CREATE TABLE IF NOT EXISTS sale_transactions (
+    transaction_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id     INTEGER NOT NULL REFERENCES positions(position_id),
+    broker          TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    sale_date       TEXT NOT NULL,
+    shares          REAL NOT NULL,
+    sale_price      REAL NOT NULL,
+    currency        TEXT NOT NULL,
+    fees            REAL,
+    note            TEXT,
+    superseded_by   INTEGER REFERENCES sale_transactions(transaction_id),
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_sale_transactions_position_id ON sale_transactions(position_id);
+
+-- Immutable snapshot w momencie BOUGHT (sekcja 16 design review).
+-- `analysis_id` NULL = "zakup przed analizą scannera" -- UI pokazuje
+-- wtedy "Zakup przed analizą scannera -- teza do uzupełnienia.", nigdy
+-- fikcyjną historyczną tezę.
+CREATE TABLE IF NOT EXISTS purchase_thesis (
+    thesis_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id    INTEGER NOT NULL UNIQUE REFERENCES positions(position_id),
+    analysis_id    INTEGER REFERENCES analyses(analysis_id),
+    snapshot_json  TEXT,
+    created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Append-only audit trail (ten sam wzorzec co `user_decisions`) --
+-- "aktualny" status pozycji na karcie UI = NAJNOWSZY wiersz per
+-- `position_id`. `exit_review_report_id` istnieje w docelowym projekcie
+-- (sekcja 16) jako FK do `exit_review_reports` -- Exit Review jest poza
+-- zakresem Fazy 7 (UI + PORTFOLIO V0), więc ta kolumna jest tu obecna
+-- (zgodność ze schematem docelowym) ale ZAWSZE NULL w V0.
+CREATE TABLE IF NOT EXISTS holding_user_actions (
+    action_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id            INTEGER NOT NULL REFERENCES positions(position_id),
+    action                 TEXT NOT NULL CHECK (action IN ('HOLD','REDUCE','SOLD','REVIEW_LATER')),
+    decided_at             TEXT NOT NULL DEFAULT (datetime('now')),
+    note                   TEXT,
+    exit_review_report_id  INTEGER,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_holding_user_actions_position_id ON holding_user_actions(position_id);
 """
 
 
@@ -1622,3 +1765,214 @@ def get_live_scan_run_usage_summary(conn: sqlite3.Connection, run_id: str) -> di
             (summary["total_output_tokens"] or 0) + (summary["total_repair_output_tokens"] or 0)
         )
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Faza 7 (UI + PORTFOLIO V0) — CRUD dla user_decisions/positions/
+# purchase_transactions/sale_transactions/purchase_thesis/
+# holding_user_actions. Ten sam wzorzec co resztę pliku: proste
+# INSERT/SELECT, zero logiki biznesowej (liczenie pozycji "on-read"
+# mieszka w ui/portfolio.py, nie tutaj).
+# ---------------------------------------------------------------------------
+
+
+def get_users(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    return conn.execute("SELECT * FROM users ORDER BY user_id").fetchall()
+
+
+def insert_user_decision(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    cik: str,
+    status: str,
+    analysis_id: int | None = None,
+    note: str | None = None,
+) -> int:
+    """Append-only (Faza 7) — korekta decyzji to nowy wiersz, nigdy
+    UPDATE. `get_latest_user_decision` czyta najnowszy wiersz per
+    (user_id, cik)."""
+    cur = conn.execute(
+        """
+        INSERT INTO user_decisions (user_id, cik, analysis_id, status, note)
+        VALUES (?, ?, ?, ?, ?)
+        """,
+        (user_id, cik, analysis_id, status, note),
+    )
+    return cur.lastrowid
+
+
+def get_latest_user_decision(conn: sqlite3.Connection, *, user_id: int, cik: str) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM user_decisions WHERE user_id = ? AND cik = ?
+        ORDER BY decision_id DESC LIMIT 1
+        """,
+        (user_id, cik),
+    ).fetchone()
+
+
+def get_latest_user_decisions_for_user(conn: sqlite3.Connection, user_id: int) -> dict[str, sqlite3.Row]:
+    """Najnowsza decyzja PER cik dla tego usera -- `MAX(decision_id)` per
+    grupa (SQLite: podzapytanie, nie window function, dla zgodności ze
+    starszymi wersjami SQLite używanymi w tym projekcie)."""
+    rows = conn.execute(
+        """
+        SELECT ud.* FROM user_decisions ud
+        WHERE ud.user_id = ? AND ud.decision_id = (
+            SELECT MAX(decision_id) FROM user_decisions
+            WHERE user_id = ud.user_id AND cik = ud.cik
+        )
+        """,
+        (user_id,),
+    ).fetchall()
+    return {r["cik"]: r for r in rows}
+
+
+def insert_position(
+    conn: sqlite3.Connection,
+    *,
+    user_id: int,
+    ticker: str,
+    company_name: str,
+    cik: str | None = None,
+    exchange: str | None = None,
+    instrument_currency: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO positions (user_id, cik, ticker, company_name, exchange, instrument_currency)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (user_id, cik, ticker, company_name, exchange, instrument_currency),
+    )
+    return cur.lastrowid
+
+
+def get_positions_for_user(conn: sqlite3.Connection, user_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM positions WHERE user_id = ? ORDER BY created_at", (user_id,)
+    ).fetchall()
+
+
+def get_position(conn: sqlite3.Connection, position_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM positions WHERE position_id = ?", (position_id,)
+    ).fetchone()
+
+
+def insert_purchase_transaction(
+    conn: sqlite3.Connection,
+    *,
+    position_id: int,
+    broker: str,
+    acquisition_type: str,
+    purchase_date: str,
+    shares: float,
+    total_invested: float,
+    currency: str,
+    price_per_share: float | None = None,
+    fees: float | None = None,
+    note: str | None = None,
+) -> int:
+    """`acquisition_type='BONUS'` -- wołający MUSI przekazać
+    `total_invested=0` (Decyzja właścicielki, Faza 7 pkt 3: "nigdy nie
+    udawaj, że użytkownik zapłacił za te akcje") -- ta funkcja nie
+    wymusza tego sama, bo nie zna semantyki, tylko zapisuje to, co
+    dostanie (wołający, `ui/`, jest odpowiedzialny za tę regułę)."""
+    cur = conn.execute(
+        """
+        INSERT INTO purchase_transactions (
+            position_id, broker, acquisition_type, purchase_date, shares,
+            price_per_share, total_invested, currency, fees, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            position_id, broker, acquisition_type, purchase_date, shares,
+            price_per_share, total_invested, currency, fees, note,
+        ),
+    )
+    return cur.lastrowid
+
+
+def get_purchase_transactions(conn: sqlite3.Connection, position_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM purchase_transactions WHERE position_id = ? ORDER BY purchase_date",
+        (position_id,),
+    ).fetchall()
+
+
+def insert_sale_transaction(
+    conn: sqlite3.Connection,
+    *,
+    position_id: int,
+    broker: str,
+    sale_date: str,
+    shares: float,
+    sale_price: float,
+    currency: str,
+    fees: float | None = None,
+    note: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO sale_transactions (
+            position_id, broker, sale_date, shares, sale_price, currency, fees, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (position_id, broker, sale_date, shares, sale_price, currency, fees, note),
+    )
+    return cur.lastrowid
+
+
+def get_sale_transactions(conn: sqlite3.Connection, position_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM sale_transactions WHERE position_id = ? ORDER BY sale_date",
+        (position_id,),
+    ).fetchall()
+
+
+def insert_purchase_thesis(
+    conn: sqlite3.Connection,
+    *,
+    position_id: int,
+    analysis_id: int | None = None,
+    snapshot_json: str | None = None,
+) -> int:
+    """`position_id` jest UNIQUE w schemacie -- druga teza dla tej samej
+    pozycji rzuci `sqlite3.IntegrityError` (immutable snapshot, sekcja
+    16 design review: korekta = nowa pozycja, nie edycja tezy)."""
+    cur = conn.execute(
+        """
+        INSERT INTO purchase_thesis (position_id, analysis_id, snapshot_json)
+        VALUES (?, ?, ?)
+        """,
+        (position_id, analysis_id, snapshot_json),
+    )
+    return cur.lastrowid
+
+
+def get_purchase_thesis(conn: sqlite3.Connection, position_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM purchase_thesis WHERE position_id = ?", (position_id,)
+    ).fetchone()
+
+
+def insert_holding_user_action(
+    conn: sqlite3.Connection, *, position_id: int, action: str, note: str | None = None,
+) -> int:
+    cur = conn.execute(
+        "INSERT INTO holding_user_actions (position_id, action, note) VALUES (?, ?, ?)",
+        (position_id, action, note),
+    )
+    return cur.lastrowid
+
+
+def get_latest_holding_user_action(conn: sqlite3.Connection, position_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        """
+        SELECT * FROM holding_user_actions WHERE position_id = ?
+        ORDER BY action_id DESC LIMIT 1
+        """,
+        (position_id,),
+    ).fetchone()
