@@ -669,6 +669,12 @@ CREATE TABLE IF NOT EXISTS sale_transactions (
     currency        TEXT NOT NULL,
     fees            REAL,
     note            TEXT,
+    -- Obecne w docelowym schemacie (sekcja 16 design review) --
+    -- ZAREZERWOWANE, nieużywane w V0: `ui/portfolio.py` liczy cost
+    -- basis WYŁĄCZNIE metodą average-cost (proporcjonalna redukcja
+    -- invested przy sprzedaży), nie czyta tej kolumny. Obecna tu, żeby
+    -- przyszłe FIFO/LIFO/specific-lot nie wymagało kolejnej migracji.
+    cost_basis_method_used TEXT,
     superseded_by   INTEGER REFERENCES sale_transactions(transaction_id),
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -764,6 +770,11 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("live_scan_candidates", "llm_repair_cache_read_input_tokens", "INTEGER"),
     ("live_scan_candidates", "llm_repair_thinking_tokens", "INTEGER"),
     ("live_scan_candidates", "llm_repair_service_tier", "TEXT"),
+    # Faza 7 (2026-10-06, UI + PORTFOLIO V0) — zarezerwowana na przyszłość
+    # kolumna z docelowego schematu (sekcja 16 design review), dodana
+    # PO tym, jak `sale_transactions` mogła już istnieć w plikach DB
+    # zseedowanych wcześniejszą wersją tej samej migracji w tej fazie.
+    ("sale_transactions", "cost_basis_method_used", "TEXT"),
 )
 
 

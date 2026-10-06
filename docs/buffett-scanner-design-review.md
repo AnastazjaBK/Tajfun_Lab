@@ -2415,6 +2415,16 @@ Zainstalowano `streamlit==1.65.0` + jednorazowo `playwright` (tylko do tego test
 
 Zero zmian kodu produkcyjnego scanner'a w tym kroku. Zero nowych wywołań Claude API. Zero zmian danych.
 
+### KROK 1 — data model (zrobiony)
+
+Nowe tabele `user_decisions`/`positions`/`purchase_transactions`/`sale_transactions`/`purchase_thesis`/`holding_user_actions`, dokładnie schemat z sekcji 1.1/16 wyżej, z dwoma zatwierdzonymi rozszerzeniami: `broker` (`TRADE_REPUBLIC`/`REVOLUT`/`OTHER`) na obu tabelach transakcji, `acquisition_type` (`BUY`/`BONUS`) na `purchase_transactions`, `positions.cik` NULLABLE. `watchlist` celowo nieimplementowane w V0 (`user_decisions` w pełni pokrywa decyzje kandydatów — brak dziś realnej potrzeby `added_price`/`next_review_trigger`). `sale_transactions.cost_basis_method_used` zarezerwowane (zgodność ze schematem docelowym), NIE czytane przez V0 — `ui/portfolio.py` liczy cost basis wyłącznie metodą average-cost. 13 nowych testów `test_db.py`. Pełny zestaw: **686 passed, 1 skipped** (było 673).
+
+### KROK 2 — read-only queries + liczenie pozycji "on-read" (zrobiony)
+
+`buffett_scanner/ui/portfolio.py` (zero I/O, czyste funkcje): `compute_broker_currency_subpositions` grupuje transakcje po (broker, currency) i przetwarza je **chronologicznie** (scalony, sortowany po dacie stream zakupów+sprzedaży — nie "najpierw wszystkie zakupy, potem wszystkie sprzedaże"), żeby sprzedaż zawsze redukowała `invested` względem bazy akcji posiadanej W MOMENCIE sprzedaży (average cost), nigdy względem późniejszych zakupów. SELL na jednym brokerze nigdy nie dotyka subpozycji innego brokera (Decyzja właścicielki, Faza 7 pkt 4) — potwierdzone testem z BONUS na Trade Republic nietkniętym przez SELL na Revolut. Waluty nigdy sumowane — wszystkie pieniężne wyniki to słowniki `{currency: value}` (`merge_currency_dicts`).
+
+`buffett_scanner/ui/queries.py`: `get_latest_live_scan_run` — `run_id LIKE 'live-scan-%'`, ignoruje `validation-*` (potwierdzone testem z "nowszym" wpisem walidacyjnym, który mimo to NIE jest wybierany). `get_synthesis_rows` — jeden wiersz per finalista shortlisty niezależnie od `llm_status` (FAILED zachowuje deterministyczne dane/cenę/wycenę, tylko pola jakościowe są `None`). `get_current_price_for_position` — ostatni dzienny close z `price_daily` dla pozycji z `cik`; `(None, None)` dla pozycji bez `cik` (np. Schneider Electric) — nigdy zgadywana cena. 16 nowych testów (`test_ui_portfolio.py`, `test_ui_queries.py`), w tym test na nieprawidłową (purchases-then-sales) kolejność, który by wykrył błąd w average-cost, gdyby się wkradł. Pełny zestaw: **702 passed, 1 skipped** (było 686).
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.
