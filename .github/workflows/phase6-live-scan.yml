@@ -17,6 +17,18 @@ name: Phase 6 Live End-to-End Scan (CURRENT MARKET, domkniecie MVP V0)
 # Claude API (jakosciowa analiza + anti-bias) dla kazdego kandydata,
 # ktory przejdzie decline screening + prefilter. `sample` pozwala na
 # maly test (kilka tickerow) przed pelnym runem na calym S&P 500.
+#
+# timeout-minutes: 350 (nie domyslne 180) -- podniesione po realnym
+# znalezisku 2026-10-05: pelny run na aktualnym rynku wytypowal
+# 150/501 tickerow (duzo wiecej niz oczekiwano), kazdy z nich wymaga
+# sekwencyjnie fundamentals + source packet (SEC) + 1 wywolania Claude
+# API -- pierwszy pelny przebieg z pelnym saldem Anthropic (run
+# 37372436386) zostal ucięty dokladnie na starym limicie 180 min
+# (179m54s), mimo ze kod dziala poprawnie (potwierdzone wczesniejszym
+# pelnym sukcesem na run 37355677202, 79 min, ograniczonym tylko
+# wyczerpaniem kredytu Anthropic w polowie, nie timeoutem). 350 min =
+# ta sama wartosc, co `phase5-3c-baseline-walk-forward.yml` dla
+# analogicznie dlugich, pelnych-uniwersum runow.
 
 on:
   workflow_dispatch:
@@ -45,7 +57,7 @@ on:
 jobs:
   live-scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
