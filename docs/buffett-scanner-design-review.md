@@ -2479,6 +2479,22 @@ Cztery przyciski na karcie kandydata (ODRZUCAM/OBSERWUJĘ/SPRAWDZAM/KUPIŁAM-KUP
 
 5 nowych testów (`test_ui_instrument_lookup.py`). Pełny zestaw: **720 passed, 1 skipped** (było 715).
 
+### KROK 8 — "Jak to czytać?" (glosariusz pojęć, zrobiony) — ostatni krok zaakceptowanego planu
+
+`buffett_scanner/ui/labels.py`: nowa stała `GLOSSARY` — 10 par (termin_profesjonalny, wyjaśnienie_prostym_językiem), dokładnie pojęcia z sekcji 17 specyfikacji: DCF, Margines bezpieczeństwa (MoS), scenariusze Pesymistyczny/Bazowy/Optymistyczny (Bear/Base/Bull), FCF, Dług netto/EBITDA, Hard gate, Bull Case, Bear Case, Thesis Invalidation, Biggest Unknown. Zgodnie z sekcją 17/18: profesjonalny termin NIE jest usuwany (zostaje w nagłówku każdego wpisu), tylko dodane wyjaśnienie obok prostym językiem — żadnego "DCF" zastąpionego eufemizmem, który uniemożliwiłby rozpoznanie pojęcia w innych miejscach raportu.
+
+`app.py`: `_render_glossary()` — `st.expander("Jak to czytać? (słowniczek pojęć)")` zwinięty domyślnie, umieszczony zaraz pod tytułem strony, przed selectorem użytkownika — widoczny niezależnie od wybranego użytkownika/pozycji, bo wyjaśnia pojęcia używane w całym UI (kartach kandydatów), nie tylko w jednym miejscu. To materiał referencyjny, nie element nawigacji — nie koliduje z zakazem accordionów w nawigacji z sekcji 2 (ten zakaz dotyczył wyłącznie przełączania między spółkami/zakładkami).
+
+2 nowe testy (`test_ui_labels.py`): pokrycie wszystkich 10 pojęć z sekcji 17 (pilnuje, żeby żadne nie zniknęło przy przyszłej edycji) + sanity check, że każdy wpis ma niepuste wyjaśnienie dłuższe niż gola etykieta.
+
+**Weryfikacja empiryczna** (ten sam wzorzec Playwright co KROK 0/3/4/5/6/7): załadowanie strony bez błędu, rozwinięcie słowniczka kliknięciem, potwierdzenie obecności wszystkich 10 terminów w wyrenderowanej treści, zero Traceback/Exception. Zrzut ekranu potwierdza czytelny układ (pogrubiony termin + wyjaśnienie, jeden wpis na akapit).
+
+Pełny zestaw: **722 passed, 1 skipped** (było 720).
+
+---
+
+**Status Fazy 7 (UI + PORTFOLIO V0): wszystkie 8 kroków zaakceptowanego planu (KROK 0–8) ukończone, zweryfikowane empirycznie, zacommitowane i wypchnięte.** Zgodnie ze standing constraint z całego tego etapu: żadne rzeczywiste transakcje właścicielki nie zostały nigdzie wpisane — formularz z KROK 7 czeka na jej własne, ręczne wprowadzenie danych z brokerów. Zero zmian metodologii inwestycyjnej/scoringu/DCF/decline screeningu w całej Fazie 7. Zero nieplanowanych wywołań płatnego Claude API.
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.

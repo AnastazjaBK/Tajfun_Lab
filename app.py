@@ -43,6 +43,7 @@ from buffett_scanner.db import (
 )
 from buffett_scanner.ui.instrument_lookup import InstrumentLookupResult, lookup_instrument
 from buffett_scanner.ui.labels import (
+    GLOSSARY,
     METHODOLOGY_DISCLAIMER,
     acquisition_types_label,
     analysis_status_label,
@@ -102,6 +103,18 @@ def _format_currency_dict(values: dict[str, float]) -> str:
     if not values:
         return "—"
     return " | ".join(f"{amount:,.0f} {currency}" for currency, amount in sorted(values.items()))
+
+
+def _render_glossary() -> None:
+    """Sekcja 17/18 specyfikacji UI: "Jak to czytać?" -- wyjaśnienie
+    pojęć (DCF/MoS/Bear-Base-Bull/FCF/dług netto-EBITDA/hard gate/Bull
+    Case/Bear Case/Thesis Invalidation/Biggest Unknown) prostym
+    językiem, BEZ usuwania profesjonalnych terminów. Zwinięte domyślnie
+    (`st.expander`) -- materiał referencyjny, nie nawigacja (sekcja 2
+    specyfikacji dotyczy wyłącznie zakładek nawigacyjnych, nie tego)."""
+    with st.expander("Jak to czytać? (słowniczek pojęć)"):
+        for term, explanation in GLOSSARY:
+            st.markdown(f"**{term}** — {explanation}")
 
 
 def _render_user_picker(conn) -> dict | None:
@@ -728,6 +741,7 @@ def main() -> None:
     conn = connect(DB_PATH)
 
     st.title("Buffett Opportunity Scanner")
+    _render_glossary()
     user = _render_user_picker(conn)
 
     latest_run_id, synthesis_rows = _render_synthesis_table(conn)

@@ -67,6 +67,69 @@ METHODOLOGY_DISCLAIMER = (
 )
 
 
+# Sekcja 17/18 specyfikacji UI: "Jak to czytać?" -- wyjaśnienie pojęć
+# prostym językiem, BEZ usuwania profesjonalnych terminów (żeby
+# właścicielka mogła nadal rozpoznać je w raportach/analizach). Każdy
+# wpis to (termin_profesjonalny, wyjaśnienie_prostym_językiem).
+GLOSSARY: tuple[tuple[str, str], ...] = (
+    (
+        "DCF (zdyskontowane przepływy pieniężne)",
+        "Metoda szacowania wartości firmy na podstawie tego, ile gotówki firma "
+        "prawdopodobnie wygeneruje w przyszłości, przeliczonej na dzisiejszą wartość. "
+        "To MODEL oparty na założeniach, nie pomiar — inna firma licząca inaczej może dostać inny wynik.",
+    ),
+    (
+        "Margines bezpieczeństwa (Margin of Safety, MoS)",
+        "Różnica między tym, ile model szacuje, że firma jest warta, a tym, ile kosztuje dziś na giełdzie. "
+        "Dodatni margines = cena rynkowa niższa od szacowanej wartości według modelu "
+        "(ale to wciąż szacunek, nie gwarancja okazji).",
+    ),
+    (
+        "Scenariusze Pesymistyczny/Bazowy/Optymistyczny (Bear/Base/Bull)",
+        "Model liczy wycenę trzykrotnie, przy różnych założeniach: ostrożnych (Pesymistyczny), "
+        "najbardziej prawdopodobnych w ocenie modelu (Bazowy) i korzystnych (Optymistyczny) — "
+        "żeby pokazać rozpiętość możliwych wyników, zamiast jednej, fałszywie precyzyjnej liczby.",
+    ),
+    (
+        "FCF (wolne przepływy pieniężne, Free Cash Flow)",
+        "Gotówka, jaka zostaje firmie po opłaceniu bieżącej działalności i inwestycji w swój biznes — "
+        "to, co firma realnie mogłaby wypłacić właścicielom, spłacić dług albo zainwestować dalej.",
+    ),
+    (
+        "Dług netto / EBITDA",
+        "Dług firmy pomniejszony o jej gotówkę, podzielony przez w przybliżeniu roczny zysk operacyjny. "
+        "Pokazuje, jak wiele \"lat\" takiego zysku zajęłoby spłacenie całego zadłużenia — "
+        "wyższa liczba = firma bardziej zadłużona względem tego, ile zarabia.",
+    ),
+    (
+        "Hard gate (twarda bramka)",
+        "Zasada eliminująca spółkę z dalszej analizy automatycznie, bez oceny jakościowej, gdy dane "
+        "deterministyczne (np. bardzo wysokie zadłużenie) wskazują na zbyt duże ryzyko — "
+        "żeby nie tracić czasu na pogłębioną analizę spółek odpadających już na starcie.",
+    ),
+    (
+        "Bull Case (argumenty za)",
+        "Najmocniejsze powody, dla których inwestycja może się opłacić, zidentyfikowane przez model "
+        "na podstawie dostępnych danych — nie obietnica, że tak się stanie.",
+    ),
+    (
+        "Bear Case (argumenty przeciw)",
+        "Najpoważniejsze ryzyka i powody, dla których inwestycja może się NIE opłacić — "
+        "celowo pokazywane obok argumentów za, żeby uniknąć jednostronnego obrazu.",
+    ),
+    (
+        "Thesis Invalidation (co obaliłoby tezę)",
+        "Konkretne zdarzenia lub dane, które — gdyby się pojawiły — oznaczałyby, że pierwotne "
+        "uzasadnienie inwestycji się nie sprawdziło. Warto je obserwować PO zakupie, nie tylko przed.",
+    ),
+    (
+        "Biggest Unknown (największa niewiadoma)",
+        "Najważniejsza rzecz, której model NIE wie albo nie jest w stanie ocenić na podstawie dostępnych "
+        "danych, a która mogłaby zmienić ocenę spółki — uczciwe przyznanie granicy tego, co analiza pokrywa.",
+    ),
+)
+
+
 def analysis_status_label(llm_status: str) -> str:
     return ANALYSIS_STATUS_LABELS.get(llm_status, llm_status)
 

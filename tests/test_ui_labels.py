@@ -5,6 +5,7 @@ wywala wyjątku (fallback na surowy string, nigdy crash UI)."""
 from __future__ import annotations
 
 from buffett_scanner.ui.labels import (
+    GLOSSARY,
     acquisition_types_label,
     analysis_status_label,
     broker_label,
@@ -58,3 +59,24 @@ def test_acquisition_types_label_joins_mixed_and_handles_empty():
     assert acquisition_types_label(()) == "—"
     assert acquisition_types_label(("BUY",)) == "Zakup"
     assert acquisition_types_label(("BONUS", "BUY")) == "Bonus + Zakup"
+
+
+def test_glossary_covers_all_terms_from_spec_section_17():
+    """Sekcja 17 specyfikacji UI wylicza 10 konkretnych pojęć -- ten
+    test pilnuje, żeby żadne nie zniknęło przy przyszłej edycji."""
+    required_substrings = [
+        "DCF", "Margines bezpieczeństwa", "Bear/Base/Bull", "FCF",
+        "Dług netto", "Hard gate", "Bull Case", "Bear Case",
+        "Thesis Invalidation", "Biggest Unknown",
+    ]
+    terms = " | ".join(term for term, _ in GLOSSARY)
+    for substring in required_substrings:
+        assert substring in terms, f"Brak pojęcia '{substring}' w GLOSSARY"
+
+
+def test_glossary_entries_are_nonempty_term_and_explanation_pairs():
+    assert len(GLOSSARY) == 10
+    for term, explanation in GLOSSARY:
+        assert term.strip()
+        assert explanation.strip()
+        assert len(explanation) > 20  # nie goła etykieta bez wyjaśnienia
