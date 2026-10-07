@@ -142,6 +142,7 @@ from buffett_scanner.scanner import PriceBar, PriceChangeSnapshot, compute_price
 from buffett_scanner.scoring import compute_score
 from buffett_scanner.valuation import compute_valuation
 from buffett_scanner.sector_classification import classify_sic_to_sector_profile
+from buffett_scanner.snapshot_publish import GhReleaseClient, publish_snapshot
 from buffett_scanner.sources import VerifiedSource, build_sec_source_packet
 from buffett_scanner.universe_cik_reconciliation import (
     MATCH_ALGORITHM_VERSION,
@@ -2335,6 +2336,26 @@ def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_publish_snapshot(args: argparse.Namespace) -> int:
+    """Faza 8 Etap B: publikacja `args.db` jako GitHub Release asset --
+    TYLKO gdy jego `run_id` jest prawdziwym live-scanem (konwencja
+    `live-scan-*`, nigdy `validation-*`). Zero zmian metodologii/
+    scoringu -- czyta już gotowy plik bazy, nic nie przelicza."""
+    client = GhReleaseClient(repo=args.repo)
+    result = publish_snapshot(args.db, gh_client=client, work_dir=args.work_dir)
+    if result is None:
+        print(
+            f"Pominięto publikację: {args.db} nie zawiera prawdziwego live-scanu "
+            "(pusta baza albo run_id nie zaczyna się od 'live-scan-')."
+        )
+        return 0
+    print(
+        f"Opublikowano snapshot: run_id={result['run_id']} release_tag={result['release_tag']} "
+        f"sha256={result['sha256']} shortlist_size={result['shortlist_size']}"
+    )
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -2500,6 +2521,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Lista CIK po przecinku — ogranicza zakres (mały test przed pełnym kandydatem).",
     )
     p_calibration.set_defaults(func=cmd_run_calibration_candidate)
+
+    p_publish_snapshot = sub.add_parser("publish-snapshot")
+    p_publish_snapshot.add_argument(
+        "--repo", default=None,
+        help="owner/repo dla `gh release` (domyślnie: auto-wykrycie przez gh z git remote).",
+    )
+    p_publish_snapshot.add_argument(
+        "--work-dir", default=".",
+        help="Katalog roboczy na tymczasowy plik pointer.json przed uploadem.",
+    )
+    p_publish_snapshot.set_defaults(func=cmd_publish_snapshot)
 
     return parser
 

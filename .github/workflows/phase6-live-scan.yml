@@ -85,6 +85,8 @@ jobs:
   live-scan:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    permissions:
+      contents: write  # wymagane przez `gh release create/upload` (Faza 8 Etap B)
     steps:
       - uses: actions/checkout@v4
 
@@ -127,4 +129,16 @@ jobs:
             reports/
             live_scan_result.db
           if-no-files-found: warn
+
+      # Faza 8 Etap B: trwała publikacja (NIE 30-dniowy artefakt wyżej)
+      # jako GitHub Release -- źródło danych SHARED dla hostowanej
+      # appki Streamlit (Etap C). Tylko gdy run-live-scan się powiodło
+      # (brak `if:` = domyślne `success()`) -- nigdy nie publikuje
+      # przerwanego/niekompletnego runu jako "najnowszy". `publish-
+      # snapshot` sam pomija runy inne niż `live-scan-*` (nigdy
+      # validation-*), więc jest bezpieczny nawet przy `rank_only`.
+      - name: Publikacja snapshotu scannera (GitHub Release)
+        run: python -m buffett_scanner.cli --db live_scan_result.db publish-snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           retention-days: 30

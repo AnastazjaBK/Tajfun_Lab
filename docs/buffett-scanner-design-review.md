@@ -2529,6 +2529,25 @@ Nowy, RÓWNOLEGŁY moduł `buffett_scanner/pg_store.py` — `buffett_scanner/db.
 
 15 nowych testów. Pełny zestaw bez lokalnego Postgresa (tak jak w normalnym CI): **730 passed, 14 skipped** (było 728 passed, 1 skipped — 13 nowych testów integracyjnych poprawnie pomijanych bez `TEST_POSTGRES_URL`, 2 testy modułu nie wymagające żywej bazy uruchamiają się zawsze). Z żywym Postgresem: **743 passed, 1 skipped**.
 
+### Etap B — publikacja i wersjonowanie snapshotu scannera (zrobiony)
+
+Nowy moduł `buffett_scanner/snapshot_publish.py` + subkomenda `publish-snapshot` w `cli.py`. Dwupoziomowa publikacja na GitHub Releases (NIE branch z binarnym SQLite — wprost odrzucone przez właścicielkę; NIE 30-dniowy artefakt GitHub Actions — zostaje jako dodatkowe wygodne narzędzie debugowania, ale przestaje być jedynym miejscem, gdzie żyją dane):
+
+1. **Immutable release per run**, tag `scanner-snapshot-<run_id>` — tworzony RAZ, nigdy nadpisywany; pozwala wrócić do dowolnego historycznego runu po jego `run_id` (sekcja "możliwy do zweryfikowania przed użyciem").
+2. **Mutable "pointer" release**, stały tag `scanner-snapshot-latest` — jego jedyny asset (`pointer.json`: `run_id`/`run_date`/`release_tag`/`sha256`/`shortlist_size`/`published_at`) jest nadpisywany (`gh release upload --clobber`) przy każdej publikacji. UI (Etap C) czyta najpierw ten mały plik, dzięki czemu zawsze wie DOKŁADNIE, jaki `run_id` aktualnie pokazuje (wymóg właścicielki), zamiast zgadywać/listować wszystkie release'y.
+
+**Weryfikacja integralności:** SHA256 pliku `.db` liczone w momencie publikacji, zapisywane zarówno w notatkach immutable release'u, jak i w `pointer.json` — Etap C (pobieranie przez UI) będzie liczyć SHA256 pobranego pliku i porównywać przed otwarciem, żeby ucięty/uszkodzony download nigdy nie trafił do Streamlit jako dane scannera.
+
+**Nigdy validation-* jako live market scan (test kluczowy):** `should_publish_as_live_scan` używa DOKŁADNIE tej samej konwencji co `ui/queries.get_latest_live_scan_run` (`run_id` zaczyna się od `live-scan-`) — `publish_snapshot` na bazie z `validation-*` (albo jakimkolwiek innym run_id) cicho pomija publikację, zero wywołań `gh`, zero ryzyka, że diagnostyka z Fazy 6f/6g/6h kiedykolwiek zostanie potraktowana jako najnowszy wynik skanu rynku.
+
+**Błąd realnie znaleziony i naprawiony podczas pisania testów (nie "na sucho"):** pierwsza wersja `read_latest_run_summary` używała `ORDER BY created_at DESC LIMIT 1` (ten sam wzorzec co `ui/queries.get_latest_live_scan_run`) — przy dwóch wierszach wstawionych w tej samej sekundzie (rozdzielczość `created_at`) kolejność była niejednoznaczna, co ujawnił własny test (`test_publish_snapshot_updates_pointer_...`). Naprawione dodaniem `rowid DESC` jako tiebreaka (niezawodny, monotoniczny dla zwykłej tabeli SQLite) — w praktyce każdy `live_scan_result.db` z GitHub Actions ma i tak dokładnie jeden wiersz (tworzony od zera `init-db` + `run-live-scan` w jednym jobie), ale funkcja jest teraz poprawna też dla przypadku z historią.
+
+`.github/workflows/phase6-live-scan.yml`: dodany `permissions: contents: write` (wymagane przez `gh release`) na poziomie joba + nowy krok "Publikacja snapshotu scannera" po `LIVE END-TO-END RUN`, bez `if: always()` (domyślne `success()` — przerwany/nieudany run nigdy nie publikuje się jako "najnowszy"), używa WYŁĄCZNIE wbudowanego `secrets.GITHUB_TOKEN` (zero nowego sekretu).
+
+12 nowych testów (`test_snapshot_publish.py`), w pełni mockujących `gh` (fejkowa funkcja `run` zamiast `subprocess.run`, zero sieci/prawdziwego repo) — w tym dowód, że drugi live-scan NIGDY nie nadpisuje poprzedniego immutable release'u (tworzy nowy per `run_id`, nadpisuje wyłącznie pointer), oraz że `gh` w ogóle nie jest wołane dla runu walidacyjnego. Dodatkowy smoke-test całej ścieżki CLI (`--db ... publish-snapshot`) z zamockowanym `GhReleaseClient`, potwierdzający poprawne przekazanie `args.db`/`args.repo`/`args.work_dir`.
+
+Pełny zestaw: **742 passed, 14 skipped** (było 730 passed, 14 skipped).
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.
