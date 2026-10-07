@@ -2548,6 +2548,18 @@ Nowy moduł `buffett_scanner/snapshot_publish.py` + subkomenda `publish-snapshot
 
 Pełny zestaw: **742 passed, 14 skipped** (było 730 passed, 14 skipped).
 
+### Etap C — pobieranie read-only snapshotu przez UI (zrobiony)
+
+Nowy moduł `buffett_scanner/ui/scanner_snapshot.py` -- drugi koniec kontraktu z Etapu B. **Zweryfikowane: repozytorium jest publiczne** (`visibility: public`, potwierdzone wywołaniem GitHub API) -- pobieranie assetów Release działa przez zwykłe, nieautoryzowane HTTPS GET, BEZ żadnego tokenu/sekretu po stronie czytającej. To dotyczy WYŁĄCZNIE danych SHARED scannera (companies/analyses/live_scan_runs/...) -- portfel użytkownika (Postgres/Supabase, Etap A) jest całkowicie osobny i publiczność repo go nie dotyczy.
+
+`ensure_local_snapshot(owner, repo, *, cache_dir)` — główna funkcja: (1) pobiera `pointer.json` z release'u `scanner-snapshot-latest`, (2) jeśli lokalny plik dla TEGO `run_id` już istnieje i jego własne SHA256 się zgadza — używa go bez ponownego pobierania (appka może wołać to przy każdym rerunie Streamlit), (3) inaczej pobiera świeżo z immutable release'u wskazanego przez pointer i weryfikuje SHA256 PRZED zwróceniem ścieżki — niezgodność usuwa plik i rzuca `SnapshotUnavailableError`, nigdy nie zostawia uciętego/uszkodzonego pliku tak, jakby był poprawny. Zwraca `(lokalna_ścieżka, pointer)` — wołający (przyszłe okablowanie UI, Etap D) zawsze ma `pointer["run_id"]` do pokazania w interfejsie, dokładnie zgodnie z wymogiem "UI musi wiedzieć, jaki run_id aktualnie pokazuje". Nazwa lokalnego pliku zawiera `run_id` — nowy live-scan nigdy nie jest cicho pomylony z poprzednim cache'em.
+
+`SnapshotUnavailableError` (ten sam wzorzec co `PgStoreUnavailableError` z Etapu A) opakowuje KAŻDY błąd — sieć, 404 (żaden live-scan jeszcze się nie opublikował), zepsuty JSON, brakujące pola w pointerze, niezgodność SHA256 — w jeden, nazwany, łatwy do złapania typ. Przyszłe okablowanie UI (Etap D) łapie wyłącznie ten typ i pokazuje czytelny komunikat zamiast tracebacka, tą samą zasadą co przy niedostępnym Postgresie.
+
+11 nowych testów (`test_scanner_snapshot.py`), w pełni mockujących serwer przez `httpx.MockTransport` (żadnej prawdziwej sieci w testach), w tym dwa kluczowe: (1) serwer zwracający inną zawartość niż oczekiwane SHA256 — plik usuwany, wyjątek, nigdy nie zostaje jako rzekomo poprawny; (2) drugie wywołanie z tym samym `run_id` NIE pobiera ponownie pliku `.db` (tylko lekki `pointer.json`) — dowód na "cache'owany lokalnie tylko jako odtwarzalna kopia". Dodatkowo: realny smoke-test przeciw PRAWDZIWEMU `github.com/AnastazjaBK/Tajfun_Lab` (nie mock) — potwierdza czysty, czytelny błąd 404 zamiast tracebacka (żaden snapshot jeszcze się nie opublikował, bo workflow z Etapu B jeszcze nie uruchomił się na prawdziwym live-scanie).
+
+Pełny zestaw: **753 passed, 14 skipped** (było 742 passed, 14 skipped).
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.
