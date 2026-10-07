@@ -2509,6 +2509,8 @@ Brakujący element pierwotnej specyfikacji V0 (sekcja 8), dodany na wyraźne pol
 
 Pełny zestaw: **728 passed, 1 skipped** (było 722).
 
+**Błąd znaleziony przy sprawdzaniu "czy aplikacja startuje bez błędów" (realne polecenie właścicielki po KROK 8, nie rutynowa weryfikacja):** `app.py::main()` łączył się z bazą przez plain `connect()` zamiast `init_db()` — `connect()` NIE tworzy schematu. Każde pojedyncze wywołanie w `cli.py` (18 miejsc) używa `init_db()`; `app.py` był jedynym wyjątkiem. Efekt: na zupełnie świeżym pliku bazy (np. pierwsze uruchomienie UI, zanim `cli.py` cokolwiek zaingestował) aplikacja wywalała się `sqlite3.OperationalError: no such table: users` już przy pierwszym renderze. Nie wykryte wcześniej, bo każdy poprzedni KROK testował na bazie wcześniej zainicjowanej przez `init_db`/`seed_*.py` w ramach weryfikacji. Naprawione: `main()` woła `init_db(DB_PATH)` — idempotentne (`CREATE TABLE IF NOT EXISTS` + addytywne migracje kolumn, nigdy nie kasuje/nadpisuje istniejących danych), dokładnie ten sam, już wielokrotnie sprawdzony w produkcji wzorzec co `cli.py`. Zweryfikowane empirycznie (Playwright) na pliku bazy, który nigdy wcześniej nie istniał: czysty start, "Brak użytkowników. Dodaj pierwszego powyżej, aby zacząć." zamiast tracebacku.
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.

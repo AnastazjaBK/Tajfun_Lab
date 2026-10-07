@@ -27,7 +27,6 @@ import os
 import streamlit as st
 
 from buffett_scanner.db import (
-    connect,
     create_user,
     get_latest_holding_user_action,
     get_latest_user_decision,
@@ -35,6 +34,7 @@ from buffett_scanner.db import (
     get_purchase_transactions,
     get_sale_transactions,
     get_users,
+    init_db,
     insert_holding_user_action,
     insert_position,
     insert_purchase_transaction,
@@ -788,7 +788,14 @@ def _render_portfolio_tab(conn, user: dict) -> None:
 
 def main() -> None:
     st.set_page_config(page_title="Buffett Opportunity Scanner", layout="wide")
-    conn = connect(DB_PATH)
+    # `init_db` (nie `connect`) -- `CREATE TABLE IF NOT EXISTS` + migracje
+    # kolumn idempotentne, ten sam wzorzec co KAŻDE wywołanie w cli.py
+    # (zero wyjątku dla UI). Realny błąd znaleziony przy weryfikacji
+    # "czy aplikacja startuje bez błędów": plain `connect()` na zupełnie
+    # świeżym pliku DB (bez tabel) wywalał `OperationalError: no such
+    # table: users` -- `init_db` naprawia to bez ryzyka dla istniejących
+    # danych (nigdy nie kasuje/nadpisuje, tylko dodaje brakujący schemat).
+    conn = init_db(DB_PATH)
 
     st.title("Buffett Opportunity Scanner")
     _render_glossary()
