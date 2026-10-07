@@ -2560,6 +2560,25 @@ Nowy moduł `buffett_scanner/ui/scanner_snapshot.py` -- drugi koniec kontraktu z
 
 Pełny zestaw: **753 passed, 14 skipped** (było 742 passed, 14 skipped).
 
+### Etap D — przełączenie app.py na dwa backendy (zrobiony, część kodowa)
+
+Zgodnie z "implementuj małymi krokami" ten etap ma dwie części: kodową (poniżej, zrobiona teraz) i manualną (założenie Supabase/Streamlit Community Cloud, wymaga działania właścicielki poza Claude Code — osobny checkpoint).
+
+**Nowy moduł `buffett_scanner/portfolio_backend.py`** — wybór silnika (SQLite `db.py` vs Postgres `pg_store.py`) dla 16 funkcji CRUD Fazy 7, sterowany WYŁĄCZNIE obecnością `SUPABASE_DB_URL` w momencie importu. `db.py`/`pg_store.py` mają identyczne nazwy/sygnatury (Etap A) — to jest WYŁĄCZNIE przełączenie importu, zero zmian logiki. `connect_portfolio()` zwraca gotowe połączenie (Postgres + `init_schema`, albo SQLite + `init_db`, zależnie od trybu).
+
+**`app.py` przebudowany na DWA jawne połączenia** — `portfolio_conn` (7 tabel user-generated) i `scanner_conn` (dane SHARED scannera). W TRYBIE LOKALNYM (`SUPABASE_DB_URL` nieustawione, domyślnie) oba parametry to DOKŁADNIE TEN SAM obiekt połączenia SQLite — zero zmian zachowania względem Fazy 7, zweryfikowane empirycznie pełną regresją Playwright. W TRYBIE HOSTOWANYM: `portfolio_conn` = Postgres/Supabase, `scanner_conn` = snapshot SQLite pobrany i zweryfikowany (Etap C), otwarty **READ-ONLY** (`sqlite3.connect("file:...?mode=ro", uri=True)`) — hostowana appka fizycznie nie może zapisać do danych scannera, nie tylko "nie powinna". Nowa `_connect_backends()` w `app.py` centralizuje wybór trybu i łapie `PgStoreUnavailableError`/`SnapshotUnavailableError` osobno, pokazując czytelny `st.error` + `st.stop()` zamiast tracebacka (Decyzja właścicielki pkt 3) — NIGDY nie próbuje automatycznie tworzyć/naprawiać żadnej bazy.
+
+Wszystkie funkcje `_render_*` (ok. 13 funkcji) i mieszane funkcje `ui/queries.py` (`get_position_summary`, `get_user_positions_with_summaries` -- potrzebują OBU połączeń, bo liczba akcji/invested jest w portfolio_conn, a bieżąca cena w scanner_conn) jawnie przyjmują `portfolio_conn`/`scanner_conn` jako osobne parametry zamiast jednego generycznego `conn` -- samodokumentujący się podział, który wyklucza przypadkowe pomieszanie silników przy przyszłych zmianach. Jedyna funkcja z surowym SQL JOIN (`get_brokers_in_use_for_user`) przepisana na istniejące, przenośne funkcje `portfolio_backend` (N+1 zapytań zamiast jednego JOIN-a, bez znaczenia przy tej skali) -- surowy SQL z `?` placeholderami działałby wyłącznie w SQLite, psycopg2 wymaga `%s`.
+
+**Weryfikacja empiryczna, trzy niezależne warstwy, wszystkie na PRAWDZIWYM lokalnym Postgresie 16:**
+1. **Regresja trybu lokalnego** (Playwright, pełny przebieg PORTFEL/filtr platformy/karta pozycji) -- zero zmian zachowania względem stanu przed refaktorem.
+2. **Tryb hostowany, błąd snapshotu** (prawdziwy lokalny Postgres + prawdziwe zapytanie do `github.com/AnastazjaBK/Tajfun_Lab`, gdzie żaden snapshot jeszcze się nie opublikował): czysty czerwony komunikat "Dane scannera są chwilowo niedostępne: ... status 404 ..." zamiast tracebacka -- dowód, że `_connect_backends()` poprawnie łapie `SnapshotUnavailableError` i że realne połączenie Postgres w ogóle doszło do skutku (inaczej zobaczylibyśmy komunikat o Postgresie, nie o snapshotcie).
+3. **Pełna ścieżka zapisu w trybie hostowanym przez przeglądarkę** (jednorazowy harness podmieniający WYŁĄCZNIE pobieranie snapshotu na lokalny plik -- realne pobieranie z GitHub jest już osobno zweryfikowane w Etapie C -- przy prawdziwym Postgresie): utworzenie użytkownika, dodanie nowej pozycji (TESTX, 3 akcje, 150 EUR) przez formularz Streamlit -- **zweryfikowane bezpośrednio w Postgresie** (`SELECT * FROM positions`/`purchase_transactions` pokazuje dokładnie wpisane wartości) ORAZ w renderowanym UI (PODSUMOWANIE poprawnie pokazuje 150.00 EUR, śr. cena 50.00, Trade Republic, Zakup) -- dowód, że cały stack (formularz → `insert_position`/`insert_purchase_transaction` → Postgres → odczyt → `ui/portfolio.compute_position_summary`, niezmieniony kod) działa poprawnie z Postgresem jako backendem.
+
+Dodatkowo 2 nowe testy regresyjne (`tests/test_connect_backends.py`, `@pytest.mark.integration`, wymaga `TEST_POSTGRES_URL`) -- w tym test KLUCZOWY potwierdzający, że `scanner_conn` w trybie hostowanym faktycznie ODRZUCA próbę zapisu (`sqlite3.OperationalError: readonly database`), nie tylko "z założenia" nie jest używany do zapisu.
+
+Pełny zestaw bez `TEST_POSTGRES_URL` (jak w normalnym CI): **753 passed, 16 skipped** (było 753 passed, 14 skipped -- 2 nowe testy poprawnie pomijane bez lokalnego Postgresa). Z `TEST_POSTGRES_URL`: **768 passed, 1 skipped**.
+
 Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzenie operacyjnej rubryki confidence zamiast pozostawienia jej jako czystej samooceny LLM (dwa punkty niżej), oraz okresowy audyt próbki spółek odrzuconych przez pre-filter (false negatives) — oba do zaprojektowania szczegółowo w Fazie 4/5, nie tylko odnotowane jako ryzyko.
 
 - Źródło listy uniwersum S&P 500 (nie „scraping Wikipedii" w produkcji) — patrz Decyzja D4.

@@ -24,9 +24,11 @@ from buffett_scanner.db import (
     get_analysis,
     get_analysis_sources,
     get_fundamentals_periods,
+    get_price_series,
+)
+from buffett_scanner.portfolio_backend import (
     get_latest_holding_user_action,
     get_positions_for_user,
-    get_price_series,
     get_purchase_transactions,
     get_sale_transactions,
 )
@@ -35,12 +37,14 @@ from buffett_scanner.ui.portfolio import PositionSummary, compute_position_summa
 from buffett_scanner.valuation import compute_valuation
 
 
-def get_latest_live_scan_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
+def get_latest_live_scan_run(scanner_conn: sqlite3.Connection) -> sqlite3.Row | None:
     """Najnowszy PRAWDZIWY live-scan (nigdy diagnostyczny `validation-*`)
     -- Decyzja właścicielki, Faza 7 pkt 1. `created_at` jest jedynym
     monotonicznym znacznikiem czasu w `live_scan_runs` (`run_date` może
-    nieść sufiksy diagnostyczne typu `-validation6h`, patrz Faza 6h)."""
-    return conn.execute(
+    nieść sufiksy diagnostyczne typu `-validation6h`, patrz Faza 6h).
+    `scanner_conn` -- w trybie hostowanym (Faza 8) to snapshot SQLite
+    pobrany z GitHub Release, zawsze SQLite niezależnie od trybu."""
+    return scanner_conn.execute(
         """
         SELECT * FROM live_scan_runs
         WHERE run_id LIKE 'live-scan-%'
@@ -50,12 +54,12 @@ def get_latest_live_scan_run(conn: sqlite3.Connection) -> sqlite3.Row | None:
     ).fetchone()
 
 
-def get_synthesis_rows(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+def get_synthesis_rows(scanner_conn: sqlite3.Connection, run_id: str) -> list[dict]:
     """Jeden wiersz per finalista shortlisty (Decyzja właścicielki, Faza
     7 pkt 2: pokazujemy WSZYSTKICH finalistów niezależnie od
     `llm_status` -- FAILED to status RAPORTU, nie ocena spółki, i nie
     blokuje wyświetlenia deterministycznych danych/wyceny)."""
-    rows = conn.execute(
+    rows = scanner_conn.execute(
         """
         SELECT lsc.*, c.name AS company_name
         FROM live_scan_candidates lsc
@@ -76,7 +80,7 @@ def get_synthesis_rows(conn: sqlite3.Connection, run_id: str) -> list[dict]:
         bull_case_first = None
         biggest_risk = None
         if row["analysis_id"] is not None:
-            analysis_row = get_analysis(conn, row["analysis_id"])
+            analysis_row = get_analysis(scanner_conn, row["analysis_id"])
             full_score = analysis_row["total_score"]
             if analysis_row["margin_of_safety_pct"] is not None:
                 margin_of_safety_pct = analysis_row["margin_of_safety_pct"]
@@ -106,7 +110,7 @@ def get_synthesis_rows(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return result
 
 
-def get_current_price_for_position(conn: sqlite3.Connection, position: sqlite3.Row) -> tuple[float | None, str | None]:
+def get_current_price_for_position(scanner_conn: sqlite3.Connection, position) -> tuple[float | None, str | None]:
     """Cena bieżąca = ostatni dzienny close z `price_daily` (ten sam
     mechanizm co cały scanner -- EOD, NIE live/intraday). Działa
     WYŁĄCZNIE dla pozycji z ustawionym `cik` (resolved przez FMP przy
@@ -114,10 +118,12 @@ def get_current_price_for_position(conn: sqlite3.Connection, position: sqlite3.R
     kolumny currency, cały istniejący pipeline FMP niejawnie zakłada
     USD dla notowań amerykańskich, więc to samo założenie jest tu
     powtórzone, nie wymyślone na nowo. Pozycja bez `cik` -> (None, None),
-    UI pokazuje "cena bieżąca niedostępna", nigdy 0."""
+    UI pokazuje "cena bieżąca niedostępna", nigdy 0. `position` pochodzi
+    z `portfolio_conn` (inny silnik w trybie hostowanym, Faza 8) --
+    `price_daily` jest zawsze SQLite (`scanner_conn`)."""
     if position["cik"] is None:
         return None, None
-    row = conn.execute(
+    row = scanner_conn.execute(
         "SELECT close FROM price_daily WHERE cik = ? ORDER BY date DESC LIMIT 1",
         (position["cik"],),
     ).fetchone()
@@ -127,7 +133,7 @@ def get_current_price_for_position(conn: sqlite3.Connection, position: sqlite3.R
 
 
 def get_position_summary(
-    conn: sqlite3.Connection, position: sqlite3.Row, *, broker: str | None = None,
+    portfolio_conn, scanner_conn: sqlite3.Connection, position, *, broker: str | None = None,
 ) -> PositionSummary:
     """`broker=None` (domyślnie) -- wszystkie platformy, bez zmian.
     `broker="TRADE_REPUBLIC"`/`"REVOLUT"`/`"OTHER"` -- filtr platformy
@@ -136,13 +142,15 @@ def get_position_summary(
     `compute_position_summary` -- ta sama, niezmieniona, czysta funkcja
     liczy wynik tak, jakby pozycja istniała tylko na wybranym brokerze.
     Model danych/logika average-cost w `ui/portfolio.py` NIE są
-    zmieniane -- filtr działa wyłącznie na poziomie tego, co dostaje."""
-    purchases = get_purchase_transactions(conn, position["position_id"])
-    sales = get_sale_transactions(conn, position["position_id"])
+    zmieniane -- filtr działa wyłącznie na poziomie tego, co dostaje.
+    `portfolio_conn`/`scanner_conn` -- dwa osobne silniki w trybie
+    hostowanym (Faza 8 Etap D), ten sam obiekt w trybie lokalnym."""
+    purchases = get_purchase_transactions(portfolio_conn, position["position_id"])
+    sales = get_sale_transactions(portfolio_conn, position["position_id"])
     if broker is not None:
         purchases = [p for p in purchases if p["broker"] == broker]
         sales = [s for s in sales if s["broker"] == broker]
-    current_price, current_price_currency = get_current_price_for_position(conn, position)
+    current_price, current_price_currency = get_current_price_for_position(scanner_conn, position)
     return compute_position_summary(
         position["position_id"], purchases, sales,
         current_price=current_price, current_price_currency=current_price_currency,
@@ -150,58 +158,57 @@ def get_position_summary(
 
 
 def get_user_positions_with_summaries(
-    conn: sqlite3.Connection, user_id: int, *, broker: str | None = None,
-) -> list[tuple[sqlite3.Row, PositionSummary]]:
+    portfolio_conn, scanner_conn: sqlite3.Connection, user_id: int, *, broker: str | None = None,
+) -> list[tuple[object, PositionSummary]]:
     """`broker` -- patrz `get_position_summary`. Gdy ustawiony, pozycje
     bez ŻADNEJ transakcji na tym brokerze są pomijane całkowicie (nie
     pokazywane jako wiersz z 0 akcji) -- widok "Trade Republic" ma
     pokazywać WYŁĄCZNIE to, co jest na Trade Republic."""
-    positions = get_positions_for_user(conn, user_id)
+    positions = get_positions_for_user(portfolio_conn, user_id)
     result = []
     for p in positions:
-        summary = get_position_summary(conn, p, broker=broker)
+        summary = get_position_summary(portfolio_conn, scanner_conn, p, broker=broker)
         if broker is not None and summary.shares_held == 0 and not summary.by_broker_currency:
             continue
         result.append((p, summary))
     return result
 
 
-def get_brokers_in_use_for_user(conn: sqlite3.Connection, user_id: int) -> set[str]:
+def get_brokers_in_use_for_user(portfolio_conn, user_id: int) -> set[str]:
     """Brokery z co najmniej jedną realną transakcją (zakup/bonus LUB
     sprzedaż) dla tego użytkownika -- używane wyłącznie do decyzji, czy
     pokazać opcję "Inny" w filtrze platformy (Decyzja właścicielki:
-    "Other -- tylko jeśli istnieją realne transakcje OTHER")."""
-    rows = conn.execute(
-        """
-        SELECT DISTINCT pt.broker AS broker
-        FROM purchase_transactions pt
-        JOIN positions p ON p.position_id = pt.position_id
-        WHERE p.user_id = ?
-        UNION
-        SELECT DISTINCT st.broker AS broker
-        FROM sale_transactions st
-        JOIN positions p ON p.position_id = st.position_id
-        WHERE p.user_id = ?
-        """,
-        (user_id, user_id),
-    ).fetchall()
-    return {row["broker"] for row in rows}
+    "Other -- tylko jeśli istnieją realne transakcje OTHER").
+
+    Celowo przez `get_positions_for_user`/`get_purchase_transactions`/
+    `get_sale_transactions` (funkcje `portfolio_backend`, działające w
+    OBU silnikach), NIE przez surowy SQL JOIN -- surowy SQL z `?`
+    placeholderami działałby wyłącznie w trybie lokalnym (SQLite),
+    psycopg2 w trybie hostowanym wymaga `%s`. N+1 zapytań jest tu bez
+    znaczenia (mała liczba pozycji per użytkownik)."""
+    brokers: set[str] = set()
+    for position in get_positions_for_user(portfolio_conn, user_id):
+        for row in get_purchase_transactions(portfolio_conn, position["position_id"]):
+            brokers.add(row["broker"])
+        for row in get_sale_transactions(portfolio_conn, position["position_id"]):
+            brokers.add(row["broker"])
+    return brokers
 
 
-def get_review_needed_count(conn: sqlite3.Connection, user_id: int) -> int:
+def get_review_needed_count(portfolio_conn, user_id: int) -> int:
     """Liczba pozycji, których NAJNOWSZA `holding_user_actions.action`
     to `REVIEW_LATER` -- pozycja bez żadnej zapisanej akcji NIE jest
     liczona jako wymagająca review (domyślny, niejawny status to HOLD,
     Exit Review automatyczny jest poza zakresem Fazy 7)."""
     count = 0
-    for position in get_positions_for_user(conn, user_id):
-        action = get_latest_holding_user_action(conn, position["position_id"])
+    for position in get_positions_for_user(portfolio_conn, user_id):
+        action = get_latest_holding_user_action(portfolio_conn, position["position_id"])
         if action is not None and action["action"] == "REVIEW_LATER":
             count += 1
     return count
 
 
-def get_candidate_detail(conn: sqlite3.Connection, run_id: str, cik: str) -> dict:
+def get_candidate_detail(scanner_conn: sqlite3.Connection, run_id: str, cik: str) -> dict:
     """Pełne dane karty kandydata (sekcja 15 specyfikacji UI).
 
     Deterministyczne dane (decline snapshot, wycena DCF BEAR/BASE/BULL)
@@ -212,11 +219,11 @@ def get_candidate_detail(conn: sqlite3.Connection, run_id: str, cik: str) -> dic
     cen. Pola jakościowe (`analysis`) są `None`, gdy `analysis_id` nie
     istnieje (FAILED) -- UI pokazuje wtedy "Analiza jakościowa
     niekompletna", NIGDY nie ukrywa deterministycznej części raportu."""
-    candidate_row = conn.execute(
+    candidate_row = scanner_conn.execute(
         "SELECT * FROM live_scan_candidates WHERE run_id = ? AND cik = ?", (run_id, cik),
     ).fetchone()
-    company_row = conn.execute("SELECT * FROM companies WHERE cik = ?", (cik,)).fetchone()
-    periods = get_fundamentals_periods(conn, cik)
+    company_row = scanner_conn.execute("SELECT * FROM companies WHERE cik = ?", (cik,)).fetchone()
+    periods = get_fundamentals_periods(scanner_conn, cik)
     config = load_config()
 
     valuation_result = compute_valuation(
@@ -224,7 +231,7 @@ def get_candidate_detail(conn: sqlite3.Connection, run_id: str, cik: str) -> dic
         current_price=candidate_row["current_price"], config=config.valuation,
     )
 
-    price_rows = get_price_series(conn, cik)
+    price_rows = get_price_series(scanner_conn, cik)
     decline_snapshot = (
         compute_price_changes([
             PriceBar(
@@ -239,9 +246,9 @@ def get_candidate_detail(conn: sqlite3.Connection, run_id: str, cik: str) -> dic
     analysis: AnalysisOutput | None = None
     analysis_sources = []
     if candidate_row["analysis_id"] is not None:
-        analysis_row = get_analysis(conn, candidate_row["analysis_id"])
+        analysis_row = get_analysis(scanner_conn, candidate_row["analysis_id"])
         analysis = AnalysisOutput.model_validate(json.loads(analysis_row["llm_raw_output"]))
-        analysis_sources = get_analysis_sources(conn, candidate_row["analysis_id"])
+        analysis_sources = get_analysis_sources(scanner_conn, candidate_row["analysis_id"])
 
     return {
         "ticker": candidate_row["ticker"],

@@ -1,32 +1,54 @@
-"""Buffett Opportunity Scanner — UI + PORTFOLIO V0 (Faza 7).
+"""Buffett Opportunity Scanner — UI + PORTFOLIO V0 (Faza 7) + Hostowany
+V0 (Faza 8).
 
 Punkt wejścia Streamlit. WYŁĄCZNIE prezentacja/odczyt + proste
 formularze zapisu (decyzje, transakcje) — zero logiki
 scoringu/wyceny/DCF/decline-screeningu/Claude API; cała ta logika
 mieszka w `buffett_scanner.*` i jest tu TYLKO odczytywana/tłumaczona.
 
-Uruchomienie lokalne:
+Uruchomienie lokalne (tryb DEV, domyślny -- `SUPABASE_DB_URL` nieustawione):
     streamlit run app.py
+Jedno połączenie SQLite (`BUFFETT_SCANNER_DB`, domyślnie
+`buffett_scanner.db` — ten sam plik, który zapisuje `cli.py`) obsługuje
+ZARÓWNO dane scannera, JAK I portfel — dokładnie jak w Fazie 7, zero
+zmian w tym trybie.
 
-Baza: zmienna środowiskowa `BUFFETT_SCANNER_DB` (domyślnie
-`buffett_scanner.db` — ten sam plik, który zapisuje `cli.py`).
+Tryb HOSTOWANY (Faza 8, `SUPABASE_DB_URL` ustawione -- Streamlit
+Community Cloud): DWA OSOBNE połączenia, bo dane SHARED scannera i
+USER-SCOPED portfel żyją w dwóch różnych, niezależnych miejscach
+(Decyzja właścicielki, "Hostowany V0"):
+- `portfolio_conn` -- Postgres/Supabase (`pg_store.py`), WYŁĄCZNIE 7
+  tabel user-generated.
+- `scanner_conn` -- SQLite, snapshot pobrany i zweryfikowany (SHA256)
+  z GitHub Release (`ui/scanner_snapshot.py`), otwarty w trybie
+  read-only (`file:...?mode=ro`) -- hostowana appka NIGDY nie zapisuje
+  do danych scannera.
+Oba tryby dzielą DOKŁADNIE ten sam kod renderujący (funkcje `_render_*`
+przyjmują `portfolio_conn`/`scanner_conn` jawnie) — w trybie DEV oba
+parametry to ten sam obiekt połączenia.
 
-Połączenie z SQLite jest otwierane NA NOWO przy każdym rerunie skryptu
-(zero `st.cache_resource` na samym obiekcie połączenia) — Streamlit
-może wykonywać rerun różnych sesji (np. Anastazja i mąż z dwóch
-przeglądarek naraz) w różnych wątkach, a `sqlite3.Connection` nie wolno
-współdzielić między wątkami. Koszt otwarcia pliku SQLite jest
-pomijalny przy tej skali danych.
+Połączenia są otwierane NA NOWO przy każdym rerunie skryptu (zero
+`st.cache_resource` na samym obiekcie połączenia) — Streamlit może
+wykonywać rerun różnych sesji (np. Anastazja i mąż z dwóch przeglądarek
+naraz) w różnych wątkach, a połączenia bazodanowe nie wolno współdzielić
+między wątkami. Koszt otwarcia połączenia jest pomijalny przy tej skali
+danych (`ensure_local_snapshot` dodatkowo cache'uje pobrany plik lokalnie
+między rerunami, patrz `ui/scanner_snapshot.py`).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sqlite3
+import tempfile
 
 import streamlit as st
 
-from buffett_scanner.db import (
+from buffett_scanner import portfolio_backend
+from buffett_scanner.db import init_db
+from buffett_scanner.pg_store import PgStoreUnavailableError
+from buffett_scanner.portfolio_backend import (
     create_user,
     get_latest_holding_user_action,
     get_latest_user_decision,
@@ -34,7 +56,6 @@ from buffett_scanner.db import (
     get_purchase_transactions,
     get_sale_transactions,
     get_users,
-    init_db,
     insert_holding_user_action,
     insert_position,
     insert_purchase_transaction,
@@ -61,6 +82,7 @@ from buffett_scanner.ui.queries import (
     get_synthesis_rows,
     get_user_positions_with_summaries,
 )
+from buffett_scanner.ui.scanner_snapshot import SnapshotUnavailableError, ensure_local_snapshot
 
 # Filtr platformy w PORTFELU (Decyzja właścicielki) -- "ALL" oznacza
 # "Wszystkie" (agregacja wszystkich platform), pozostałe to dokładnie
@@ -105,6 +127,11 @@ _VALUATION_SCENARIO_LABELS = (
 
 DB_PATH = os.environ.get("BUFFETT_SCANNER_DB", "buffett_scanner.db")
 
+# Faza 8 "Hostowany V0" -- tylko w trybie `portfolio_backend.is_hosted()`.
+SNAPSHOT_REPO_OWNER = os.environ.get("SNAPSHOT_REPO_OWNER", "AnastazjaBK")
+SNAPSHOT_REPO_NAME = os.environ.get("SNAPSHOT_REPO_NAME", "Tajfun_Lab")
+SNAPSHOT_CACHE_DIR = os.environ.get("SNAPSHOT_CACHE_DIR", tempfile.gettempdir())
+
 
 def _format_currency_dict(values: dict[str, float]) -> str:
     """Nigdy nie sumuje różnych walut (sekcja 12 specyfikacji) --
@@ -126,7 +153,7 @@ def _render_glossary() -> None:
             st.markdown(f"**{term}** — {explanation}")
 
 
-def _render_user_picker(conn) -> dict | None:
+def _render_user_picker(portfolio_conn) -> dict | None:
     """Selector czyta realnych użytkowników z bazy -- ZERO hardcode'owanych
     "Anastazja"/"Mąż" (Decyzja właścicielki, Faza 7 pkt 7: "nie zakładaj,
     że display_name drugiego użytkownika na zawsze brzmi 'Mąż'"). Gdy
@@ -136,11 +163,11 @@ def _render_user_picker(conn) -> dict | None:
         with st.form("add_user_form", clear_on_submit=True):
             new_name = st.text_input("Imię nowego użytkownika")
             if st.form_submit_button("Dodaj") and new_name.strip():
-                create_user(conn, new_name.strip())
-                conn.commit()
+                create_user(portfolio_conn, new_name.strip())
+                portfolio_conn.commit()
                 st.rerun()
 
-    users = get_users(conn)
+    users = get_users(portfolio_conn)
     if not users:
         st.warning("Brak użytkowników. Dodaj pierwszego powyżej, aby zacząć.")
         return None
@@ -150,7 +177,7 @@ def _render_user_picker(conn) -> dict | None:
     return next(u for u in users if u["display_name"] == selected)
 
 
-def _render_synthesis_table(conn) -> tuple[str | None, list[dict]]:
+def _render_synthesis_table(scanner_conn) -> tuple[str | None, list[dict]]:
     """Sekcja 4 specyfikacji: tabela SYNTEZY ostatniego WŁAŚCIWEGO
     live-scanu (nigdy walidacji technicznej -- patrz `ui/queries.
     get_latest_live_scan_run`). FAILED to status RAPORTU jakościowego,
@@ -158,13 +185,13 @@ def _render_synthesis_table(conn) -> tuple[str | None, list[dict]]:
     widoczne niezależnie od statusu analizy LLM. Zwraca `(run_id, rows)`
     -- `run_id` reużywany przez karty kandydatów, żeby nie odpytywać
     "najnowszego skanu" drugi raz per zakładkę."""
-    run = get_latest_live_scan_run(conn)
+    run = get_latest_live_scan_run(scanner_conn)
     if run is None:
         st.info("Brak jeszcze ukończonego live-scan rynku.")
         return None, []
 
     st.subheader(f"Co scanner znalazł — skan z {run['run_date']}")
-    rows = get_synthesis_rows(conn, run["run_id"])
+    rows = get_synthesis_rows(scanner_conn, run["run_id"])
     if not rows:
         st.info("Ten skan nie wytypował żadnych kandydatów (to prawidłowy wynik).")
         return run["run_id"], rows
@@ -191,7 +218,7 @@ def _render_synthesis_table(conn) -> tuple[str | None, list[dict]]:
     return run["run_id"], rows
 
 
-def _render_portfolio_bar(conn, user: dict) -> None:
+def _render_portfolio_bar(portfolio_conn, scanner_conn, user: dict) -> None:
     """Sekcja 5 specyfikacji: jednoliniowy pasek, nigdy pełna tabela
     pozycji tutaj. Respektuje filtr platformy wybrany w zakładce
     PORTFEL (`st.session_state["platform_filter"]`) -- ten pasek
@@ -202,9 +229,11 @@ def _render_portfolio_bar(conn, user: dict) -> None:
     klucza jeszcze nie ma, stąd jawny fallback na "ALL" (Wszystkie)."""
     platform_filter = st.session_state.get("platform_filter", "ALL")
     broker = None if platform_filter == "ALL" else platform_filter
-    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"], broker=broker)
+    positions_with_summaries = get_user_positions_with_summaries(
+        portfolio_conn, scanner_conn, user["user_id"], broker=broker,
+    )
     summaries = [s for _, s in positions_with_summaries]
-    review_needed = get_review_needed_count(conn, user["user_id"])
+    review_needed = get_review_needed_count(portfolio_conn, user["user_id"])
     bar = compute_portfolio_bar_summary(summaries, review_needed_count=review_needed)
 
     st.subheader("Portfel")
@@ -265,30 +294,30 @@ def _render_valuation_section(valuation_result, current_price: float) -> None:
         )
 
 
-def _render_decision_buttons(conn, *, user_id: int, cik: str) -> None:
+def _render_decision_buttons(portfolio_conn, *, user_id: int, cik: str) -> None:
     """Sekcja 16 specyfikacji: decyzja jest USER-SPECIFIC (`user_decisions`,
     append-only) -- Anastazja i mąż mogą mieć RÓŻNY status dla tej samej
     spółki, kliknięcie jednego usera nigdy nie zmienia SHARED analizy."""
-    current = get_latest_user_decision(conn, user_id=user_id, cik=cik)
+    current = get_latest_user_decision(portfolio_conn, user_id=user_id, cik=cik)
     if current is not None:
         st.caption(f"Twoja ostatnia decyzja: **{decision_status_label(current['status'])}**")
 
     cols = st.columns(4)
     for col, (status, label) in zip(cols, _DECISION_BUTTONS):
         if col.button(label, key=f"decision_{cik}_{status}"):
-            insert_user_decision(conn, user_id=user_id, cik=cik, status=status)
-            conn.commit()
+            insert_user_decision(portfolio_conn, user_id=user_id, cik=cik, status=status)
+            portfolio_conn.commit()
             st.rerun()
 
 
-def _render_candidate_card(conn, run_id: str, cik: str, *, user_id: int) -> None:
+def _render_candidate_card(scanner_conn, portfolio_conn, run_id: str, cik: str, *, user_id: int) -> None:
     """Sekcja 15 specyfikacji UI -- pełna karta kandydata PO POLSKU.
     Deterministyczne sekcje (decline/wycena) zawsze renderowane; sekcje
     zależne od analizy LLM (`analysis`) pokazują jawnie "Analiza
     jakościowa niekompletna", gdy `llm_status != COMPLETE` -- nigdy nie
     ukrywają reszty karty ani przycisków decyzji (sekcja 16: decyzja
     musi być możliwa NIEZALEŻNIE od kompletności analizy jakościowej)."""
-    detail = get_candidate_detail(conn, run_id, cik)
+    detail = get_candidate_detail(scanner_conn, run_id, cik)
     analysis = detail["analysis"]
 
     st.header(f"{detail['ticker']} — {detail['company_name']}")
@@ -352,7 +381,7 @@ def _render_candidate_card(conn, run_id: str, cik: str, *, user_id: int) -> None
 
     st.markdown("---")
     st.markdown("#### Twoja decyzja")
-    _render_decision_buttons(conn, user_id=user_id, cik=cik)
+    _render_decision_buttons(portfolio_conn, user_id=user_id, cik=cik)
 
 
 def _format_optional(value: float | None, fmt: str = "{:.2f}") -> str:
@@ -360,7 +389,7 @@ def _format_optional(value: float | None, fmt: str = "{:.2f}") -> str:
 
 
 def _render_portfolio_summary_tab(
-    conn, positions_with_summaries: list, *, platform_filter: str = "ALL",
+    portfolio_conn, positions_with_summaries: list, *, platform_filter: str = "ALL",
 ) -> None:
     """Sekcja 6 specyfikacji -- PODSUMOWANIE + tabela pozycji. Tabela
     jest na poziomie (pozycja, broker) -- sekcja 7: "szczegóły muszą
@@ -390,7 +419,7 @@ def _render_portfolio_summary_tab(
     st.markdown("##### Pozycje (rozbicie per broker)")
     table_rows = []
     for position, summary in positions_with_summaries:
-        latest_action = get_latest_holding_user_action(conn, position["position_id"])
+        latest_action = get_latest_holding_user_action(portfolio_conn, position["position_id"])
         status_label = holding_action_label(latest_action["action"]) if latest_action else "Trzymam"
         for sub in summary.by_broker_currency:
             # WŁASNA wartość tej subpozycji (broker), NIE suma całej
@@ -421,11 +450,11 @@ def _render_portfolio_summary_tab(
     st.dataframe(table_rows, use_container_width=True, hide_index=True)
 
 
-def _render_position_card(conn, position: dict, summary) -> None:
+def _render_position_card(portfolio_conn, position: dict, summary) -> None:
     """Sekcja 14 specyfikacji -- karta JEDNEJ posiadanej pozycji."""
     st.header(f"{position['ticker']} — {position['company_name']}")
 
-    thesis = get_purchase_thesis(conn, position["position_id"])
+    thesis = get_purchase_thesis(portfolio_conn, position["position_id"])
     snapshot: dict = {}
     if thesis is not None and thesis["snapshot_json"]:
         try:
@@ -486,14 +515,14 @@ def _render_position_card(conn, position: dict, summary) -> None:
 
     st.markdown("---")
     st.markdown("#### Status")
-    latest_action = get_latest_holding_user_action(conn, position["position_id"])
+    latest_action = get_latest_holding_user_action(portfolio_conn, position["position_id"])
     if latest_action is not None:
         st.caption(f"Obecny status: **{holding_action_label(latest_action['action'])}**")
     cols = st.columns(4)
     for col, (action, label) in zip(cols, _HOLDING_ACTION_BUTTONS):
         if col.button(label, key=f"holding_{position['position_id']}_{action}"):
-            insert_holding_user_action(conn, position_id=position["position_id"], action=action)
-            conn.commit()
+            insert_holding_user_action(portfolio_conn, position_id=position["position_id"], action=action)
+            portfolio_conn.commit()
             st.rerun()
 
 
@@ -542,7 +571,7 @@ def _render_instrument_lookup_widget(key_prefix: str) -> tuple[str, InstrumentLo
     return symbol, (result if confirmed else None)
 
 
-def _render_new_position_form(conn, user: dict) -> None:
+def _render_new_position_form(portfolio_conn, user: dict) -> None:
     st.markdown("##### Nowa pozycja")
     symbol, confirmed_result = _render_instrument_lookup_widget("new_pos")
 
@@ -591,24 +620,24 @@ def _render_new_position_form(conn, user: dict) -> None:
                 final_invested = 0.0 if acquisition_type == "BONUS" else total_invested
                 price_per_share = (final_invested / shares) if acquisition_type == "BUY" and shares > 0 else None
                 position_id = insert_position(
-                    conn, user_id=user["user_id"], ticker=symbol, company_name=company_name.strip(),
+                    portfolio_conn, user_id=user["user_id"], ticker=symbol, company_name=company_name.strip(),
                     cik=(confirmed_result.cik if confirmed_result else None),
                     exchange=(exchange.strip() or None), instrument_currency=currency.strip(),
                 )
                 insert_purchase_transaction(
-                    conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
+                    portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                     purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                     currency=currency.strip(), price_per_share=price_per_share,
                     fees=(fees or None), note=(note.strip() or None),
                 )
-                conn.commit()
+                portfolio_conn.commit()
                 st.session_state.pop("new_pos_lookup_symbol", None)
                 st.session_state.pop("new_pos_lookup_result", None)
                 st.toast(f"Zapisano nową pozycję: {symbol}.")
                 st.rerun()
 
 
-def _render_existing_position_transaction_form(conn, position: dict) -> None:
+def _render_existing_position_transaction_form(portfolio_conn, position: dict) -> None:
     position_id = position["position_id"]
     st.markdown(f"##### {position['ticker']} — {position['company_name']}")
     kind = st.radio(
@@ -653,12 +682,12 @@ def _render_existing_position_transaction_form(conn, position: dict) -> None:
                     final_invested = 0.0 if acquisition_type == "BONUS" else total_invested
                     price_per_share = (final_invested / shares) if acquisition_type == "BUY" and shares > 0 else None
                     insert_purchase_transaction(
-                        conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
+                        portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                         purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                         currency=currency.strip(), price_per_share=price_per_share,
                         fees=(fees or None), note=(note.strip() or None),
                     )
-                    conn.commit()
+                    portfolio_conn.commit()
                     st.toast("Zapisano zakup/bonus.")
                     st.rerun()
     else:
@@ -700,8 +729,8 @@ def _render_existing_position_transaction_form(conn, position: dict) -> None:
                     existing_subpositions = {
                         (s.broker, s.currency): s.shares_held
                         for s in compute_broker_currency_subpositions(
-                            get_purchase_transactions(conn, position_id),
-                            get_sale_transactions(conn, position_id),
+                            get_purchase_transactions(portfolio_conn, position_id),
+                            get_sale_transactions(portfolio_conn, position_id),
                         )
                     }
                     held = existing_subpositions.get((broker, currency.strip()), 0.0)
@@ -715,33 +744,33 @@ def _render_existing_position_transaction_form(conn, position: dict) -> None:
                     st.error(error)
                 if not errors:
                     insert_sale_transaction(
-                        conn, position_id=position_id, broker=broker, sale_date=str(sale_date),
+                        portfolio_conn, position_id=position_id, broker=broker, sale_date=str(sale_date),
                         shares=shares, sale_price=sale_price, currency=currency.strip(),
                         fees=(fees or None), note=(note.strip() or None),
                     )
-                    conn.commit()
+                    portfolio_conn.commit()
                     st.toast("Zapisano sprzedaż.")
                     st.rerun()
 
 
-def _render_add_transaction_tab(conn, user: dict) -> None:
+def _render_add_transaction_tab(portfolio_conn, scanner_conn, user: dict) -> None:
     """Sekcja 11 specyfikacji -- formularz "Dodaj transakcję". Jedna
     `position_id` może mieć transakcje na wielu brokerach (sekcja 7) --
     wybór "istniejąca pozycja" NIGDY nie tworzy drugiej, równoległej
     pozycji dla tego samego instrumentu."""
-    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"])
+    positions_with_summaries = get_user_positions_with_summaries(portfolio_conn, scanner_conn, user["user_id"])
     positions = [dict(p) for p, _ in positions_with_summaries]
 
     options = ["+ Nowa pozycja"] + [f"{p['ticker']} — {p['company_name']}" for p in positions]
     choice = st.selectbox("Pozycja", options, key="add_tx_position_choice")
 
     if choice == "+ Nowa pozycja":
-        _render_new_position_form(conn, user)
+        _render_new_position_form(portfolio_conn, user)
     else:
-        _render_existing_position_transaction_form(conn, positions[options.index(choice) - 1])
+        _render_existing_position_transaction_form(portfolio_conn, positions[options.index(choice) - 1])
 
 
-def _render_platform_filter(conn, user: dict) -> str:
+def _render_platform_filter(portfolio_conn, user: dict) -> str:
     """Filtr platformy w PORTFELU (Decyzja właścicielki). Działa na
     poziomie TRANSAKCJI (filtruje purchase/sale rows PRZED przekazaniem
     do `compute_position_summary` -- `ui/queries.get_user_positions_
@@ -749,7 +778,7 @@ def _render_platform_filter(conn, user: dict) -> str:
     użytkowników ani walut, nie wymaga FX. Trade Republic/Revolut
     zawsze widoczne; "Inny" tylko gdy użytkownik ma choć jedną realną
     transakcję OTHER (`get_brokers_in_use_for_user`)."""
-    brokers_in_use = get_brokers_in_use_for_user(conn, user["user_id"])
+    brokers_in_use = get_brokers_in_use_for_user(portfolio_conn, user["user_id"])
     codes = list(_PLATFORM_FILTER_ALWAYS_AVAILABLE)
     if "OTHER" in brokers_in_use:
         codes.append("OTHER")
@@ -760,7 +789,7 @@ def _render_platform_filter(conn, user: dict) -> str:
     return selected
 
 
-def _render_portfolio_tab(conn, user: dict) -> None:
+def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
     """Sekcja 6 specyfikacji: wewnątrz PORTFEL, filtr platformy, drugi
     poziom zakładek [PODSUMOWANIE][+ Dodaj transakcję] + DYNAMICZNE
     tickery posiadanych pozycji. Filtr platformy zawęża PODSUMOWANIE i
@@ -768,46 +797,98 @@ def _render_portfolio_tab(conn, user: dict) -> None:
     (`_render_add_transaction_tab` sama czyta pełną, nieprzefiltrowaną
     listę pozycji -- można dodać transakcję na innej platformie niż
     aktualnie przeglądana)."""
-    platform_filter = _render_platform_filter(conn, user)
+    platform_filter = _render_platform_filter(portfolio_conn, user)
     broker = None if platform_filter == "ALL" else platform_filter
-    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"], broker=broker)
+    positions_with_summaries = get_user_positions_with_summaries(
+        portfolio_conn, scanner_conn, user["user_id"], broker=broker,
+    )
 
     inner_labels = ["PODSUMOWANIE", "+ Dodaj transakcję"] + [p["ticker"] for p, _ in positions_with_summaries]
     inner_tabs = st.tabs(inner_labels)
 
     with inner_tabs[0]:
-        _render_portfolio_summary_tab(conn, positions_with_summaries, platform_filter=platform_filter)
+        _render_portfolio_summary_tab(portfolio_conn, positions_with_summaries, platform_filter=platform_filter)
 
     with inner_tabs[1]:
-        _render_add_transaction_tab(conn, user)
+        _render_add_transaction_tab(portfolio_conn, scanner_conn, user)
 
     for tab, (position, summary) in zip(inner_tabs[2:], positions_with_summaries):
         with tab:
-            _render_position_card(conn, dict(position), summary)
+            _render_position_card(portfolio_conn, dict(position), summary)
+
+
+def _connect_backends() -> tuple[object, object] | None:
+    """Faza 8 Etap D -- zwraca `(portfolio_conn, scanner_conn)` albo
+    `None`, gdy któryś backend jest niedostępny (w tym wypadku ta
+    funkcja sama pokazuje czytelny `st.error` i woła `st.stop()` --
+    Decyzja właścicielki pkt 3: "Jeżeli baza jest paused/unavailable:
+    UI ma pokazać czytelny komunikat zamiast tracebacka", NIGDY próba
+    automatycznego utworzenia/naprawienia bazy).
+
+    Tryb LOKALNY (`portfolio_backend.is_hosted()` == False, domyślny):
+    JEDNO połączenie SQLite dla obu -- dokładnie jak w Fazie 7, zero
+    zmian.
+
+    Tryb HOSTOWANY: `portfolio_conn` = Postgres/Supabase (7 tabel
+    user-generated), `scanner_conn` = SQLite snapshot pobrany i
+    zweryfikowany (SHA256) z GitHub Release, otwarty READ-ONLY
+    (`file:...?mode=ro`) -- hostowana appka nigdy nie zapisuje do
+    danych scannera."""
+    if not portfolio_backend.is_hosted():
+        # `init_db` (nie `connect`) -- `CREATE TABLE IF NOT EXISTS` +
+        # migracje kolumn idempotentne, ten sam wzorzec co KAŻDE
+        # wywołanie w cli.py. Realny błąd znaleziony przy weryfikacji
+        # "czy aplikacja startuje bez błędów" (Faza 7): plain `connect()`
+        # na zupełnie świeżym pliku DB wywalał `OperationalError: no
+        # such table: users` -- `init_db` naprawia to bez ryzyka dla
+        # istniejących danych.
+        conn = init_db(DB_PATH)
+        return conn, conn
+
+    try:
+        portfolio_conn = portfolio_backend.connect_portfolio()
+    except PgStoreUnavailableError as exc:
+        st.error(
+            f"Baza portfela (Supabase) jest chwilowo niedostępna: {exc}\n\n"
+            "Jeśli to darmowy, nieużywany od tygodnia projekt Supabase — wznów go ręcznie "
+            "w dashboardzie Supabase i odśwież tę stronę."
+        )
+        st.stop()
+        return None
+
+    try:
+        snapshot_path, _pointer = ensure_local_snapshot(
+            SNAPSHOT_REPO_OWNER, SNAPSHOT_REPO_NAME, cache_dir=SNAPSHOT_CACHE_DIR,
+        )
+    except SnapshotUnavailableError as exc:
+        st.error(f"Dane scannera są chwilowo niedostępne: {exc}")
+        st.stop()
+        return None
+
+    scanner_conn = sqlite3.connect(f"file:{snapshot_path}?mode=ro", uri=True)
+    scanner_conn.row_factory = sqlite3.Row
+    return portfolio_conn, scanner_conn
 
 
 def main() -> None:
     st.set_page_config(page_title="Buffett Opportunity Scanner", layout="wide")
-    # `init_db` (nie `connect`) -- `CREATE TABLE IF NOT EXISTS` + migracje
-    # kolumn idempotentne, ten sam wzorzec co KAŻDE wywołanie w cli.py
-    # (zero wyjątku dla UI). Realny błąd znaleziony przy weryfikacji
-    # "czy aplikacja startuje bez błędów": plain `connect()` na zupełnie
-    # świeżym pliku DB (bez tabel) wywalał `OperationalError: no such
-    # table: users` -- `init_db` naprawia to bez ryzyka dla istniejących
-    # danych (nigdy nie kasuje/nadpisuje, tylko dodaje brakujący schemat).
-    conn = init_db(DB_PATH)
-
     st.title("Buffett Opportunity Scanner")
-    _render_glossary()
-    user = _render_user_picker(conn)
 
-    latest_run_id, synthesis_rows = _render_synthesis_table(conn)
+    backends = _connect_backends()
+    if backends is None:
+        return  # _connect_backends już pokazał błąd i wywołał st.stop()
+    portfolio_conn, scanner_conn = backends
+
+    _render_glossary()
+    user = _render_user_picker(portfolio_conn)
+
+    latest_run_id, synthesis_rows = _render_synthesis_table(scanner_conn)
 
     if user is None:
         return
 
     st.markdown("---")
-    _render_portfolio_bar(conn, user)
+    _render_portfolio_bar(portfolio_conn, scanner_conn, user)
     st.markdown("---")
 
     # Sekcja 2 specyfikacji: PORTFEL jest stałą pierwszą zakładką,
@@ -818,11 +899,13 @@ def main() -> None:
     tabs = st.tabs(tab_labels)
 
     with tabs[0]:
-        _render_portfolio_tab(conn, user)
+        _render_portfolio_tab(portfolio_conn, scanner_conn, user)
 
     for tab, row in zip(tabs[1:], synthesis_rows):
         with tab:
-            _render_candidate_card(conn, run_id=latest_run_id, cik=row["cik"], user_id=user["user_id"])
+            _render_candidate_card(
+                scanner_conn, portfolio_conn, run_id=latest_run_id, cik=row["cik"], user_id=user["user_id"],
+            )
 
 
 if __name__ == "__main__":

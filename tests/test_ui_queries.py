@@ -211,8 +211,8 @@ def test_get_user_positions_with_summaries_isolates_users(conn):
     )
     conn.commit()
 
-    results_a = get_user_positions_with_summaries(conn, user_a)
-    results_b = get_user_positions_with_summaries(conn, user_b)
+    results_a = get_user_positions_with_summaries(conn, conn, user_a)
+    results_b = get_user_positions_with_summaries(conn, conn, user_b)
     assert len(results_a) == 1
     assert results_a[0][0]["ticker"] == "AAPL"
     assert results_a[0][1].shares_held == 3.0
@@ -284,14 +284,14 @@ def test_broker_filter_shows_only_matching_broker_subposition(conn):
     from buffett_scanner.db import get_position
     position = get_position(conn, position_id)
 
-    summary_all = get_position_summary(conn, position)
+    summary_all = get_position_summary(conn, conn, position)
     assert summary_all.shares_held == 5.0
 
-    summary_tr = get_position_summary(conn, position, broker="TRADE_REPUBLIC")
+    summary_tr = get_position_summary(conn, conn, position, broker="TRADE_REPUBLIC")
     assert summary_tr.shares_held == 3.0
     assert summary_tr.invested_by_currency == {"USD": 0.0}
 
-    summary_revolut = get_position_summary(conn, position, broker="REVOLUT")
+    summary_revolut = get_position_summary(conn, conn, position, broker="REVOLUT")
     assert summary_revolut.shares_held == 2.0
     assert summary_revolut.invested_by_currency == {"USD": 380.0}
 
@@ -313,13 +313,13 @@ def test_broker_filter_excludes_positions_with_no_transactions_on_that_broker(co
     )
     conn.commit()
 
-    results_all = get_user_positions_with_summaries(conn, user_id)
+    results_all = get_user_positions_with_summaries(conn, conn, user_id)
     assert {p["ticker"] for p, _ in results_all} == {"AAPL", "GSK"}
 
-    results_tr = get_user_positions_with_summaries(conn, user_id, broker="TRADE_REPUBLIC")
+    results_tr = get_user_positions_with_summaries(conn, conn, user_id, broker="TRADE_REPUBLIC")
     assert {p["ticker"] for p, _ in results_tr} == {"AAPL"}  # GSK pominięty, nie 0-akcyjny wiersz
 
-    results_revolut = get_user_positions_with_summaries(conn, user_id, broker="REVOLUT")
+    results_revolut = get_user_positions_with_summaries(conn, conn, user_id, broker="REVOLUT")
     assert {p["ticker"] for p, _ in results_revolut} == {"GSK"}
 
 
@@ -341,7 +341,7 @@ def test_broker_filter_keeps_fully_sold_position_on_that_broker_visible(conn):
     )
     conn.commit()
 
-    results = get_user_positions_with_summaries(conn, user_id, broker="TRADE_REPUBLIC")
+    results = get_user_positions_with_summaries(conn, conn, user_id, broker="TRADE_REPUBLIC")
     assert len(results) == 1
     assert results[0][1].shares_held == 0.0
 
