@@ -22,6 +22,7 @@ from buffett_scanner.db import (
     upsert_scoring_model_version,
 )
 from buffett_scanner.ui.queries import (
+    get_brokers_in_use_for_user,
     get_candidate_detail,
     get_current_price_for_position,
     get_latest_live_scan_run,
@@ -261,6 +262,130 @@ def test_get_candidate_detail_failed_has_no_analysis_but_keeps_deterministic_dat
     # Deterministyczna wycena nadal re-liczana (honestnie NOT_IMPLEMENTED
     # tu, bo brak fundamentals w tym teście, ale funkcja się nie wywala).
     assert detail["valuation_result"].implemented is False
+
+
+def test_broker_filter_shows_only_matching_broker_subposition(conn):
+    """Test KLUCZOWY (Decyzja właścicielki, "FILTR PLATFORMY W PORTFELU"):
+    pozycja AAPL z 3 akcjami BONUS na Trade Republic + 2 akcjami BUY na
+    Revolut -- filtr broker='TRADE_REPUBLIC' ma pokazać WYŁĄCZNIE 3
+    akcje/0 USD invested, filtr broker='REVOLUT' WYŁĄCZNIE 2 akcje/380
+    USD invested, bez filtra (None) -- sumę obu (5 akcji)."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BONUS",
+        purchase_date="2026-05-01", shares=3.0, total_invested=0.0, currency="USD",
+    )
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="REVOLUT", acquisition_type="BUY",
+        purchase_date="2026-06-01", shares=2.0, total_invested=380.0, currency="USD",
+    )
+    conn.commit()
+    from buffett_scanner.db import get_position
+    position = get_position(conn, position_id)
+
+    summary_all = get_position_summary(conn, position)
+    assert summary_all.shares_held == 5.0
+
+    summary_tr = get_position_summary(conn, position, broker="TRADE_REPUBLIC")
+    assert summary_tr.shares_held == 3.0
+    assert summary_tr.invested_by_currency == {"USD": 0.0}
+
+    summary_revolut = get_position_summary(conn, position, broker="REVOLUT")
+    assert summary_revolut.shares_held == 2.0
+    assert summary_revolut.invested_by_currency == {"USD": 380.0}
+
+
+def test_broker_filter_excludes_positions_with_no_transactions_on_that_broker(conn):
+    """Pozycja istniejąca WYŁĄCZNIE na Revolut nie może się pojawić w
+    widoku "Trade Republic" jako wiersz z 0 akcji -- ma być całkowicie
+    pominięta (sekcja "nie mieszaj akcji pomiędzy brokerami")."""
+    user_id = create_user(conn, "Anastazja")
+    position_tr = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    position_revolut = insert_position(conn, user_id=user_id, ticker="GSK", company_name="GSK plc")
+    insert_purchase_transaction(
+        conn, position_id=position_tr, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+        purchase_date="2026-05-01", shares=1.0, total_invested=100.0, currency="USD",
+    )
+    insert_purchase_transaction(
+        conn, position_id=position_revolut, broker="REVOLUT", acquisition_type="BUY",
+        purchase_date="2026-05-01", shares=1.0, total_invested=50.0, currency="USD",
+    )
+    conn.commit()
+
+    results_all = get_user_positions_with_summaries(conn, user_id)
+    assert {p["ticker"] for p, _ in results_all} == {"AAPL", "GSK"}
+
+    results_tr = get_user_positions_with_summaries(conn, user_id, broker="TRADE_REPUBLIC")
+    assert {p["ticker"] for p, _ in results_tr} == {"AAPL"}  # GSK pominięty, nie 0-akcyjny wiersz
+
+    results_revolut = get_user_positions_with_summaries(conn, user_id, broker="REVOLUT")
+    assert {p["ticker"] for p, _ in results_revolut} == {"GSK"}
+
+
+def test_broker_filter_keeps_fully_sold_position_on_that_broker_visible(conn):
+    """Pozycja w pełni sprzedana NA TYM BROKERZE (shares_held=0, ale z
+    realną historią transakcji) różni się od pozycji BEZ ŻADNEJ
+    transakcji na tym brokerze -- ta pierwsza NIE powinna być cicho
+    pomijana (to legalny stan "zamknięta pozycja", nie "nie istnieje
+    tu")."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+        purchase_date="2026-05-01", shares=2.0, total_invested=200.0, currency="USD",
+    )
+    insert_sale_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC",
+        sale_date="2026-06-01", shares=2.0, sale_price=120.0, currency="USD",
+    )
+    conn.commit()
+
+    results = get_user_positions_with_summaries(conn, user_id, broker="TRADE_REPUBLIC")
+    assert len(results) == 1
+    assert results[0][1].shares_held == 0.0
+
+
+def test_get_brokers_in_use_for_user_excludes_other_when_unused(conn):
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+        purchase_date="2026-05-01", shares=1.0, total_invested=100.0, currency="USD",
+    )
+    conn.commit()
+    assert get_brokers_in_use_for_user(conn, user_id) == {"TRADE_REPUBLIC"}
+
+
+def test_get_brokers_in_use_for_user_includes_other_when_used_via_sale(conn):
+    """Broker może pojawić się WYŁĄCZNIE przez sprzedaż (np. pozycja
+    kupiona na Trade Republic, częściowo sprzedana przez Inny broker po
+    transferze) -- funkcja musi uwzględniać obie tabele transakcji."""
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(conn, user_id=user_id, ticker="AAPL", company_name="Apple Inc.")
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+        purchase_date="2026-05-01", shares=2.0, total_invested=200.0, currency="USD",
+    )
+    insert_sale_transaction(
+        conn, position_id=position_id, broker="OTHER",
+        sale_date="2026-06-01", shares=1.0, sale_price=120.0, currency="USD",
+    )
+    conn.commit()
+    assert get_brokers_in_use_for_user(conn, user_id) == {"TRADE_REPUBLIC", "OTHER"}
+
+
+def test_get_brokers_in_use_for_user_isolates_users(conn):
+    user_a = create_user(conn, "Anastazja")
+    user_b = create_user(conn, "Mąż")
+    position_a = insert_position(conn, user_id=user_a, ticker="AAPL", company_name="Apple Inc.")
+    insert_purchase_transaction(
+        conn, position_id=position_a, broker="REVOLUT", acquisition_type="BUY",
+        purchase_date="2026-05-01", shares=1.0, total_invested=100.0, currency="USD",
+    )
+    conn.commit()
+    assert get_brokers_in_use_for_user(conn, user_a) == {"REVOLUT"}
+    assert get_brokers_in_use_for_user(conn, user_b) == set()
 
 
 def test_get_review_needed_count_counts_only_review_later_action(conn):

@@ -126,9 +126,22 @@ def get_current_price_for_position(conn: sqlite3.Connection, position: sqlite3.R
     return row["close"], "USD"
 
 
-def get_position_summary(conn: sqlite3.Connection, position: sqlite3.Row) -> PositionSummary:
+def get_position_summary(
+    conn: sqlite3.Connection, position: sqlite3.Row, *, broker: str | None = None,
+) -> PositionSummary:
+    """`broker=None` (domyślnie) -- wszystkie platformy, bez zmian.
+    `broker="TRADE_REPUBLIC"`/`"REVOLUT"`/`"OTHER"` -- filtr platformy
+    (Decyzja właścicielki, Faza 7 "FILTR PLATFORMY W PORTFELU"):
+    transakcje innych brokerów są odrzucane PRZED przekazaniem do
+    `compute_position_summary` -- ta sama, niezmieniona, czysta funkcja
+    liczy wynik tak, jakby pozycja istniała tylko na wybranym brokerze.
+    Model danych/logika average-cost w `ui/portfolio.py` NIE są
+    zmieniane -- filtr działa wyłącznie na poziomie tego, co dostaje."""
     purchases = get_purchase_transactions(conn, position["position_id"])
     sales = get_sale_transactions(conn, position["position_id"])
+    if broker is not None:
+        purchases = [p for p in purchases if p["broker"] == broker]
+        sales = [s for s in sales if s["broker"] == broker]
     current_price, current_price_currency = get_current_price_for_position(conn, position)
     return compute_position_summary(
         position["position_id"], purchases, sales,
@@ -137,10 +150,42 @@ def get_position_summary(conn: sqlite3.Connection, position: sqlite3.Row) -> Pos
 
 
 def get_user_positions_with_summaries(
-    conn: sqlite3.Connection, user_id: int,
+    conn: sqlite3.Connection, user_id: int, *, broker: str | None = None,
 ) -> list[tuple[sqlite3.Row, PositionSummary]]:
+    """`broker` -- patrz `get_position_summary`. Gdy ustawiony, pozycje
+    bez ŻADNEJ transakcji na tym brokerze są pomijane całkowicie (nie
+    pokazywane jako wiersz z 0 akcji) -- widok "Trade Republic" ma
+    pokazywać WYŁĄCZNIE to, co jest na Trade Republic."""
     positions = get_positions_for_user(conn, user_id)
-    return [(p, get_position_summary(conn, p)) for p in positions]
+    result = []
+    for p in positions:
+        summary = get_position_summary(conn, p, broker=broker)
+        if broker is not None and summary.shares_held == 0 and not summary.by_broker_currency:
+            continue
+        result.append((p, summary))
+    return result
+
+
+def get_brokers_in_use_for_user(conn: sqlite3.Connection, user_id: int) -> set[str]:
+    """Brokery z co najmniej jedną realną transakcją (zakup/bonus LUB
+    sprzedaż) dla tego użytkownika -- używane wyłącznie do decyzji, czy
+    pokazać opcję "Inny" w filtrze platformy (Decyzja właścicielki:
+    "Other -- tylko jeśli istnieją realne transakcje OTHER")."""
+    rows = conn.execute(
+        """
+        SELECT DISTINCT pt.broker AS broker
+        FROM purchase_transactions pt
+        JOIN positions p ON p.position_id = pt.position_id
+        WHERE p.user_id = ?
+        UNION
+        SELECT DISTINCT st.broker AS broker
+        FROM sale_transactions st
+        JOIN positions p ON p.position_id = st.position_id
+        WHERE p.user_id = ?
+        """,
+        (user_id, user_id),
+    ).fetchall()
+    return {row["broker"] for row in rows}
 
 
 def get_review_needed_count(conn: sqlite3.Connection, user_id: int) -> int:

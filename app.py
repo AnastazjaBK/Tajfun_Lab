@@ -54,12 +54,21 @@ from buffett_scanner.ui.labels import (
 )
 from buffett_scanner.ui.portfolio import compute_broker_currency_subpositions, compute_portfolio_bar_summary
 from buffett_scanner.ui.queries import (
+    get_brokers_in_use_for_user,
     get_candidate_detail,
     get_latest_live_scan_run,
     get_review_needed_count,
     get_synthesis_rows,
     get_user_positions_with_summaries,
 )
+
+# Filtr platformy w PORTFELU (Decyzja właścicielki) -- "ALL" oznacza
+# "Wszystkie" (agregacja wszystkich platform), pozostałe to dokładnie
+# kody brokerów z istniejącego enumu. Trade Republic/Revolut są ZAWSZE
+# dostępne w filtrze; "Inny" (OTHER) pokazuje się TYLKO gdy użytkownik
+# ma choć jedną realną transakcję na tym brokerze (patrz
+# `get_brokers_in_use_for_user`) -- nigdy jako pusta, myląca opcja.
+_PLATFORM_FILTER_ALWAYS_AVAILABLE = ("ALL", "TRADE_REPUBLIC", "REVOLUT")
 
 # Sekcja 16 specyfikacji: mapowanie przycisków UI na istniejący enum
 # `user_decisions.status` (sekcja 1.1/16 design review) -- NIE
@@ -184,8 +193,16 @@ def _render_synthesis_table(conn) -> tuple[str | None, list[dict]]:
 
 def _render_portfolio_bar(conn, user: dict) -> None:
     """Sekcja 5 specyfikacji: jednoliniowy pasek, nigdy pełna tabela
-    pozycji tutaj."""
-    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"])
+    pozycji tutaj. Respektuje filtr platformy wybrany w zakładce
+    PORTFEL (`st.session_state["platform_filter"]`) -- ten pasek
+    renderuje się PRZED wejściem w zakładki, ale widget filtra jest
+    zdefiniowany PÓŹNIEJ w tym samym przebiegu skryptu; czytanie jego
+    `session_state` tutaj jest bezpieczne, bo Streamlit zachowuje
+    wartość widgetu między przebiegami -- przy pierwszym uruchomieniu
+    klucza jeszcze nie ma, stąd jawny fallback na "ALL" (Wszystkie)."""
+    platform_filter = st.session_state.get("platform_filter", "ALL")
+    broker = None if platform_filter == "ALL" else platform_filter
+    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"], broker=broker)
     summaries = [s for _, s in positions_with_summaries]
     review_needed = get_review_needed_count(conn, user["user_id"])
     bar = compute_portfolio_bar_summary(summaries, review_needed_count=review_needed)
@@ -342,13 +359,21 @@ def _format_optional(value: float | None, fmt: str = "{:.2f}") -> str:
     return fmt.format(value) if value is not None else "—"
 
 
-def _render_portfolio_summary_tab(conn, positions_with_summaries: list) -> None:
+def _render_portfolio_summary_tab(
+    conn, positions_with_summaries: list, *, platform_filter: str = "ALL",
+) -> None:
     """Sekcja 6 specyfikacji -- PODSUMOWANIE + tabela pozycji. Tabela
     jest na poziomie (pozycja, broker) -- sekcja 7: "szczegóły muszą
-    zachować rozbicie na brokerów", nigdy tylko zagregowana linia."""
+    zachować rozbicie na brokerów", nigdy tylko zagregowana linia.
+    `positions_with_summaries` przychodzi JUŻ przefiltrowane po
+    platformie (patrz `_render_portfolio_tab`) -- `platform_filter` jest
+    tu tylko do poprawnego komunikatu o pustym stanie."""
     summaries = [s for _, s in positions_with_summaries]
     if not positions_with_summaries:
-        st.info("Brak pozycji. Dodaj pierwszą transakcję w zakładce '+ Dodaj transakcję'.")
+        if platform_filter == "ALL":
+            st.info("Brak pozycji. Dodaj pierwszą transakcję w zakładce '+ Dodaj transakcję'.")
+        else:
+            st.info(f"Brak pozycji na platformie {broker_label(platform_filter)}.")
         return
 
     st.markdown("##### Łączne wartości")
@@ -716,17 +741,42 @@ def _render_add_transaction_tab(conn, user: dict) -> None:
         _render_existing_position_transaction_form(conn, positions[options.index(choice) - 1])
 
 
+def _render_platform_filter(conn, user: dict) -> str:
+    """Filtr platformy w PORTFELU (Decyzja właścicielki). Działa na
+    poziomie TRANSAKCJI (filtruje purchase/sale rows PRZED przekazaniem
+    do `compute_position_summary` -- `ui/queries.get_user_positions_
+    with_summaries(..., broker=...)`), nigdy nie miesza brokerów,
+    użytkowników ani walut, nie wymaga FX. Trade Republic/Revolut
+    zawsze widoczne; "Inny" tylko gdy użytkownik ma choć jedną realną
+    transakcję OTHER (`get_brokers_in_use_for_user`)."""
+    brokers_in_use = get_brokers_in_use_for_user(conn, user["user_id"])
+    codes = list(_PLATFORM_FILTER_ALWAYS_AVAILABLE)
+    if "OTHER" in brokers_in_use:
+        codes.append("OTHER")
+    labels = {"ALL": "Wszystkie", **{c: broker_label(c) for c in codes if c != "ALL"}}
+    selected = st.selectbox(
+        "Platforma", codes, format_func=lambda c: labels[c], key="platform_filter",
+    )
+    return selected
+
+
 def _render_portfolio_tab(conn, user: dict) -> None:
-    """Sekcja 6 specyfikacji: wewnątrz PORTFEL, drugi poziom zakładek
-    [PODSUMOWANIE][+ Dodaj transakcję] + DYNAMICZNE tickery posiadanych
-    pozycji."""
-    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"])
+    """Sekcja 6 specyfikacji: wewnątrz PORTFEL, filtr platformy, drugi
+    poziom zakładek [PODSUMOWANIE][+ Dodaj transakcję] + DYNAMICZNE
+    tickery posiadanych pozycji. Filtr platformy zawęża PODSUMOWANIE i
+    zakładki pozycji; "+ Dodaj transakcję" celowo NIE jest filtrowana
+    (`_render_add_transaction_tab` sama czyta pełną, nieprzefiltrowaną
+    listę pozycji -- można dodać transakcję na innej platformie niż
+    aktualnie przeglądana)."""
+    platform_filter = _render_platform_filter(conn, user)
+    broker = None if platform_filter == "ALL" else platform_filter
+    positions_with_summaries = get_user_positions_with_summaries(conn, user["user_id"], broker=broker)
 
     inner_labels = ["PODSUMOWANIE", "+ Dodaj transakcję"] + [p["ticker"] for p, _ in positions_with_summaries]
     inner_tabs = st.tabs(inner_labels)
 
     with inner_tabs[0]:
-        _render_portfolio_summary_tab(conn, positions_with_summaries)
+        _render_portfolio_summary_tab(conn, positions_with_summaries, platform_filter=platform_filter)
 
     with inner_tabs[1]:
         _render_add_transaction_tab(conn, user)
