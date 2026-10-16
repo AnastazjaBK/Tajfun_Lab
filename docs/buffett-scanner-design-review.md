@@ -2594,6 +2594,21 @@ Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzen
 - **(Nowe, z architektury MULTI-USER, v1.5–v1.6) Filtrowanie po `user_id` w zapytaniach aplikacji to dyscyplina tymczasowa, NIE docelowa granica bezpieczeństwa** — musi obowiązywać od Fazy 6 (bo to jedyna ochrona przy SQLite/braku auth), ale realna izolacja danych między użytkownikami wymaga database-level authorization (docelowo RLS w Supabase) wdrożonej dopiero w przyszłej fazie prawdziwego multi-user auth, nie w Fazie 0 — patrz pełne uzasadnienie w sekcji 1.1 „NEW IMPORTANT ISSUES".
 - **(Nowe, z architektury MULTI-USER, v1.5) Filtrowanie kandydatów per przeglądający użytkownik** (REJECT/WATCH/SNOOZE) musi być stosowane przy renderowaniu, nie zapisywane jako cecha spółki — patrz sekcja 1.1.
 
+### Etap D (część manualna) + Backfill snapshotu + Etap E — wdrożenie realne, zakończone
+
+**Manualne wdrożenie (właścicielka, przeprowadzona przez checkpointy):** Supabase (projekt "Obserwuj$500", Session pooler zamiast Direct connection — darmowy, IPv4-proxied, bez potrzeby płatnego dodatku IPv4) + Streamlit Community Cloud (appka wdrożona z brancha `claude/buffett-scanner-design-review-mrud89`, `app.py`). **Realny błąd znaleziony podczas wdrożenia**: hasło do bazy Supabase zawierało `@`, co łamało parsowanie connection stringu (`could not translate host name` — fragment hasła mylnie doklejony do nazwy hosta) — naprawione resetem hasła na ciąg bez znaków specjalnych, zgodnie z ostrzeżeniem samego Supabase ("percent-encode special characters"). Appka ustawiona jako prywatna (Streamlit "Make this app public" = OFF) z zaproszonymi widzami.
+
+**Backfill snapshotu scannera:** w momencie wdrożenia appka pokazywała czytelny błąd "Pointer snapshotu niedostępny (status 404)" — oczekiwane, bo funkcja publikacji (Etap B) powstała PO ostatnim realnym live-scanie (run #8, Faza 6h, 2026-10-06). Zamiast nowego, płatnego live-scanu: nowy jednorazowy workflow `.github/workflows/backfill-snapshot-publish.yml` (zarejestrowany na `main` — wymóg techniczny GitHuba dla `workflow_dispatch`, treść wykonywana z brancha implementacji) pobrał już opłacony artefakt z run #8 (`actions/download-artifact@v4` z `run-id`) i opublikował go przez istniejącą komendę `publish-snapshot` — zero nowych wywołań FMP/SEC EDGAR/Claude. Oba Release'y (`scanner-snapshot-live-scan-2026-10-06T083825543395Z` + `scanner-snapshot-latest`) potwierdzone, appka poprawnie wyświetliła dane scannera z 6 października.
+
+**Etap E — test trwałości danych na danych TESTOWYCH, zgodnie z 7-punktowym planem właścicielki, wszystkie kroki potwierdzone empirycznie przez samą właścicielkę na żywej appce:**
+1. Utworzeni dwaj testowi użytkownicy (`test`, `test2`) — potwierdzona izolacja per-user (pozycja dodana dla `test` poprawnie NIEwidoczna dla `test2`).
+2. Zapis testowej transakcji do Supabase — potwierdzony w UI.
+3. Odczyt po odświeżeniu strony — pozycja nadal widoczna.
+4. Pełny reboot appki (Streamlit "Reboot app", równoważny redeployowi — czyści filesystem appki od zera) — pozycja **przetrwała**.
+5. Usunięcie danych testowych bezpośrednio w Supabase SQL Editor (transakcja `DELETE` w kolejności zgodnej z FK: `purchase_transactions`/`sale_transactions`/`purchase_thesis`/`holding_user_actions` → `positions` → `user_decisions` → `users`, filtrowane po `display_name IN ('test','test2')`) — potwierdzone zapytaniem `SELECT` pokazującym pustą tabelę `users` po usunięciu.
+
+**Wniosek:** trwałość danych portfela w Supabase przez restart/redeploy appki jest empirycznie potwierdzona na prawdziwej infrastrukturze (nie tylko testach lokalnych/integracyjnych). Hostowany V0 uznany za gotowy do wpisania rzeczywistych pozycji właścicielki — zgodnie z jej wcześniejszym zastrzeżeniem, żadna realna transakcja nie została wpisana przed tym potwierdzeniem.
+
 ---
 
 ## LATER — bezpieczne do odłożenia
