@@ -1,0 +1,47 @@
+name: Backfill - publikacja istniejącego snapshotu scannera (Faza 8, jednorazowe)
+
+# Jednorazowy, zero-kosztowy workflow: publikuje JUZ ISTNIEJACY,
+# oplacony wynik live-scanu (artefakt z wczesniejszego runu
+# phase6-live-scan.yml) jako GitHub Release snapshot (Faza 8 Etap B),
+# bez ponownego uruchamiania live-scanu i bez zadnych platnych
+# wywolan API (FMP/SEC EDGAR/Claude). Potrzebny bo funkcja publikacji
+# snapshotu zostala dodana PO ostatnim realnym live-scanie (run #8,
+# 2026-10-06) -- hostowana appka Streamlit (Faza 8 Etap D) potrzebuje
+# opublikowanego snapshotu, zeby cokolwiek wyswietlic.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "ID uruchomienia phase6-live-scan.yml, z ktorego pobrac artefakt (np. 37437405189)"
+        required: true
+      artifact_name:
+        description: "Nazwa artefaktu do pobrania"
+        required: false
+        default: "phase6-live-scan-result"
+
+jobs:
+  backfill-publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # wymagane przez `gh release create/upload`
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Pobranie artefaktu z istniejacego, juz oplaconego runu
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publikacja snapshotu scannera (GitHub Release)
+        run: python -m buffett_scanner.cli --db live_scan_result.db publish-snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
