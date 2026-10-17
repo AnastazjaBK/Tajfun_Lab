@@ -89,6 +89,12 @@ from buffett_scanner.ui.labels import (
     decline_flags_label,
     holding_action_label,
 )
+from buffett_scanner.ui.price_changes import (
+    PERIODS,
+    compute_period_changes,
+    detect_price_anomalies,
+    periods_affected,
+)
 from buffett_scanner.ui.portfolio import (
     compute_broker_currency_subpositions,
     compute_portfolio_bar_summary,
@@ -101,6 +107,7 @@ from buffett_scanner.ui.queries import (
     get_candidate_detail,
     get_latest_live_scan_run,
     get_review_needed_count,
+    get_scan_price_rows,
     get_synthesis_rows,
     get_user_positions_with_summaries,
     is_instrument_confirmed,
@@ -327,7 +334,7 @@ def _render_user_picker(portfolio_conn) -> dict | None:
     return next(u for u in users if u["display_name"] == selected)
 
 
-def _render_synthesis_table(scanner_conn) -> tuple[str | None, list[dict]]:
+def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, list[dict]]:
     """Sekcja 4 specyfikacji: tabela SYNTEZY ostatniego WŁAŚCIWEGO
     live-scanu (nigdy walidacji technicznej -- patrz `ui/queries.
     get_latest_live_scan_run`). FAILED to status RAPORTU jakościowego,
@@ -351,9 +358,19 @@ def _render_synthesis_table(scanner_conn) -> tuple[str | None, list[dict]]:
         if warning:
             st.warning(f"⚠ {r['ticker']}: {warning}")
 
+    view = st.radio(
+        "Widok tabeli", _TOP20_VIEWS, horizontal=True, key="top20_view",
+        help="Na telefonie wybierz jeden widok — tabelę można też przewijać w bok.",
+    )
+    if view == "Zmiany cen":
+        _render_top20_price_changes(scanner_conn, portfolio_conn, run, rows)
+        st.caption(METHODOLOGY_DISCLAIMER)
+        return run["run_id"], rows
+
     table_data = [
         {
             "Ticker": r["ticker"],
+            "Finalista": f"★ {r['finalist_position']}" if r["finalist_position"] else "",
             "Spółka": r["company_name"],
             "Cena": r["current_price"],
             "Dlaczego spadła": decline_flags_label(r["triggered_decline_flags"]),
@@ -369,8 +386,101 @@ def _render_synthesis_table(scanner_conn) -> tuple[str | None, list[dict]]:
         for r in rows
     ]
     st.dataframe(table_data, use_container_width=True, hide_index=True)
+    st.caption("★ = finaliści skanu (pierwsza piątka raportu wg pełnego wyniku).")
     st.caption(METHODOLOGY_DISCLAIMER)
     return run["run_id"], rows
+
+
+_TOP20_VIEWS = ("Scoring", "Zmiany cen")
+_CHANGE_SOURCES = ("Na dzień skanu", "Bieżące")
+
+
+def _format_pct(change) -> str:
+    return "N/A" if change is None else f"{change.pct:+.1f}%"
+
+
+def _price_changes_cells(rows: list[dict], *, complete: bool, ref_date: str | None = None) -> tuple[dict, dict, str]:
+    """Komórki 1D..MAX (+ znaki do kolorowania) i opis anomalii (Faza 11, P2)."""
+    series = [(r["date"], r["close"]) for r in rows]
+    changes = compute_period_changes(series, ref_date=ref_date, history_complete=complete)
+    scoped = [r for r in rows if ref_date is None or r["date"][:10] <= ref_date]
+    anomalies = detect_price_anomalies(scoped)
+    affected = periods_affected(changes, anomalies)
+    cells, signs = {}, {}
+    for period in PERIODS:
+        change = changes[period]
+        cells[period] = _format_pct(change) + (" ⚠" if period in affected else "")
+        signs[period] = 0 if change is None else (1 if change.pct > 0 else -1 if change.pct < 0 else 0)
+    cells["MAX od"] = changes["MAX"].start_date if changes["MAX"] else "—"
+    note = "; ".join(
+        f"skok {a.pct:+.0f}% {a.date} — możliwe zdarzenie korporacyjne" for a in anomalies if a.strong
+    )
+    return cells, signs, note
+
+
+def _style_change_table(table_rows: list[dict], signs: list[dict]):
+    def css(column):
+        return [
+            _PL_GAIN_CSS if sign.get(column.name, 0) > 0 else _PL_LOSS_CSS if sign.get(column.name, 0) < 0 else ""
+            for sign in signs
+        ]
+    return pd.DataFrame(table_rows).style.apply(css, subset=list(PERIODS))
+
+
+def _render_top20_price_changes(scanner_conn, portfolio_conn, run, rows: list[dict]) -> None:
+    """Faza 11 (P2): zmiany cen TOP20 + finaliści. Dwa jawnie rozdzielone
+    źródła: snapshot skanu (stan na dzień skanu, niezmienny) i bieżące
+    notowania FMP -- ceny skanu nigdy nie są podmieniane na dzisiejsze."""
+    source = st.radio("Dane", _CHANGE_SOURCES, horizontal=True, key="top20_change_source")
+    market = _market(portfolio_conn)
+    table_rows, signs = [], []
+    scan_dates = []
+    since = (dt.date.today() - dt.timedelta(days=400)).isoformat()
+    for r in rows:
+        notes = []
+        warning = data_quality_warning(run["run_id"], r["cik"])
+        if warning:
+            notes.append(warning)
+        if source == _CHANGE_SOURCES[0]:
+            price_rows = get_scan_price_rows(scanner_conn, r["cik"])
+            ref_date = run["run_date"]
+            cells, sign, note = _price_changes_cells(price_rows, complete=False, ref_date=ref_date)
+            if price_rows:
+                scan_dates.append(max(p["date"] for p in price_rows if p["date"] <= ref_date))
+        else:
+            with st.spinner(f"Pobieram notowania {r['ticker']}…"):
+                history = market.history_for_symbol("FMP", r["ticker"])
+            if history is None:
+                cells, sign, note = {p: "N/A" for p in PERIODS} | {"MAX od": "—"}, {}, "brak notowań"
+            else:
+                cells, sign, note = _price_changes_cells(history[0], complete=history[1])
+            spin_off = market.has_recent_spin_off(r["ticker"], since)
+            if spin_off:
+                notes.append(f"wydzielenie spółki (spin-off) {spin_off} wg FMP")
+        if note:
+            notes.append(note)
+        table_rows.append({
+            "Ticker": r["ticker"],
+            "Finalista": f"★ {r['finalist_position']}" if r["finalist_position"] else "",
+            "Spółka": r["company_name"], **cells, "Uwagi": "; ".join(notes),
+        })
+        signs.append(sign)
+    st.dataframe(_style_change_table(table_rows, signs), use_container_width=True, hide_index=True)
+    if source == _CHANGE_SOURCES[0]:
+        st.caption(
+            f"Notowania zapisane w skanie (ostatnia sesja {max(scan_dates) if scan_dates else '—'}); skan pobiera "
+            "ok. 13 miesięcy historii, więc 5Y i MAX = N/A. Te liczby się nie zmieniają."
+        )
+    else:
+        st.caption(
+            "Bieżące notowania dzienne FMP (odświeżane co 12 h). MAX = najstarsza cena dostępna u dostawcy (data w "
+            "kolumnie „MAX od”), nie zawsze debiut giełdowy. N/A = brak pełnej historii dla okresu."
+        )
+    st.caption(
+        "Zmiana ceny, nie zwrot z dywidendami. ⚠ = okres obejmuje jednodniowy skok ≥50% albo ≥25% przy "
+        "wielokrotnym wolumenie — możliwe zdarzenie korporacyjne (np. wydzielenie spółki), liczba może być "
+        "niewiarygodna. Ranking i scoring bez zmian."
+    )
 
 
 def _render_portfolio_bar(portfolio_conn, scanner_conn, user: dict) -> None:
@@ -573,6 +683,11 @@ def _render_portfolio_summary_tab(
         _render_pl_metric(cols[2], "Zysk/strata", bar["unrealized_pl_by_currency"])
         st.caption("Każda waluta osobno — bez przeliczania i bez sumowania różnych walut.")
 
+    portfolio_view = st.radio("Widok pozycji", _PORTFOLIO_VIEWS, horizontal=True, key="portfolio_view")
+    if portfolio_view == "Zmiany cen":
+        _render_portfolio_price_changes(portfolio_conn, positions_with_summaries)
+        return
+
     st.markdown("##### Pozycje (rozbicie per broker)")
     table_rows = []
     pl_signs = []
@@ -644,6 +759,44 @@ def _render_portfolio_summary_tab(
     st.caption(
         "Bieżąca cena i wartość w walucie, w której zapłaciłaś/eś (np. PLN) — przeliczone kursem NBP. "
         "Zysk/strata = bieżąca wartość − własny koszt, razem z efektem zmiany kursu waluty."
+    )
+
+
+_PORTFOLIO_VIEWS = ("Wycena", "Zmiany cen")
+
+
+def _position_history(market: MarketData, position) -> tuple[list[dict], bool, str] | None:
+    """Notowania pozycji od jej dostawcy ceny (tylko potwierdzony instrument)."""
+    position = dict(position)
+    if not is_instrument_confirmed(position):
+        return None
+    provider = position.get("price_provider")
+    symbol = position.get("price_symbol") or position["ticker"]
+    return market.history_for_symbol(provider, symbol)
+
+
+def _render_portfolio_price_changes(portfolio_conn, positions_with_summaries: list) -> None:
+    """Faza 11 (P2): zmiany cen posiadanych instrumentów (po pozycji, nie
+    po brokerze -- cena jest ta sama na każdej platformie)."""
+    market = _market(portfolio_conn)
+    table_rows, signs = [], []
+    for position, _summary in positions_with_summaries:
+        history = _position_history(market, position)
+        if history is None:
+            cells, sign, note = {p: "N/A" for p in PERIODS} | {"MAX od": "—"}, {}, ""
+            source = "brak (instrument niepotwierdzony albo brak danych)"
+        else:
+            cells, sign, note = _price_changes_cells(history[0], complete=history[1])
+            source = history[2]
+        table_rows.append({
+            "Ticker": position["ticker"], "Spółka": position["company_name"], **cells,
+            "Źródło": source, "Uwagi": note,
+        })
+        signs.append(sign)
+    st.dataframe(_style_change_table(table_rows, signs), use_container_width=True, hide_index=True)
+    st.caption(
+        "Zmiana ceny instrumentu w walucie notowania (nie Twój wynik inwestycji — ten jest w widoku „Wycena”). "
+        "EODHD w darmowym planie daje tylko ostatni rok: 5Y i MAX = N/A. ⚠ = możliwe zdarzenie korporacyjne."
     )
 
 
@@ -1386,7 +1539,7 @@ def main() -> None:
     _render_glossary()
     user = _render_user_picker(portfolio_conn)
 
-    latest_run_id, synthesis_rows = _render_synthesis_table(scanner_conn)
+    latest_run_id, synthesis_rows = _render_synthesis_table(scanner_conn, portfolio_conn)
 
     if user is None:
         return

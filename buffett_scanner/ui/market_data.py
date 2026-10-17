@@ -43,6 +43,8 @@ from buffett_scanner.ui.pricing import (
 )
 
 EODHD_DAILY_BUDGET = 18
+FMP_ROWS_PER_REQUEST = 5000
+FMP_HISTORY_MAX_CHUNKS = 3
 FAILURE_BACKOFF_S = 15 * 60
 
 TTL_EODHD_EOD_S = 6 * 3600
@@ -212,17 +214,55 @@ class MarketData:
         return self._cached(f"fmp:quote:{symbol}", TTL_FMP_QUOTE_S, fetch)
 
     def fmp_history(self, symbol: str) -> Cached | None:
-        """Pełna dostępna historia (FMP zwraca maks. 5000 sesji na
-        zapytanie, ok. 20 lat). Tylko date/close/volume -- mniejszy cache."""
+        """Pełna dostępna historia: FMP zwraca maks. 5000 sesji na
+        zapytanie (ok. 20 lat, potwierdzone 2026-10-17), więc przy pełnej
+        porcji dociągamy starsze (maks. `FMP_HISTORY_MAX_CHUNKS` zapytań).
+        Payload: {"rows": [{date, close, volume}], "complete": bool} --
+        `complete=False` == nawet po dociąganiu historia może być dłuższa
+        (wtedy MAX = N/A, nie "najstarsza dostępna")."""
         today = self._now().date().isoformat()
 
         def fetch():
-            rows = self._fmp(lambda c: c.get_historical_prices(symbol, from_date="1980-01-01", to_date=today))
-            if not rows:
-                return None
-            return [{"date": r["date"], "close": r.get("close"), "volume": r.get("volume")} for r in rows]
+            rows: list[dict] = []
+            to_date = today
+            complete = False
+            for _ in range(FMP_HISTORY_MAX_CHUNKS):
+                chunk = self._fmp(lambda c: c.get_historical_prices(symbol, from_date="1970-01-01", to_date=to_date))
+                if chunk is None:
+                    return None
+                chunk = [r for r in chunk if not rows or r["date"] < rows[0]["date"]]
+                rows = [{"date": r["date"], "close": r.get("close"), "volume": r.get("volume")} for r in chunk] + rows
+                if len(chunk) < FMP_ROWS_PER_REQUEST:
+                    complete = True
+                    break
+                to_date = (dt.date.fromisoformat(rows[0]["date"]) - dt.timedelta(days=1)).isoformat()
+            return {"rows": rows, "complete": complete} if rows else None
 
         return self._cached(f"fmp:history:{symbol}", TTL_HISTORY_S, fetch)
+
+    def history_for_symbol(self, provider: str | None, symbol: str) -> tuple[list[dict], bool, str] | None:
+        """(notowania [{date, close, volume}], czy historia pełna, źródło)
+        -- EODHD Free daje tylko ostatni rok (historia niepełna)."""
+        if provider == PROVIDER_EODHD:
+            cached = self.eodhd_eod(symbol)
+            if cached is None:
+                return None
+            return cached.value, False, "EODHD (plan Free: 1 rok)"
+        cached = self.fmp_history(symbol)
+        if cached is None:
+            return None
+        return cached.value["rows"], bool(cached.value["complete"]), "FMP"
+
+    def has_recent_spin_off(self, symbol: str, since: str) -> str | None:
+        """Data wydzielenia (FMP `splits`, splitType=spin-off) od `since`."""
+        cached = self.fmp_splits(symbol)
+        if cached is None:
+            return None
+        dates = [
+            r.get("date") for r in cached.value
+            if isinstance(r, dict) and str(r.get("splitType", "")).lower() == "spin-off" and str(r.get("date", "")) >= since
+        ]
+        return max(dates) if dates else None
 
     def fmp_dividends(self, symbol: str) -> Cached | None:
         def fetch():

@@ -520,3 +520,15 @@ def test_void_position_hides_it(conn):
     conn.commit()
     assert get_user_positions_with_summaries(conn, conn, user_id) == []
     assert get_position(conn, position_id) is not None  # wiersz zostaje
+
+
+def test_finalist_rank_key_matches_live_report_rule():
+    """Faza 11 (P2): kompletny total_score przed PARTIAL, wyżej = lepiej."""
+    from buffett_scanner.ui.queries import _finalist_rank_key
+
+    complete_low = {"total_score": 60.0, "business_quality_score": 1, "safety_score": 1, "fear_score": 1, "dividend_score": 1}
+    complete_high = {**complete_low, "total_score": 80.0}
+    partial = {"total_score": None, "business_quality_score": 40.0, "safety_score": 15.0, "fear_score": 4.0, "dividend_score": 10.0}
+    keys = sorted([_finalist_rank_key(partial), _finalist_rank_key(complete_low), _finalist_rank_key(complete_high)])
+    assert keys == [(0, -80.0), (0, -60.0), (1, -69.0)]
+    assert _finalist_rank_key(None) is None

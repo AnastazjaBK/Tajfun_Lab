@@ -97,6 +97,7 @@ def get_synthesis_rows(scanner_conn: sqlite3.Connection, run_id: str) -> list[di
         result.append({
             "ticker": row["ticker"],
             "cik": row["cik"],
+            "finalist_rank_key": _finalist_rank_key(analysis_row if row["analysis_id"] is not None else None),
             "company_name": row["company_name"],
             "current_price": row["current_price"],
             "triggered_decline_flags": triggered_flags,
@@ -109,7 +110,42 @@ def get_synthesis_rows(scanner_conn: sqlite3.Connection, run_id: str) -> list[di
             "llm_error": row["llm_error"],
             "analysis_id": row["analysis_id"],
         })
+    for rank, r in enumerate(sorted(
+        (r for r in result if r["finalist_rank_key"] is not None), key=lambda r: r["finalist_rank_key"],
+    )[:FINALIST_LIMIT], start=1):
+        r["finalist_position"] = rank
+    for r in result:
+        r.setdefault("finalist_position", None)
+        r.pop("finalist_rank_key")
     return result
+
+
+# Faza 11 (P2): finaliści = ta sama reguła co raport live-scanu
+# (`live_scan._rank_key` + `rank_candidates(limit=5)`, domyślne
+# `--limit 5`): kompletny `total_score` przed PARTIAL, w kategorii wyżej
+# lepiej; liczone z ZAPISANYCH wyników analiz, zero przeliczania scoringu.
+FINALIST_LIMIT = 5
+
+
+def _finalist_rank_key(analysis_row) -> tuple[int, float] | None:
+    if analysis_row is None:
+        return None
+    if analysis_row["total_score"] is not None:
+        return (0, -analysis_row["total_score"])
+    partial = sum(
+        analysis_row[k] for k in ("business_quality_score", "safety_score", "fear_score", "dividend_score")
+        if analysis_row[k] is not None
+    )
+    return (1, -partial)
+
+
+def get_scan_price_rows(scanner_conn: sqlite3.Connection, cik: str) -> list[dict]:
+    """Notowania ze snapshotu skanu (Faza 11, P2) -- stan na dzień skanu,
+    nigdy podmieniane na dzisiejsze."""
+    return [
+        {"date": r["date"], "close": r["close"], "volume": r["volume"]}
+        for r in get_price_series(scanner_conn, cik)
+    ]
 
 
 def get_current_price_for_position(scanner_conn: sqlite3.Connection, position) -> tuple[float | None, str | None]:
