@@ -66,6 +66,7 @@ from buffett_scanner.portfolio_backend import (
     insert_user_decision,
     backup_payload,
     get_latest_backup_info,
+    set_transaction_fx_rate,
     update_position_fields,
     update_position_instrument,
     void_position,
@@ -88,13 +89,13 @@ from buffett_scanner.ui.labels import (
     decline_flags_label,
     holding_action_label,
 )
-from buffett_scanner.ui.portfolio import compute_broker_currency_subpositions, compute_portfolio_bar_summary
-from buffett_scanner.ui.market_data import EODHD_DAILY_BUDGET, MarketData
-from buffett_scanner.ui.pricing import (
-    BASE_CURRENCY,
-    FxRates,
-    total_in_currency,
+from buffett_scanner.ui.portfolio import (
+    compute_broker_currency_subpositions,
+    compute_portfolio_bar_summary,
+    compute_portfolio_pln_summary,
 )
+from buffett_scanner.ui.market_data import EODHD_DAILY_BUDGET, MarketData
+from buffett_scanner.ui.pricing import FxRates
 from buffett_scanner.ui.queries import (
     get_brokers_in_use_for_user,
     get_candidate_detail,
@@ -210,27 +211,61 @@ def _render_pl_metric(container, label: str, values: dict[str, float] | None) ->
     container.markdown(f"#### {_format_pl_dict_colored(values)}")
 
 
-def _render_pln_totals(container, bar: dict, fx: FxRates | None) -> None:
-    """Faza 9: łączne kwoty przeliczone na PLN kursem NBP -- tylko gdy
-    portfel ma waluty inne niż PLN (inaczej to dubel wiersza powyżej).
-    Brak kursu którejkolwiek waluty -> komunikat, nigdy suma częściowa."""
-    currencies = set(bar["invested_by_currency"]) | set(bar["current_value_by_currency"])
-    if not currencies or currencies == {BASE_CURRENCY}:
+def _format_pln(value: float | None, signed: bool = False) -> str:
+    if value is None:
+        return "—"
+    return f"{value:+,.0f} PLN" if signed else f"{value:,.0f} PLN"
+
+
+def _format_shares(value: float) -> str:
+    """Do 8 miejsc po przecinku (ułamki akcji, kryptowaluty), bez zbędnych zer."""
+    text = f"{value:.8f}".rstrip("0").rstrip(".")
+    return text if text not in ("", "-0") else "0"
+
+
+def _render_pln_summary(container, positions_with_summaries: list, fx: FxRates | None, *, compact: bool) -> None:
+    """Faza 11 (P1): portfel w PLN. Koszt = kursy z dni transakcji (kurs
+    brokera, jeśli zapisany, inaczej NBP sprzed transakcji), wartość =
+    dzisiejszy kurs NBP. Suma bez ceny/kursu którejś pozycji jest jawnie
+    oznaczona jako częściowa, z listą brakujących instrumentów."""
+    pln = compute_portfolio_pln_summary(positions_with_summaries)
+    partial = bool(pln["missing"])
+    star = " *" if partial else ""
+    cols = container.columns(4)
+    cols[0].metric(f"Wartość portfela{star}", _format_pln(pln["value_pln"]))
+    cols[1].metric(f"Koszt nabycia{star}", _format_pln(pln["cost_pln"]))
+    pct = f" ({pln['unrealized_pl_pct']:+.1f}%)" if pln["unrealized_pl_pct"] is not None else ""
+    _render_pl_metric(cols[2], "Zysk/strata niezrealizowany", {"PLN": pln["unrealized_pl_pln"]})
+    if pct:
+        cols[2].caption(pct.strip())
+    _render_pl_metric(cols[3], "Zrealizowany (sprzedaże)", {"PLN": pln["realized_pl_pln"]})
+    total = pln["total_result_pln"]
+    container.markdown(f"Łączny wynik: {_color_pl_text(total, _format_pln(total, signed=True))}")
+    if partial:
+        container.warning(
+            "* Suma częściowa — brak ceny bieżącej lub kursu dla: " + ", ".join(pln["missing"])
+            + f". Koszt wszystkich posiadanych pozycji: {_format_pln(pln['cost_pln_all'])}."
+        )
+    notes = []
+    if fx is not None:
+        notes.append(f"Wartość po kursie średnim NBP z {fx.effective_date}")
+    else:
+        notes.append("Kurs NBP chwilowo niedostępny — wartości w walutach obcych nieznane")
+    if pln["estimated"]:
+        notes.append(
+            "koszt części transakcji w walucie obcej przeliczony kursem NBP z dnia roboczego przed transakcją "
+            "(orientacyjnie — to nie kurs brokera ani kurs podatkowy; kurs brokera możesz dopisać w karcie pozycji)"
+        )
+    container.caption("; ".join(notes) + ".")
+    if compact or len(pln["by_broker"]) < 2:
         return
-    # Pusty słownik (żadna pozycja nie ma ceny) -> "—", nigdy "0 PLN".
-    value = total_in_currency(bar["current_value_by_currency"], BASE_CURRENCY, fx) if bar["current_value_by_currency"] else None
-    invested = total_in_currency(bar["invested_by_currency"], BASE_CURRENCY, fx)
-    pl = total_in_currency(bar["unrealized_pl_by_currency"], BASE_CURRENCY, fx) if bar["unrealized_pl_by_currency"] else None
-    if fx is None or invested is None:
-        container.caption("Łącznie w PLN: kurs NBP chwilowo niedostępny.")
-        return
-    cols = container.columns(3)
-    cols[0].metric("Wartość bieżąca łącznie (PLN)", f"{value:,.0f} PLN" if value is not None else "—")
-    cols[1].metric("Zainwestowany kapitał łącznie (PLN)", f"{invested:,.0f} PLN")
-    _render_pl_metric(cols[2], "Zysk/strata łącznie (PLN)", {BASE_CURRENCY: pl} if pl is not None else None)
-    container.caption(
-        f"Przeliczenie po kursie średnim NBP z {fx.effective_date}. Kwoty w USD przeliczone po "
-        "dzisiejszym kursie (nie po kursie z dnia zakupu)."
+    container.dataframe(
+        [
+            {"Platforma": broker_label(b), "Wartość (PLN)": round(v["value_pln"], 2),
+             "Koszt (PLN)": round(v["cost_pln"], 2), "Wynik (PLN)": round(v["value_pln"] - v["cost_pln"], 2)}
+            for b, v in sorted(pln["by_broker"].items())
+        ],
+        use_container_width=True, hide_index=True,
     )
 
 
@@ -353,20 +388,17 @@ def _render_portfolio_bar(portfolio_conn, scanner_conn, user: dict) -> None:
     fx = market.nbp_table_a()
     positions_with_summaries = get_user_positions_with_summaries(
         portfolio_conn, scanner_conn, user["user_id"], broker=broker, quote_fn=market.quote_for_position, fx=fx,
+        pln_rate_fn=market.pln_rate,
     )
     summaries = [s for _, s in positions_with_summaries]
     review_needed = get_review_needed_count(portfolio_conn, user["user_id"])
-    bar = compute_portfolio_bar_summary(summaries, review_needed_count=review_needed)
 
     st.subheader("Portfel")
-    cols = st.columns(5)
-    cols[0].metric("Pozycje", bar["position_count"])
-    cols[1].metric("Wartość bieżąca", _format_currency_dict(bar["current_value_by_currency"]))
-    cols[2].metric("Zainwestowany kapitał", _format_currency_dict(bar["invested_by_currency"]))
-    _render_pl_metric(cols[3], "Zysk/strata", bar["unrealized_pl_by_currency"])
-    cols[4].metric("Do przeglądu", bar["review_needed_count"])
-    if bar["position_count"] > 0:
-        _render_pln_totals(st, bar, fx)
+    cols = st.columns(2)
+    cols[0].metric("Pozycje", len(summaries))
+    cols[1].metric("Do przeglądu", review_needed)
+    if summaries:
+        _render_pln_summary(st, positions_with_summaries, fx, compact=True)
         _render_pricing_caption(st, summaries, fx, market.eodhd_calls_today())
 
 
@@ -531,18 +563,20 @@ def _render_portfolio_summary_tab(
             st.info(f"Brak pozycji na platformie {broker_label(platform_filter)}.")
         return
 
-    st.markdown("##### Łączne wartości")
-    bar = compute_portfolio_bar_summary(summaries, review_needed_count=0)
-    cols = st.columns(3)
-    cols[0].metric("Wartość bieżąca", _format_currency_dict(bar["current_value_by_currency"]))
-    cols[1].metric("Zainwestowany kapitał", _format_currency_dict(bar["invested_by_currency"]))
-    _render_pl_metric(cols[2], "Zysk/strata", bar["unrealized_pl_by_currency"])
-    _render_pln_totals(st, bar, fx)
-    _render_pricing_caption(st, summaries, fx)
+    st.markdown("##### Łączne wartości (PLN)")
+    _render_pln_summary(st, positions_with_summaries, fx, compact=False)
+    with st.expander("Kwoty w oryginalnych walutach"):
+        bar = compute_portfolio_bar_summary(summaries, review_needed_count=0)
+        cols = st.columns(3)
+        cols[0].metric("Wartość bieżąca", _format_currency_dict(bar["current_value_by_currency"]))
+        cols[1].metric("Zainwestowany kapitał", _format_currency_dict(bar["invested_by_currency"]))
+        _render_pl_metric(cols[2], "Zysk/strata", bar["unrealized_pl_by_currency"])
+        st.caption("Każda waluta osobno — bez przeliczania i bez sumowania różnych walut.")
 
     st.markdown("##### Pozycje (rozbicie per broker)")
     table_rows = []
     pl_signs = []
+    pln_signs = []
     for position, summary in positions_with_summaries:
         latest_action = get_latest_holding_user_action(portfolio_conn, position["position_id"])
         status_label = holding_action_label(latest_action["action"]) if latest_action else "Trzymam"
@@ -566,7 +600,7 @@ def _render_portfolio_summary_tab(
                 "Ticker": position["ticker"],
                 "Spółka": position["company_name"],
                 "Platforma": broker_label(sub.broker),
-                "Akcje": sub.shares_held,
+                "Akcje": _format_shares(sub.shares_held),
                 "Śr. cena zakupu": _format_optional(sub.avg_price),
                 "Własny koszt": f"{sub.total_invested:.2f} {sub.currency}",
                 "Bieżąca cena": (
@@ -576,6 +610,10 @@ def _render_portfolio_summary_tab(
                     f"{current_value:.2f} {sub.currency}" if current_value is not None else "—"
                 ),
                 "Źródło ceny": _format_quote_source(summary),
+                "Wartość (PLN)": _format_pln(sub.current_value_pln),
+                "Koszt (PLN)": (_format_pln(sub.invested_pln) + (" ≈" if sub.pln_cost_estimated else ""))
+                if sub.invested_pln is not None else "—",
+                "Zysk/strata (PLN)": _format_pln(sub.unrealized_pl_pln, signed=True),
                 "Zysk/strata": f"{pl:+.2f} {sub.currency}" if pl is not None else "—",
                 "Zysk/strata %": f"{pl_pct:+.1f}%" if pl_pct is not None else "n/d",
                 "Sposób nabycia": acquisition_types_label(sub.acquisition_types),
@@ -583,6 +621,8 @@ def _render_portfolio_summary_tab(
                 "Uwagi": price_note,
             })
             pl_signs.append(0 if pl is None else (1 if pl > 0 else -1 if pl < 0 else 0))
+            pln_pl = sub.unrealized_pl_pln
+            pln_signs.append(0 if pln_pl is None else (1 if pln_pl > 0 else -1 if pln_pl < 0 else 0))
 
     if not table_rows:
         # Np. pozycja, której wszystkie transakcje anulowano (Faza 9).
@@ -592,7 +632,14 @@ def _render_portfolio_summary_tab(
     def _pl_column_css(_column):
         return [_PL_GAIN_CSS if sign > 0 else _PL_LOSS_CSS if sign < 0 else "" for sign in pl_signs]
 
-    styled = pd.DataFrame(table_rows).style.apply(_pl_column_css, subset=["Zysk/strata", "Zysk/strata %"])
+    def _pln_column_css(_column):
+        return [_PL_GAIN_CSS if sign > 0 else _PL_LOSS_CSS if sign < 0 else "" for sign in pln_signs]
+
+    styled = (
+        pd.DataFrame(table_rows).style
+        .apply(_pl_column_css, subset=["Zysk/strata", "Zysk/strata %"])
+        .apply(_pln_column_css, subset=["Zysk/strata (PLN)"])
+    )
     st.dataframe(styled, use_container_width=True, hide_index=True)
     st.caption(
         "Bieżąca cena i wartość w walucie, w której zapłaciłaś/eś (np. PLN) — przeliczone kursem NBP. "
@@ -620,7 +667,7 @@ def _render_position_card(portfolio_conn, position: dict, summary) -> None:
         st.info("Opis spółki niedostępny — ta pozycja nie ma jeszcze zapisanej analizy scannera.")
 
     st.markdown("#### Moja pozycja")
-    st.write(f"Liczba akcji: **{summary.shares_held:g}**")
+    st.write(f"Liczba akcji/jednostek: **{_format_shares(summary.shares_held)}**")
     brokers = sorted({sub.broker for sub in summary.by_broker_currency})
     st.write(f"Broker(rzy): {', '.join(broker_label(b) for b in brokers) or '—'}")
     for currency, invested in summary.invested_by_currency.items():
@@ -632,13 +679,16 @@ def _render_position_card(portfolio_conn, position: dict, summary) -> None:
             f"Bieżąca wartość: {(f'{value:.2f} {currency}' if value is not None else '—')} | "
             f"Zysk/strata: {pl_text}"
         )
-    if len(summary.by_broker_currency) > 1:
-        st.write("**Rozbicie per broker:**")
-        for sub in summary.by_broker_currency:
-            st.write(
-                f"- {broker_label(sub.broker)}: {sub.shares_held:g} akcji, "
-                f"śr. cena {_format_optional(sub.avg_price)} {sub.currency}"
-            )
+    for sub in summary.by_broker_currency:
+        realized = sub.realized_pl_pln
+        st.markdown(
+            f"- {broker_label(sub.broker)}: {_format_shares(sub.shares_held)} szt., "
+            f"śr. cena {_format_optional(sub.avg_price)} {sub.currency} · koszt "
+            f"{_format_pln(sub.invested_pln)}{' (kurs NBP, orientacyjnie)' if sub.pln_cost_estimated else ''} · "
+            f"wartość {_format_pln(sub.current_value_pln)} · wynik "
+            f"{_color_pl_text(sub.unrealized_pl_pln, _format_pln(sub.unrealized_pl_pln, signed=True)) if sub.unrealized_pl_pln is not None else '—'}"
+            + (f" · zrealizowany {_color_pl_text(realized, _format_pln(realized, signed=True))}" if realized else "")
+        )
 
     st.markdown("#### Dlaczego ją mam?")
     bull_case = snapshot.get("bull_case") if snapshot else None
@@ -739,11 +789,11 @@ def _describe_transaction(kind: str, row) -> str:
         label = acquisition_types_label((row["acquisition_type"],))
         return (
             f"{label} {row['purchase_date']} · {broker_label(row['broker'])} · "
-            f"{row['shares']:g} akcji · {row['total_invested']:.2f} {row['currency']}"
+            f"{_format_shares(row['shares'])} szt. · {row['total_invested']:.2f} {row['currency']}"
         )
     return (
         f"Sprzedaż {row['sale_date']} · {broker_label(row['broker'])} · "
-        f"{row['shares']:g} akcji po {row['sale_price']:.2f} {row['currency']}"
+        f"{_format_shares(row['shares'])} szt. po {row['sale_price']:.2f} {row['currency']}"
     )
 
 
@@ -771,6 +821,33 @@ def _render_transaction_voiding(portfolio_conn, position: dict) -> None:
                     st.toast(f"Usunięto pozycję {position['ticker']}.")
                     st.rerun()
         return
+
+    foreign = [(k, r) for k, r in entries if str(r["currency"]).strip().upper() != "PLN"]
+    if foreign:
+        with st.form(f"fx_rate_form_{position_id}"):
+            st.markdown("##### Kurs brokera dla transakcji w walucie obcej")
+            st.caption(
+                "Bez wpisanego kursu koszt w PLN liczony jest kursem średnim NBP z dnia roboczego przed transakcją "
+                "(orientacyjnie). Kwota, data i waluta transakcji pozostają bez zmian."
+            )
+            fx_index = st.selectbox(
+                "Transakcja", range(len(foreign)),
+                format_func=lambda i: _describe_transaction(*foreign[i]) + (
+                    f" · kurs brokera {foreign[i][1]['fx_rate_actual']}" if foreign[i][1]["fx_rate_actual"] else ""
+                ),
+            )
+            new_rate = st.number_input("Ile PLN za 1 jednostkę waluty", min_value=0.0, step=0.0001, format="%.4f")
+            if st.form_submit_button("Zapisz kurs brokera"):
+                if new_rate <= 0:
+                    st.error("Kurs musi być większy od zera.")
+                else:
+                    kind, row = foreign[fx_index]
+                    set_transaction_fx_rate(
+                        portfolio_conn, kind=kind, transaction_id=row["transaction_id"], fx_rate_actual=new_rate,
+                    )
+                    portfolio_conn.commit()
+                    st.toast("Zapisano kurs brokera.")
+                    st.rerun()
 
     st.caption(
         "Błędny wpis anuluj tutaj, a poprawny dodaj w zakładce „+ Dodaj transakcję”. "
@@ -940,7 +1017,7 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
         )
         broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key="new_pos_broker")
         purchase_date = st.date_input("Data transakcji", key="new_pos_date")
-        shares = st.number_input("Liczba akcji", min_value=0.0, step=0.0001, format="%.4f", key="new_pos_shares")
+        shares = st.number_input("Liczba akcji", min_value=0.0, step=0.00000001, format="%.8f", key="new_pos_shares")
         currency = st.text_input("Waluta transakcji (np. PLN, USD, EUR)", key="new_pos_currency")
         total_invested = st.number_input(
             "Zainwestowany kapitał (cała kwota, która zeszła z konta)" if acquisition_type == "BUY"
@@ -948,7 +1025,14 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
             min_value=0.0, step=0.01, format="%.2f",
             disabled=(acquisition_type == "BONUS"), key="new_pos_invested",
         )
-        fees = st.number_input("Opłaty (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f", key="new_pos_fees")
+        fees = st.number_input(
+            "Opłaty (opcjonalnie, informacyjnie — już wliczone w kwotę powyżej)",
+            min_value=0.0, step=0.01, format="%.2f", key="new_pos_fees",
+        )
+        fx_rate = st.number_input(
+            "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
+            min_value=0.0, step=0.0001, format="%.4f", key="new_pos_fx",
+        )
         note = st.text_input("Notatka (opcjonalnie)", key="new_pos_note")
 
         submitted = st.form_submit_button("Zapisz nową pozycję")
@@ -980,12 +1064,16 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
                 update_position_fields(
                     portfolio_conn, position_id, **_instrument_identity_fields(confirmed_result, asset_class),
                 )
-                insert_purchase_transaction(
+                transaction_id = insert_purchase_transaction(
                     portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                     purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                     currency=currency.strip(), price_per_share=price_per_share,
                     fees=(fees or None), note=(note.strip() or None),
                 )
+                if fx_rate and currency.strip().upper() != "PLN":
+                    set_transaction_fx_rate(
+                        portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate,
+                    )
                 portfolio_conn.commit()
                 for key in ("new_pos_lookup_symbol", "new_pos_lookup_result", "new_pos_confirm"):
                     st.session_state.pop(key, None)
@@ -1006,7 +1094,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key=f"ep_broker_{position_id}")
             purchase_date = st.date_input("Data transakcji", key=f"ep_date_{position_id}")
             shares = st.number_input(
-                "Liczba akcji", min_value=0.0, step=0.0001, format="%.4f", key=f"ep_shares_{position_id}",
+                "Liczba akcji", min_value=0.0, step=0.00000001, format="%.8f", key=f"ep_shares_{position_id}",
             )
             currency = st.text_input(
                 "Waluta transakcji", value=position["instrument_currency"] or "", key=f"ep_currency_{position_id}",
@@ -1018,7 +1106,12 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                 disabled=(acquisition_type == "BONUS"), key=f"ep_invested_{position_id}",
             )
             fees = st.number_input(
-                "Opłaty (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f", key=f"ep_fees_{position_id}",
+                "Opłaty (opcjonalnie, informacyjnie — już wliczone w kwotę powyżej)",
+                min_value=0.0, step=0.01, format="%.2f", key=f"ep_fees_{position_id}",
+            )
+            fx_rate = st.number_input(
+                "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
+                min_value=0.0, step=0.0001, format="%.4f", key=f"ep_fx_{position_id}",
             )
             note = st.text_input("Notatka (opcjonalnie)", key=f"ep_note_{position_id}")
 
@@ -1039,12 +1132,16 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                 if not errors:
                     final_invested = 0.0 if acquisition_type == "BONUS" else total_invested
                     price_per_share = (final_invested / shares) if acquisition_type == "BUY" and shares > 0 else None
-                    insert_purchase_transaction(
+                    transaction_id = insert_purchase_transaction(
                         portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                         purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                         currency=currency.strip(), price_per_share=price_per_share,
                         fees=(fees or None), note=(note.strip() or None),
                     )
+                    if fx_rate and currency.strip().upper() != "PLN":
+                        set_transaction_fx_rate(
+                            portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate,
+                        )
                     portfolio_conn.commit()
                     st.toast("Zapisano zakup/bonus.")
                     st.rerun()
@@ -1053,7 +1150,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key=f"es_broker_{position_id}")
             sale_date = st.date_input("Data sprzedaży", key=f"es_date_{position_id}")
             shares = st.number_input(
-                "Liczba sprzedanych akcji", min_value=0.0, step=0.0001, format="%.4f", key=f"es_shares_{position_id}",
+                "Liczba sprzedanych akcji", min_value=0.0, step=0.00000001, format="%.8f", key=f"es_shares_{position_id}",
             )
             sale_price = st.number_input(
                 "Cena sprzedaży za akcję", min_value=0.0, step=0.01, format="%.2f", key=f"es_price_{position_id}",
@@ -1062,7 +1159,12 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                 "Waluta transakcji", value=position["instrument_currency"] or "", key=f"es_currency_{position_id}",
             )
             fees = st.number_input(
-                "Opłaty (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f", key=f"es_fees_{position_id}",
+                "Opłaty sprzedaży (odejmowane od przychodu)", min_value=0.0, step=0.01, format="%.2f",
+                key=f"es_fees_{position_id}",
+            )
+            fx_rate = st.number_input(
+                "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
+                min_value=0.0, step=0.0001, format="%.4f", key=f"es_fx_{position_id}",
             )
             note = st.text_input("Notatka (opcjonalnie)", key=f"es_note_{position_id}")
 
@@ -1101,11 +1203,15 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                 for error in errors:
                     st.error(error)
                 if not errors:
-                    insert_sale_transaction(
+                    transaction_id = insert_sale_transaction(
                         portfolio_conn, position_id=position_id, broker=broker, sale_date=str(sale_date),
                         shares=shares, sale_price=sale_price, currency=currency.strip(),
                         fees=(fees or None), note=(note.strip() or None),
                     )
+                    if fx_rate and currency.strip().upper() != "PLN":
+                        set_transaction_fx_rate(
+                            portfolio_conn, kind="SALE", transaction_id=transaction_id, fx_rate_actual=fx_rate,
+                        )
                     portfolio_conn.commit()
                     st.toast("Zapisano sprzedaż.")
                     st.rerun()
@@ -1161,6 +1267,7 @@ def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
     fx = market.nbp_table_a()
     positions_with_summaries = get_user_positions_with_summaries(
         portfolio_conn, scanner_conn, user["user_id"], broker=broker, quote_fn=market.quote_for_position, fx=fx,
+        pln_rate_fn=market.pln_rate,
     )
 
     inner_labels = ["PODSUMOWANIE", "+ Dodaj transakcję"] + [p["ticker"] for p, _ in positions_with_summaries]

@@ -377,6 +377,14 @@ def test_phase11_crud(conn):
     pg_store.void_dividend_receipt(conn, rid)
     assert pg_store.get_dividend_receipts(conn, pid) == []
 
+    tx = pg_store.insert_purchase_transaction(
+        conn, position_id=pid, broker="REVOLUT", acquisition_type="BUY", purchase_date="2026-09-01",
+        shares=1.0, total_invested=240.0, currency="USD",
+    )
+    pg_store.set_transaction_fx_rate(conn, kind="PURCHASE", transaction_id=tx, fx_rate_actual=3.95)
+    [row] = pg_store.get_purchase_transactions(conn, pid)
+    assert (row["fx_rate_actual"], row["total_invested"], row["currency"]) == (3.95, 240.0, "USD")
+
     pg_store.insert_manual_valuation(
         conn, position_id=pid, kind="BUYBACK", price_per_unit=10.0, currency="PLN", valuation_date="2026-10-17",
     )

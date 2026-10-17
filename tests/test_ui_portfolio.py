@@ -214,3 +214,102 @@ def test_portfolio_bar_summary_aggregates_across_positions_per_currency():
     assert bar["current_value_by_currency"] == {"USD": 1200.0, "EUR": 450.0}
     assert bar["unrealized_pl_by_currency"] == {"USD": 200.0, "EUR": 50.0}
     assert bar["review_needed_count"] == 1
+
+
+# --- Faza 11 (P1): koszt historyczny PLN, wynik zrealizowany, opłaty ---
+
+from buffett_scanner.ui.portfolio import (  # noqa: E402
+    PLN_RATE_ACTUAL,
+    PLN_RATE_NBP,
+    compute_portfolio_pln_summary,
+)
+from buffett_scanner.ui.pricing import FxRates  # noqa: E402
+
+_FX_TODAY = FxRates(mid_pln={"PLN": 1.0, "USD": 3.70, "EUR": 4.25}, effective_date="2026-10-16")
+
+
+def _nbp_rates(table):
+    def fn(currency, date, actual):
+        if actual:
+            return actual, PLN_RATE_ACTUAL
+        return table[(currency, date)], PLN_RATE_NBP
+    return fn
+
+
+def test_usd_cost_uses_rate_from_transaction_day_not_today():
+    """Wymóg E4: koszt historyczny NIE jest przeliczany dzisiejszym kursem."""
+    purchases = [_purchase(broker="REVOLUT", currency="USD", date="2026-09-01", shares=1.0, total_invested=240.0)]
+    summary = compute_position_summary(
+        1, purchases, [], current_price=230.0, current_price_currency="USD", fx=_FX_TODAY,
+        pln_rate_fn=_nbp_rates({("USD", "2026-09-01"): 4.00}),
+    )
+    sub = summary.by_broker_currency[0]
+    assert sub.invested_pln == pytest.approx(960.0)  # 240 x 4,00 (kurs sprzed zakupu)
+    assert sub.current_value_pln == pytest.approx(851.0)  # 230 x 3,70 (dziś)
+    assert sub.unrealized_pl_pln == pytest.approx(-109.0)  # z efektem kursowym
+    assert sub.pln_cost_estimated is True
+
+
+def test_broker_actual_rate_has_priority_over_nbp():
+    purchases = [{**_purchase(broker="REVOLUT", currency="USD", date="2026-09-01", shares=1.0,
+                              total_invested=240.0), "fx_rate_actual": 3.95}]
+    [sub] = compute_broker_currency_subpositions(purchases, [], pln_rate_fn=_nbp_rates({}))
+    assert sub.invested_pln == pytest.approx(948.0)
+    assert sub.pln_cost_estimated is False
+
+
+def test_pln_purchase_needs_no_rate_and_bonus_costs_zero():
+    purchases = [
+        _purchase(broker="TRADE_REPUBLIC", currency="PLN", date="2026-10-06", shares=0.1, total_invested=154.54),
+        _purchase(broker="TRADE_REPUBLIC", currency="PLN", date="2026-10-07", shares=0.2, total_invested=0.0,
+                  acquisition_type="BONUS"),
+    ]
+    [sub] = compute_broker_currency_subpositions(purchases, [])
+    assert sub.invested_pln == pytest.approx(154.54)
+    assert sub.shares_held == pytest.approx(0.3)
+
+
+def test_realized_pl_after_partial_sale_includes_sale_fees():
+    purchases = [_purchase(broker="REVOLUT", currency="USD", date="2026-01-10", shares=10.0, total_invested=1000.0)]
+    sales = [{**_sale(broker="REVOLUT", currency="USD", date="2026-06-10", shares=4.0),
+              "sale_price": 150.0, "fees": 2.0}]
+    [sub] = compute_broker_currency_subpositions(
+        purchases, sales,
+        pln_rate_fn=_nbp_rates({("USD", "2026-01-10"): 4.0, ("USD", "2026-06-10"): 3.5}),
+    )
+    assert sub.shares_held == pytest.approx(6.0)
+    assert sub.total_invested == pytest.approx(600.0)
+    assert sub.realized_pl == pytest.approx(4 * 150.0 - 2.0 - 400.0)  # 198 USD
+    # PLN: przychód 598 x 3,5 = 2093; koszt sprzedanej części 1600 (400 x 4,0)
+    assert sub.realized_pl_pln == pytest.approx(2093.0 - 1600.0)
+    assert sub.invested_pln == pytest.approx(2400.0)
+
+
+def test_missing_rate_gives_unknown_pln_never_zero():
+    purchases = [_purchase(broker="REVOLUT", currency="USD", date="2026-09-01", shares=1.0, total_invested=240.0)]
+    [sub] = compute_broker_currency_subpositions(purchases, [], pln_rate_fn=lambda c, d, a: None)
+    assert sub.invested_pln is None
+
+
+def test_fractional_crypto_amounts_keep_precision():
+    purchases = [_purchase(broker="OTHER", currency="PLN", date="2026-10-01", shares=0.00012345, total_invested=40.0)]
+    [sub] = compute_broker_currency_subpositions(purchases, [])
+    assert f"{sub.shares_held:.8f}" == "0.00012345"
+
+
+def test_portfolio_pln_summary_marks_partial_sum_and_lists_missing():
+    priced = compute_position_summary(
+        1, [_purchase(broker="TRADE_REPUBLIC", currency="PLN", date="2026-10-06", shares=1.0, total_invested=100.0)],
+        [], current_price=30.0, current_price_currency="EUR", fx=_FX_TODAY,
+    )
+    unpriced = compute_position_summary(
+        2, [_purchase(broker="TRADE_REPUBLIC", currency="PLN", date="2026-10-06", shares=1.0, total_invested=50.0)],
+        [], fx=_FX_TODAY,
+    )
+    summary = compute_portfolio_pln_summary([({"ticker": "SU.PA"}, priced), ({"ticker": "NYMT"}, unpriced)])
+    assert summary["value_pln"] == pytest.approx(127.5)
+    assert summary["cost_pln"] == pytest.approx(100.0)
+    assert summary["cost_pln_all"] == pytest.approx(150.0)
+    assert summary["unrealized_pl_pln"] == pytest.approx(27.5)
+    assert summary["missing"] == ["NYMT"]
+    assert summary["by_broker"]["TRADE_REPUBLIC"]["value_pln"] == pytest.approx(127.5)

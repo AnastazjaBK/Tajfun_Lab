@@ -32,6 +32,20 @@ from dataclasses import dataclass, replace
 from buffett_scanner.ui.pricing import FxRates, convert
 
 
+# Faza 11 (P1): sposób przeliczenia kwoty historycznej na PLN.
+PLN_RATE_PLN = "PLN"        # transakcja w PLN -- bez przeliczenia
+PLN_RATE_ACTUAL = "ACTUAL"  # kurs rzeczywisty brokera zapisany przy transakcji
+PLN_RATE_NBP = "NBP"        # kurs średni NBP z dnia roboczego przed transakcją (orientacyjny)
+
+
+def _field(row, key: str):
+    """`sqlite3.Row`/dict bez kolumny (starsze testy, dane sprzed Fazy 11) -> None."""
+    try:
+        return row[key]
+    except (KeyError, IndexError):
+        return None
+
+
 @dataclass(frozen=True)
 class BrokerCurrencySubposition:
     """Jedna subpozycja (broker, currency) jednej `position_id`."""
@@ -53,6 +67,19 @@ class BrokerCurrencySubposition:
     # przy weryfikacji wizualnej UI, Faza 7 KROK 6).
     current_value: float | None = None
     unrealized_pl: float | None = None
+    # Faza 11 (P1). Koszt historyczny w PLN aktualnie posiadanych akcji:
+    # każdy zakup przeliczony WŁASNYM kursem z dnia transakcji (nigdy
+    # dzisiejszym), zmniejszany proporcjonalnie przy sprzedaży (średni
+    # koszt). None == brak kursu dla któregoś zakupu.
+    invested_pln: float | None = 0.0
+    pln_cost_estimated: bool = False  # True == choć jeden kurs to NBP (orientacyjny), nie kurs brokera
+    # Wynik zrealizowany: przychód ze sprzedaży (akcje x cena - opłaty
+    # sprzedaży) minus koszt sprzedanej części (średni koszt). Opłaty
+    # zakupu są już w `total_invested` ("cała kwota, która zeszła z konta").
+    realized_pl: float | None = 0.0
+    realized_pl_pln: float | None = 0.0
+    current_value_pln: float | None = None
+    unrealized_pl_pln: float | None = None
 
 
 @dataclass(frozen=True)
@@ -73,41 +100,69 @@ class PositionSummary:
 
 
 def compute_broker_currency_subpositions(
-    purchases: list, sales: list,
+    purchases: list, sales: list, *, pln_rate_fn=None,
 ) -> list[BrokerCurrencySubposition]:
     """`purchases`/`sales` to wiersze `purchase_transactions`/
     `sale_transactions` (sqlite3.Row albo dict) dla JEDNEJ `position_id`.
     Zdarzenia scalane i sortowane CHRONOLOGICZNIE (nie "najpierw
     wszystkie zakupy") -- inaczej proporcjonalna redukcja invested przy
     sprzedaży użyłaby złej bazy akcji, gdy sprzedaż nastąpiła między
-    dwoma zakupami."""
-    events: list[tuple[str, str, str, str, float, float | None, str | None]] = []
+    dwoma zakupami.
+
+    `pln_rate_fn(currency, date, fx_rate_actual) -> (kurs, rodzaj) | None`
+    (Faza 11, P1) -- PLN za 1 jednostkę waluty transakcji. Brak funkcji
+    -> wartości PLN tylko dla transakcji w PLN."""
+    def rate(currency: str, date: str, actual):
+        if currency.upper() == "PLN":
+            return 1.0, PLN_RATE_PLN
+        if pln_rate_fn is None:
+            return None
+        return pln_rate_fn(currency, date, actual)
+
+    events = []
     for p in purchases:
-        events.append((
-            p["purchase_date"], "PURCHASE", p["broker"], p["currency"], p["shares"],
-            p["total_invested"], p["acquisition_type"],
-        ))
+        events.append((p["purchase_date"], 0, "PURCHASE", p))
     for s in sales:
-        events.append((s["sale_date"], "SALE", s["broker"], s["currency"], s["shares"], None, None))
-    events.sort(key=lambda e: e[0])
+        events.append((s["sale_date"], 1, "SALE", s))
+    events.sort(key=lambda e: (e[0], e[1]))
 
     state: dict[tuple[str, str], dict] = {}
-    for _date, kind, broker, currency, shares, invested, acquisition_type in events:
-        group = state.setdefault(
-            (broker, currency), {"shares": 0.0, "invested": 0.0, "acquisition_types": set()},
-        )
+    for date, _order, kind, row in events:
+        broker, currency, shares = row["broker"], row["currency"], row["shares"]
+        group = state.setdefault((broker, currency), {
+            "shares": 0.0, "invested": 0.0, "invested_pln": 0.0, "estimated": False,
+            "realized": 0.0, "realized_pln": 0.0, "acquisition_types": set(),
+        })
+        fx = rate(currency, date, _field(row, "fx_rate_actual"))
+        if fx is not None and fx[1] == PLN_RATE_NBP:
+            group["estimated"] = True
         if kind == "PURCHASE":
+            invested = row["total_invested"] if row["total_invested"] is not None else 0.0
             group["shares"] += shares
-            group["invested"] += invested if invested is not None else 0.0
-            group["acquisition_types"].add(acquisition_type)
+            group["invested"] += invested
+            if group["invested_pln"] is not None:
+                group["invested_pln"] = None if fx is None else group["invested_pln"] + invested * fx[0]
+            group["acquisition_types"].add(row["acquisition_type"])
+            continue
+        fraction_sold = min(shares / group["shares"], 1.0) if group["shares"] > 0 else 0.0
+        # Average cost: redukcja invested proporcjonalnie do sprzedanych
+        # akcji względem akcji posiadanych TERAZ (nie całej historii).
+        cost_removed = group["invested"] * fraction_sold
+        cost_removed_pln = None if group["invested_pln"] is None else group["invested_pln"] * fraction_sold
+        group["invested"] -= cost_removed
+        if group["invested_pln"] is not None:
+            group["invested_pln"] -= cost_removed_pln
+        group["shares"] -= shares
+        sale_price = _field(row, "sale_price")
+        proceeds = None if sale_price is None else shares * sale_price - (_field(row, "fees") or 0.0)
+        if proceeds is None or group["realized"] is None:
+            group["realized"] = None
         else:
-            if group["shares"] > 0:
-                # Average cost: redukcja invested proporcjonalnie do
-                # sprzedanych akcji względem akcji posiadanych TERAZ
-                # (nie względem całej historii zakupów).
-                fraction_sold = min(shares / group["shares"], 1.0)
-                group["invested"] -= group["invested"] * fraction_sold
-            group["shares"] -= shares
+            group["realized"] += proceeds - cost_removed
+        if proceeds is None or fx is None or cost_removed_pln is None or group["realized_pln"] is None:
+            group["realized_pln"] = None
+        else:
+            group["realized_pln"] += proceeds * fx[0] - cost_removed_pln
 
     result = []
     for (broker, currency), group in state.items():
@@ -118,6 +173,8 @@ def compute_broker_currency_subpositions(
             broker=broker, currency=currency, shares_held=shares_held,
             total_invested=total_invested, avg_price=avg_price,
             acquisition_types=tuple(sorted(group["acquisition_types"])),
+            invested_pln=group["invested_pln"], pln_cost_estimated=group["estimated"],
+            realized_pl=group["realized"], realized_pl_pln=group["realized_pln"],
         ))
     return result
 
@@ -130,6 +187,7 @@ def compute_position_summary(
     current_price: float | None = None,
     current_price_currency: str | None = None,
     fx: FxRates | None = None,
+    pln_rate_fn=None,
 ) -> PositionSummary:
     """`current_price`/`current_price_currency` to JEDNA cena (z
     `price_daily`/profilu FMP) w JEDNEJ walucie (głównej -- pensy GBp są
@@ -140,6 +198,10 @@ def compute_position_summary(
     Brak kursu -> wartość NIEZNANA (nigdy 0, nigdy zgadnięta) i nie
     trafia do `current_value_by_currency`.
 
+    Faza 11 (P1): `current_value_pln` = wartość dziś (dzisiejszy kurs
+    NBP), `unrealized_pl_pln` = ta wartość minus koszt historyczny PLN
+    (kursy z dni transakcji, patrz `compute_broker_currency_subpositions`).
+
     Każda subpozycja (`BrokerCurrencySubposition.current_value`) dostaje
     WŁASNĄ, osobno policzoną wartość (`shares_held * current_price`) --
     agregaty `current_value_by_currency`/`unrealized_pl_by_currency` są
@@ -147,17 +209,25 @@ def compute_position_summary(
     odwrotnie (żeby UI nigdy nie pomyliło sumy całej pozycji z wartością
     jednej subpozycji -- realny bug znaleziony przy weryfikacji
     wizualnej, Faza 7 KROK 6)."""
-    raw_subpositions = compute_broker_currency_subpositions(purchases, sales)
+    raw_subpositions = compute_broker_currency_subpositions(purchases, sales, pln_rate_fn=pln_rate_fn)
 
     enriched_subpositions = []
     for s in raw_subpositions:
         current_value = None
         unrealized_pl = None
+        current_value_pln = None
+        unrealized_pl_pln = None
         if current_price is not None and current_price_currency is not None:
             current_value = convert(s.shares_held * current_price, current_price_currency, s.currency, fx)
             if current_value is not None:
                 unrealized_pl = current_value - s.total_invested
-        enriched_subpositions.append(replace(s, current_value=current_value, unrealized_pl=unrealized_pl))
+                current_value_pln = convert(current_value, s.currency, "PLN", fx)
+                if current_value_pln is not None and s.invested_pln is not None:
+                    unrealized_pl_pln = current_value_pln - s.invested_pln
+        enriched_subpositions.append(replace(
+            s, current_value=current_value, unrealized_pl=unrealized_pl,
+            current_value_pln=current_value_pln, unrealized_pl_pln=unrealized_pl_pln,
+        ))
 
     shares_held = sum(s.shares_held for s in enriched_subpositions)
 
@@ -216,4 +286,55 @@ def compute_portfolio_bar_summary(
             [s.unrealized_pl_by_currency for s in summaries]
         ),
         "review_needed_count": review_needed_count,
+    }
+
+
+def compute_portfolio_pln_summary(positions_with_summaries: list) -> dict:
+    """Faza 11 (P1): podsumowanie portfela w PLN.
+
+    - `value_pln`: wartość dziś pozycji z ceną (dzisiejszy kurs NBP);
+    - `cost_pln`: koszt historyczny PLN (kursy z dni transakcji) TYCH
+      SAMYCH, wycenionych pozycji -- żeby zysk = wartość - koszt;
+    - `cost_pln_all`: koszt historyczny wszystkich posiadanych pozycji;
+    - `realized_pl_pln`: wynik zrealizowany na sprzedażach;
+    - `missing`: instrumenty bez ceny / bez kursu (suma jest wtedy CZĘŚCIOWA);
+    - `estimated`: choć jeden koszt liczony kursem NBP (orientacyjnym);
+    - `by_broker`: {broker: {"value_pln", "cost_pln"}} dla wycenionych.
+    Nigdy nie zastępuje braków zerem."""
+    value = cost = cost_all = realized = 0.0
+    missing: list[str] = []
+    estimated = False
+    by_broker: dict[str, dict[str, float]] = {}
+    for position, summary in positions_with_summaries:
+        label = position["ticker"]
+        for sub in summary.by_broker_currency:
+            estimated = estimated or sub.pln_cost_estimated
+            if sub.realized_pl_pln is None:
+                if f"{label} (wynik sprzedaży)" not in missing:
+                    missing.append(f"{label} (wynik sprzedaży)")
+            else:
+                realized += sub.realized_pl_pln
+            if sub.shares_held <= 1e-12:
+                continue
+            if sub.invested_pln is None:
+                if label not in missing:
+                    missing.append(label)
+                continue
+            cost_all += sub.invested_pln
+            if sub.current_value_pln is None:
+                if label not in missing:
+                    missing.append(label)
+                continue
+            value += sub.current_value_pln
+            cost += sub.invested_pln
+            bucket = by_broker.setdefault(sub.broker, {"value_pln": 0.0, "cost_pln": 0.0})
+            bucket["value_pln"] += sub.current_value_pln
+            bucket["cost_pln"] += sub.invested_pln
+    unrealized = value - cost
+    return {
+        "value_pln": value, "cost_pln": cost, "cost_pln_all": cost_all,
+        "unrealized_pl_pln": unrealized, "realized_pl_pln": realized,
+        "total_result_pln": unrealized + realized,
+        "unrealized_pl_pct": (unrealized / cost * 100.0) if cost > 0 else None,
+        "missing": missing, "estimated": estimated, "by_broker": by_broker,
     }

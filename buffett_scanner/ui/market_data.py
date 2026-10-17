@@ -33,6 +33,7 @@ from buffett_scanner.providers.eodhd import EODHDClient, EODHDError
 from buffett_scanner.providers.eodhd import resolve_api_key as resolve_eodhd_key
 from buffett_scanner.providers.fmp import FMPClient, FMPError
 from buffett_scanner.ui.pricing import (
+    MINOR_UNIT_CURRENCIES,
     NBP_TABLE_A_URL,
     NBP_TIMEOUT_S,
     FxRates,
@@ -289,6 +290,24 @@ class MarketData:
 
         cached = self._cached("nbp:gold:latest", TTL_NBP_GOLD_S, fetch)
         return tuple(cached.value) if cached is not None else None
+
+    def pln_rate(self, currency: str, date: str, fx_rate_actual: float | None):
+        """Kurs do przeliczenia kwoty historycznej na PLN (Decyzja
+        właścicielki 2026-10-17): najpierw kurs rzeczywisty brokera, jeśli
+        zapisany, inaczej ostatni kurs NBP sprzed daty transakcji
+        (orientacyjny). Waluty zdawkowe (GBp/GBX) przez walutę główną."""
+        from buffett_scanner.ui.portfolio import PLN_RATE_ACTUAL, PLN_RATE_NBP, PLN_RATE_PLN
+
+        if fx_rate_actual:
+            return float(fx_rate_actual), PLN_RATE_ACTUAL
+        code = (currency or "").strip()
+        major, divisor = MINOR_UNIT_CURRENCIES.get(code, (code.upper(), 1.0))
+        if major == "PLN":
+            return 1.0, PLN_RATE_PLN
+        found = self.nbp_rate_before(major, date)
+        if found is None:
+            return None
+        return found[1] / divisor, PLN_RATE_NBP
 
     # --- cena pozycji --------------------------------------------------
 

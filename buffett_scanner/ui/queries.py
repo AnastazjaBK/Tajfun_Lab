@@ -165,7 +165,7 @@ def get_current_quote_for_position(scanner_conn: sqlite3.Connection, position, q
 
 def get_position_summary(
     portfolio_conn, scanner_conn: sqlite3.Connection, position, *, broker: str | None = None,
-    quote_fn=None, fx: FxRates | None = None,
+    quote_fn=None, fx: FxRates | None = None, pln_rate_fn=None,
 ) -> PositionSummary:
     """`broker=None` (domyślnie) -- wszystkie platformy, bez zmian.
     `broker="TRADE_REPUBLIC"`/`"REVOLUT"`/`"OTHER"` -- filtr platformy
@@ -189,7 +189,7 @@ def get_position_summary(
         position["position_id"], purchases, sales,
         current_price=quote.price if quote else None,
         current_price_currency=quote.currency if quote else None,
-        fx=fx,
+        fx=fx, pln_rate_fn=pln_rate_fn,
     )
     if quote is None:
         return summary
@@ -198,7 +198,7 @@ def get_position_summary(
 
 def get_user_positions_with_summaries(
     portfolio_conn, scanner_conn: sqlite3.Connection, user_id: int, *, broker: str | None = None,
-    quote_fn=None, fx: FxRates | None = None,
+    quote_fn=None, fx: FxRates | None = None, pln_rate_fn=None,
 ) -> list[tuple[object, PositionSummary]]:
     """`broker` -- patrz `get_position_summary`. Gdy ustawiony, pozycje
     bez ŻADNEJ transakcji na tym brokerze są pomijane całkowicie (nie
@@ -207,7 +207,9 @@ def get_user_positions_with_summaries(
     positions = get_positions_for_user(portfolio_conn, user_id)
     result = []
     for p in positions:
-        summary = get_position_summary(portfolio_conn, scanner_conn, p, broker=broker, quote_fn=quote_fn, fx=fx)
+        summary = get_position_summary(
+            portfolio_conn, scanner_conn, p, broker=broker, quote_fn=quote_fn, fx=fx, pln_rate_fn=pln_rate_fn,
+        )
         if broker is not None and summary.shares_held == 0 and not summary.by_broker_currency:
             continue
         result.append((p, summary))
