@@ -1,0 +1,22 @@
+name: "DIAG P0a: pokrycie FMP + CTVA (jednorazowy)"
+
+# Jednorazowa diagnostyka (Decyzja właścicielki 2026-10-17). Uruchamia się
+# wyłącznie przy pushu na ten osobny branch diagnostyczny -- nie dotyka
+# main ani brancha produkcyjnego appki. Branch usuwany po odczytaniu wyniku.
+on:
+  push:
+    branches: [claude/diag-p0a-fmp]
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -r requirements.txt
+      - run: python -m diag.p0a_fmp_coverage
+        env:
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
