@@ -436,8 +436,8 @@ def test_unconfirmed_ticker_never_gets_fmp_price(conn):
     _user_id, position_id = _schneider_pln(conn, confirmed=False, ticker="SU")
     calls = []
 
-    def quote_fn(symbol):
-        calls.append(symbol)
+    def quote_fn(position):
+        calls.append(position["ticker"])
         return Quote(price=30.0, currency="USD", source="FMP")
 
     position = get_position(conn, position_id)
@@ -448,7 +448,7 @@ def test_unconfirmed_ticker_never_gets_fmp_price(conn):
 
 def test_confirmed_european_position_valued_in_pln(conn):
     user_id, _position_id = _schneider_pln(conn, confirmed=True)
-    quote_fn = lambda symbol: Quote(price=250.0, currency="EUR", source="FMP")  # noqa: E731
+    quote_fn = lambda position: Quote(price=250.0, currency="EUR", source="FMP")  # noqa: E731
     [(_position, summary)] = get_user_positions_with_summaries(conn, conn, user_id, quote_fn=quote_fn, fx=_FX)
     assert summary.current_value_by_currency == {"PLN": pytest.approx(0.15 * 250.0 * 4.25)}
     assert summary.unrealized_pl_by_currency == {"PLN": pytest.approx(0.15 * 250.0 * 4.25 - 154.54)}
@@ -470,7 +470,7 @@ def test_fmp_failure_falls_back_to_scanner_price_daily(conn):
     ])
     position_id = insert_position(conn, user_id=user_id, cik="0000320193", ticker="AAPL", company_name="Apple Inc.")
     conn.commit()
-    quote = get_current_quote_for_position(conn, get_position(conn, position_id), quote_fn=lambda s: None)
+    quote = get_current_quote_for_position(conn, get_position(conn, position_id), quote_fn=lambda p: None)
     assert (quote.price, quote.currency) == (155.0, "USD")
 
 

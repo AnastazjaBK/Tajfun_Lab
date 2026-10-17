@@ -785,6 +785,64 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("purchase_transactions", "void_reason", "TEXT"),
     ("sale_transactions", "voided_at", "TEXT"),
     ("sale_transactions", "void_reason", "TEXT"),
+    # Faza 11 (P0b-P4) -- patrz `pg_store.PG_COLUMN_MIGRATIONS`.
+    ("positions", "isin", "TEXT"),
+    ("positions", "quote_currency", "TEXT"),
+    ("positions", "price_provider", "TEXT"),
+    ("positions", "price_symbol", "TEXT"),
+    ("positions", "asset_class", "TEXT"),
+    ("positions", "metal", "TEXT"),
+    ("positions", "product_form", "TEXT"),
+    ("positions", "unit_weight", "REAL"),
+    ("positions", "weight_unit", "TEXT"),
+    ("positions", "fineness", "REAL"),
+    ("positions", "storage_location", "TEXT"),
+    ("positions", "is_collectible", "INTEGER"),
+    ("positions", "exposure_type", "TEXT"),
+    ("positions", "annual_fee_pct", "REAL"),
+    ("purchase_transactions", "fx_rate_actual", "REAL"),
+    ("sale_transactions", "fx_rate_actual", "REAL"),
+)
+
+# Faza 11 -- nowe tabele portfela (patrz `pg_store.PG_NEW_TABLES`).
+_PORTFOLIO_TABLES_PHASE11 = """
+CREATE TABLE IF NOT EXISTS market_data_cache (
+    cache_key   TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    fetched_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS dividend_receipts (
+    receipt_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id      INTEGER NOT NULL REFERENCES positions(position_id),
+    broker           TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    pay_date         TEXT NOT NULL,
+    ex_date          TEXT,
+    gross_amount     REAL NOT NULL,
+    withholding_tax  REAL,
+    net_amount       REAL,
+    currency         TEXT NOT NULL,
+    fx_rate_actual   REAL,
+    note             TEXT,
+    voided_at        TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS manual_valuations (
+    valuation_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    position_id      INTEGER NOT NULL REFERENCES positions(position_id),
+    kind             TEXT NOT NULL CHECK (kind IN ('MARKET','BUYBACK')),
+    price_per_unit   REAL NOT NULL,
+    currency         TEXT NOT NULL,
+    valuation_date   TEXT NOT NULL,
+    note             TEXT,
+    voided_at        TEXT,
+    created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"""
+
+POSITION_EXTRA_FIELDS = (
+    "isin", "quote_currency", "price_provider", "price_symbol", "asset_class",
+    "metal", "product_form", "unit_weight", "weight_unit", "fineness",
+    "storage_location", "is_collectible", "exposure_type", "annual_fee_pct",
 )
 
 
@@ -799,6 +857,7 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
     """Tworzy schemat (idempotentnie) i zwraca otwarte połączenie."""
     conn = connect(db_path)
     conn.executescript(SCHEMA)
+    conn.executescript(_PORTFOLIO_TABLES_PHASE11)
     _apply_column_migrations(conn)
     conn.commit()
     return conn
@@ -2063,4 +2122,115 @@ def get_latest_holding_user_action(conn: sqlite3.Connection, position_id: int) -
         ORDER BY action_id DESC LIMIT 1
         """,
         (position_id,),
+    ).fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Faza 11 (P0b-P4) -- te same nazwy/sygnatury co w `pg_store.py`.
+# ---------------------------------------------------------------------------
+
+_BACKUP_TABLES = (
+    "users", "positions", "purchase_transactions", "sale_transactions",
+    "user_decisions", "purchase_thesis", "holding_user_actions",
+    "dividend_receipts", "manual_valuations",
+)
+
+
+def backup_payload(conn: sqlite3.Connection) -> tuple[dict[str, list[dict]], dict[str, int]]:
+    payload = {t: [dict(r) for r in conn.execute(f"SELECT * FROM {t}").fetchall()] for t in _BACKUP_TABLES}
+    return payload, {t: len(rows) for t, rows in payload.items()}
+
+
+def get_latest_backup_info(conn: sqlite3.Connection):
+    """Tryb lokalny (dev) nie trzyma kopii w bazie -- kopią jest plik DB."""
+    return None
+
+
+def update_position_fields(conn: sqlite3.Connection, position_id: int, **fields) -> None:
+    unknown = set(fields) - set(POSITION_EXTRA_FIELDS)
+    if unknown:
+        raise ValueError(f"Niedozwolone pola pozycji: {sorted(unknown)}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    conn.execute(
+        f"UPDATE positions SET {assignments}, updated_at = datetime('now') WHERE position_id = ?",
+        (*fields.values(), position_id),
+    )
+
+
+def set_transaction_fx_rate(conn: sqlite3.Connection, *, kind: str, transaction_id: int, fx_rate_actual: float | None) -> None:
+    table = {"PURCHASE": "purchase_transactions", "SALE": "sale_transactions"}[kind]
+    conn.execute(f"UPDATE {table} SET fx_rate_actual = ? WHERE transaction_id = ?", (fx_rate_actual, transaction_id))
+
+
+def get_cache_entry(conn: sqlite3.Connection, cache_key: str):
+    return conn.execute(
+        "SELECT payload, fetched_at FROM market_data_cache WHERE cache_key = ?", (cache_key,)
+    ).fetchone()
+
+
+def put_cache_entry(conn: sqlite3.Connection, cache_key: str, payload: str, fetched_at: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO market_data_cache (cache_key, payload, fetched_at) VALUES (?, ?, ?)
+        ON CONFLICT (cache_key) DO UPDATE SET payload = excluded.payload, fetched_at = excluded.fetched_at
+        """,
+        (cache_key, payload, fetched_at),
+    )
+
+
+def insert_dividend_receipt(
+    conn: sqlite3.Connection, *, position_id: int, broker: str, pay_date: str, gross_amount: float,
+    currency: str, ex_date: str | None = None, withholding_tax: float | None = None,
+    net_amount: float | None = None, fx_rate_actual: float | None = None, note: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO dividend_receipts (
+            position_id, broker, pay_date, ex_date, gross_amount, withholding_tax,
+            net_amount, currency, fx_rate_actual, note
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (position_id, broker, pay_date, ex_date, gross_amount, withholding_tax,
+         net_amount, currency, fx_rate_actual, note),
+    )
+    return cur.lastrowid
+
+
+def get_dividend_receipts(conn: sqlite3.Connection, position_id: int) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM dividend_receipts WHERE position_id = ? AND voided_at IS NULL ORDER BY pay_date",
+        (position_id,),
+    ).fetchall()
+
+
+def void_dividend_receipt(conn: sqlite3.Connection, receipt_id: int) -> None:
+    conn.execute(
+        "UPDATE dividend_receipts SET voided_at = datetime('now') WHERE receipt_id = ? AND voided_at IS NULL",
+        (receipt_id,),
+    )
+
+
+def insert_manual_valuation(
+    conn: sqlite3.Connection, *, position_id: int, kind: str, price_per_unit: float, currency: str,
+    valuation_date: str, note: str | None = None,
+) -> int:
+    cur = conn.execute(
+        """
+        INSERT INTO manual_valuations (position_id, kind, price_per_unit, currency, valuation_date, note)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (position_id, kind, price_per_unit, currency, valuation_date, note),
+    )
+    return cur.lastrowid
+
+
+def get_latest_manual_valuation(conn: sqlite3.Connection, position_id: int, kind: str):
+    return conn.execute(
+        """
+        SELECT * FROM manual_valuations WHERE position_id = ? AND kind = ? AND voided_at IS NULL
+        ORDER BY valuation_date DESC, valuation_id DESC LIMIT 1
+        """,
+        (position_id, kind),
     ).fetchone()

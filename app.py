@@ -38,6 +38,7 @@ między rerunami, patrz `ui/scanner_snapshot.py`).
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import sqlite3
@@ -49,7 +50,7 @@ import streamlit as st
 
 from buffett_scanner import portfolio_backend
 from buffett_scanner.db import init_db
-from buffett_scanner.pg_store import PgStoreUnavailableError
+from buffett_scanner.pg_store import BackupVerificationError, PgStoreUnavailableError
 from buffett_scanner.portfolio_backend import (
     create_user,
     get_latest_holding_user_action,
@@ -63,6 +64,9 @@ from buffett_scanner.portfolio_backend import (
     insert_purchase_transaction,
     insert_sale_transaction,
     insert_user_decision,
+    backup_payload,
+    get_latest_backup_info,
+    update_position_fields,
     update_position_instrument,
     void_position,
     void_purchase_transaction,
@@ -72,7 +76,7 @@ from buffett_scanner.ui.data_quality import data_quality_warning
 from buffett_scanner.ui.instrument_lookup import (
     InstrumentLookupResult,
     instrument_save_errors,
-    lookup_instrument,
+    lookup_instrument_routed,
 )
 from buffett_scanner.ui.labels import (
     GLOSSARY,
@@ -85,12 +89,10 @@ from buffett_scanner.ui.labels import (
     holding_action_label,
 )
 from buffett_scanner.ui.portfolio import compute_broker_currency_subpositions, compute_portfolio_bar_summary
+from buffett_scanner.ui.market_data import EODHD_DAILY_BUDGET, MarketData
 from buffett_scanner.ui.pricing import (
     BASE_CURRENCY,
     FxRates,
-    Quote,
-    fetch_nbp_rates,
-    fetch_quote,
     total_in_currency,
 )
 from buffett_scanner.ui.queries import (
@@ -158,19 +160,21 @@ SNAPSHOT_CACHE_DIR = os.environ.get("SNAPSHOT_CACHE_DIR", tempfile.gettempdir())
 _PL_GAIN_CSS = "color: #21a366; font-weight: 600"
 _PL_LOSS_CSS = "color: #e5534b; font-weight: 600"
 
-# Faza 9: ceny FMP i kursy NBP odświeżane co godzinę (Decyzja
-# właścicielki 2026-10-17) -- chroni dzienny limit zapytań planu FMP.
-_PRICE_CACHE_TTL_S = 3600
+# Faza 11 (P0b): klasy aktywów wybierane przy potwierdzaniu instrumentu.
+# Typ podany przez dostawcę jest tylko podpowiedzią (EODHD oznacza ETC
+# Xetra-Gold jako "ETF") -- decyduje użytkownik.
+_ASSET_CLASS_LABELS = {
+    "STOCK": "Akcja",
+    "ETF": "ETF",
+    "ETC": "ETC (np. złoto/srebro giełdowe)",
+    "ETN": "ETN",
+}
 
 
-@st.cache_data(ttl=_PRICE_CACHE_TTL_S, show_spinner=False)
-def _cached_quote(symbol: str) -> Quote | None:
-    return fetch_quote(symbol)
-
-
-@st.cache_data(ttl=_PRICE_CACHE_TTL_S, show_spinner=False)
-def _cached_nbp_rates() -> FxRates | None:
-    return fetch_nbp_rates()
+def _market(portfolio_conn) -> MarketData:
+    """Ceny, historia, dywidendy i kursy NBP przez wspólny cache w bazie
+    portfela (Faza 11) -- jeden obiekt na przebieg skryptu."""
+    return MarketData(portfolio_conn)
 
 
 def _format_currency_dict(values: dict[str, float]) -> str:
@@ -230,7 +234,14 @@ def _render_pln_totals(container, bar: dict, fx: FxRates | None) -> None:
     )
 
 
-def _render_pricing_caption(container, summaries: list, fx: FxRates | None) -> None:
+def _format_quote_source(summary) -> str:
+    if summary.quote_source is None:
+        return "—"
+    text = f"{summary.quote_source} · {summary.quote_as_of or '?'}"
+    return text + " (ostatnia znana)" if summary.quote_stale else text
+
+
+def _render_pricing_caption(container, summaries: list, fx: FxRates | None, eodhd_calls: int | None = None) -> None:
     priced = sum(1 for s in summaries if s.current_value_by_currency)
     fx_text = f"kursy NBP z {fx.effective_date}" if fx is not None else "kursy NBP chwilowo niedostępne"
     partial = (
@@ -238,9 +249,10 @@ def _render_pricing_caption(container, summaries: list, fx: FxRates | None) -> N
         "dlatego wartość minus kapitał nie równa się zyskowi/stracie."
         if priced < len(summaries) else ""
     )
+    eodhd_text = f" (dziś {eodhd_calls}/{EODHD_DAILY_BUDGET} zapytań darmowego planu)" if eodhd_calls is not None else ""
     container.caption(
-        f"Cena bieżąca dostępna dla {priced} z {len(summaries)} pozycji.{partial} Ceny: FMP (z opóźnieniem, "
-        f"odświeżane co godzinę), {fx_text}. Dywidendy: dane niedostępne."
+        f"Cena bieżąca dostępna dla {priced} z {len(summaries)} pozycji.{partial} Ceny odświeżane automatycznie: "
+        f"FMP (USA, co godzinę), EODHD (Europa, ceny zamknięcia, co 6 h{eodhd_text}); {fx_text}."
     )
 
 
@@ -337,20 +349,16 @@ def _render_portfolio_bar(portfolio_conn, scanner_conn, user: dict) -> None:
     klucza jeszcze nie ma, stąd jawny fallback na "ALL" (Wszystkie)."""
     platform_filter = st.session_state.get("platform_filter", "ALL")
     broker = None if platform_filter == "ALL" else platform_filter
-    fx = _cached_nbp_rates()
+    market = _market(portfolio_conn)
+    fx = market.nbp_table_a()
     positions_with_summaries = get_user_positions_with_summaries(
-        portfolio_conn, scanner_conn, user["user_id"], broker=broker, quote_fn=_cached_quote, fx=fx,
+        portfolio_conn, scanner_conn, user["user_id"], broker=broker, quote_fn=market.quote_for_position, fx=fx,
     )
     summaries = [s for _, s in positions_with_summaries]
     review_needed = get_review_needed_count(portfolio_conn, user["user_id"])
     bar = compute_portfolio_bar_summary(summaries, review_needed_count=review_needed)
 
-    header_cols = st.columns([4, 1])
-    header_cols[0].subheader("Portfel")
-    if header_cols[1].button("Odśwież ceny", key="refresh_prices"):
-        _cached_quote.clear()
-        _cached_nbp_rates.clear()
-        st.rerun()
+    st.subheader("Portfel")
     cols = st.columns(5)
     cols[0].metric("Pozycje", bar["position_count"])
     cols[1].metric("Wartość bieżąca", _format_currency_dict(bar["current_value_by_currency"]))
@@ -359,7 +367,7 @@ def _render_portfolio_bar(portfolio_conn, scanner_conn, user: dict) -> None:
     cols[4].metric("Do przeglądu", bar["review_needed_count"])
     if bar["position_count"] > 0:
         _render_pln_totals(st, bar, fx)
-        _render_pricing_caption(st, summaries, fx)
+        _render_pricing_caption(st, summaries, fx, market.eodhd_calls_today())
 
 
 def _format_decline_narrative(snapshot, triggered_flags: list[str]) -> str:
@@ -567,6 +575,7 @@ def _render_portfolio_summary_tab(
                 "Bieżąca wartość": (
                     f"{current_value:.2f} {sub.currency}" if current_value is not None else "—"
                 ),
+                "Źródło ceny": _format_quote_source(summary),
                 "Zysk/strata": f"{pl:+.2f} {sub.currency}" if pl is not None else "—",
                 "Zysk/strata %": f"{pl_pct:+.1f}%" if pl_pct is not None else "n/d",
                 "Sposób nabycia": acquisition_types_label(sub.acquisition_types),
@@ -681,12 +690,18 @@ def _render_instrument_correction(portfolio_conn, position: dict) -> None:
     position_id = position["position_id"]
     st.markdown("##### Instrument")
     status = "potwierdzony" if is_instrument_confirmed(position) else "NIEPOTWIERDZONY — cena bieżąca nie jest pobierana"
+    provider = position.get("price_provider") or ("FMP" if is_instrument_confirmed(position) else "—")
     st.write(
         f"Obecnie: **{position['ticker']}** — {position['company_name']} "
-        f"({position['exchange'] or 'giełda nieznana'}). Status: {status}."
+        f"({position['exchange'] or 'giełda nieznana'}, ISIN {position.get('isin') or '—'}). "
+        f"Status: {status}. Źródło ceny: {provider}."
     )
-    choice = _render_instrument_lookup_widget(f"fix_{position_id}")
+    choice = _render_instrument_lookup_widget(f"fix_{position_id}", _market(portfolio_conn))
     confirmed_result = choice.confirmed_result
+    current_class = position.get("asset_class") or (
+        _default_asset_class(choice.result) if choice.result else "STOCK"
+    )
+    asset_class = _render_asset_class_picker(f"fix_{position_id}_asset_class", current_class)
     with st.form(f"fix_instrument_form_{position_id}"):
         company_name = st.text_input(
             "Nazwa spółki",
@@ -708,6 +723,9 @@ def _render_instrument_correction(portfolio_conn, position: dict) -> None:
                     portfolio_conn, position_id=position_id, ticker=ticker, company_name=company_name.strip(),
                     cik=(confirmed_result.cik if confirmed_result else None),
                     exchange=(exchange.strip() or None), instrument_confirmed=confirmed_result is not None,
+                )
+                update_position_fields(
+                    portfolio_conn, position_id, **_instrument_identity_fields(confirmed_result, asset_class),
                 )
                 portfolio_conn.commit()
                 for key in (f"fix_{position_id}_lookup_symbol", f"fix_{position_id}_lookup_result"):
@@ -807,7 +825,7 @@ class _InstrumentChoice:
         )
 
 
-def _render_instrument_lookup_widget(key_prefix: str) -> _InstrumentChoice:
+def _render_instrument_lookup_widget(key_prefix: str, market: MarketData) -> _InstrumentChoice:
     """Sekcja 9/19 specyfikacji: "Nie zgaduj symbolu ani giełdy. Formularz
     ma pozwolić użytkownikowi potwierdzić instrument." Lookup jest POZA
     `st.form` -- musi pokazać wynik PRZED zapisem, więc potrzebuje
@@ -818,9 +836,13 @@ def _render_instrument_lookup_widget(key_prefix: str) -> _InstrumentChoice:
     symbol = st.text_input(
         "Symbol/ticker (np. AAPL, SU.PA, GSK.L)", key=f"{key_prefix}_symbol"
     ).strip()
-    if st.button("Sprawdź instrument w FMP", key=f"{key_prefix}_lookup_btn") and symbol:
+    st.caption(
+        "Giełdy europejskie podawaj z sufiksem: SU.PA (Paryż), GSK.L (Londyn), EUNL.DE (Xetra) — "
+        "sprawdzane w EODHD; pozostałe (USA) w FMP."
+    )
+    if st.button("Sprawdź instrument", key=f"{key_prefix}_lookup_btn") and symbol:
         st.session_state[f"{key_prefix}_lookup_symbol"] = symbol
-        st.session_state[f"{key_prefix}_lookup_result"] = lookup_instrument(symbol)
+        st.session_state[f"{key_prefix}_lookup_result"] = lookup_instrument_routed(symbol, market)
         st.session_state[f"{key_prefix}_confirm"] = False
 
     looked_up_symbol = st.session_state.get(f"{key_prefix}_lookup_symbol")
@@ -833,15 +855,15 @@ def _render_instrument_lookup_widget(key_prefix: str) -> _InstrumentChoice:
 
     if result is None:
         st.warning(
-            "FMP nie rozpoznał tego symbolu (albo brak skonfigurowanego klucza API). "
+            "Dostawca danych nie rozpoznał tego symbolu (albo brak klucza API / wyczerpany dzienny limit). "
             "Możesz zapisać pozycję ręcznie, bez automatycznej ceny bieżącej — nigdy nie "
             "zgadujemy symbolu ani giełdy za Ciebie."
         )
         return _InstrumentChoice(symbol=symbol, looked_up=True, result=None, confirmed=False)
 
     st.success(
-        f"FMP rozpoznał: **{result.company_name or '—'}** "
-        f"({result.exchange or '—'}, {result.currency or '—'})."
+        f"{result.provider} rozpoznał: **{result.company_name or '—'}** "
+        f"({result.exchange or '—'}, {result.currency or '—'}, ISIN {result.isin or '—'})."
     )
     confirmed = st.checkbox("Tak, to właściwy instrument", key=f"{key_prefix}_confirm")
     if not confirmed:
@@ -877,11 +899,36 @@ def _render_acquisition_type_picker(key: str) -> str:
     )
 
 
+def _default_asset_class(result: InstrumentLookupResult | None) -> str:
+    if result is not None and (result.asset_type or "").upper() in {"ETF", "FUND"}:
+        return "ETF"
+    return "STOCK"
+
+
+def _render_asset_class_picker(key: str, default: str) -> str:
+    options = list(_ASSET_CLASS_LABELS)
+    return st.radio(
+        "Klasa aktywa", options, index=options.index(default) if default in options else 0,
+        format_func=lambda c: _ASSET_CLASS_LABELS[c], key=key, horizontal=True,
+    )
+
+
+def _instrument_identity_fields(result: InstrumentLookupResult | None, asset_class: str) -> dict:
+    """Pola tożsamości zapisywane przy pozycji (Faza 11, P0b). Bez
+    potwierdzenia -- brak źródła ceny (pozycja ręczna)."""
+    if result is None:
+        return {"isin": None, "quote_currency": None, "price_provider": None, "price_symbol": None,
+                "asset_class": asset_class}
+    return {"isin": result.isin, "quote_currency": result.currency, "price_provider": result.provider,
+            "price_symbol": result.provider_symbol, "asset_class": asset_class}
+
+
 def _render_new_position_form(portfolio_conn, user: dict) -> None:
     st.markdown("##### Nowa pozycja")
-    choice = _render_instrument_lookup_widget("new_pos")
+    choice = _render_instrument_lookup_widget("new_pos", _market(portfolio_conn))
     confirmed_result = choice.confirmed_result
     _render_quote_currency_hint(choice)
+    asset_class = _render_asset_class_picker("new_pos_asset_class", _default_asset_class(choice.result))
     acquisition_type = _render_acquisition_type_picker("new_pos_acq_type")
 
     with st.form("new_position_form", clear_on_submit=True):
@@ -929,6 +976,9 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
                     cik=(confirmed_result.cik if confirmed_result else None),
                     exchange=(exchange.strip() or None), instrument_currency=currency.strip(),
                     instrument_confirmed=confirmed_result is not None,
+                )
+                update_position_fields(
+                    portfolio_conn, position_id, **_instrument_identity_fields(confirmed_result, asset_class),
                 )
                 insert_purchase_transaction(
                     portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
@@ -1107,9 +1157,10 @@ def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
     aktualnie przeglądana)."""
     platform_filter = _render_platform_filter(portfolio_conn, user)
     broker = None if platform_filter == "ALL" else platform_filter
-    fx = _cached_nbp_rates()
+    market = _market(portfolio_conn)
+    fx = market.nbp_table_a()
     positions_with_summaries = get_user_positions_with_summaries(
-        portfolio_conn, scanner_conn, user["user_id"], broker=broker, quote_fn=_cached_quote, fx=fx,
+        portfolio_conn, scanner_conn, user["user_id"], broker=broker, quote_fn=market.quote_for_position, fx=fx,
     )
 
     inner_labels = ["PODSUMOWANIE", "+ Dodaj transakcję"] + [p["ticker"] for p, _ in positions_with_summaries]
@@ -1126,6 +1177,34 @@ def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
     for tab, (position, summary) in zip(inner_tabs[2:], positions_with_summaries):
         with tab:
             _render_position_card(portfolio_conn, dict(position), summary)
+
+    _render_backup_section(portfolio_conn)
+
+
+def _render_backup_section(portfolio_conn) -> None:
+    """Faza 11: kopia zapasowa. Automatyczna, zweryfikowana kopia powstaje
+    w bazie przed każdą migracją (`pg_store.init_schema`); tutaj można
+    dodatkowo pobrać pełną kopię danych portfela na telefon/komputer."""
+    with st.expander("Kopia zapasowa danych portfela"):
+        info = get_latest_backup_info(portfolio_conn)
+        if info is not None:
+            counts = json.loads(info["row_counts"])
+            st.write(
+                f"Ostatnia automatyczna kopia w bazie: {info['created_at']} UTC — {info['reason']}. "
+                f"Wiersze: " + ", ".join(f"{table} {count}" for table, count in counts.items())
+            )
+        else:
+            st.caption("Brak automatycznej kopii w bazie (tryb lokalny albo nie było jeszcze migracji).")
+        if st.button("Przygotuj plik kopii", key="prepare_backup"):
+            payload, counts = backup_payload(portfolio_conn)
+            st.session_state["backup_file"] = json.dumps(
+                {"row_counts": counts, "tables": payload}, ensure_ascii=False, default=str, indent=1,
+            )
+        if "backup_file" in st.session_state:
+            st.download_button(
+                "Pobierz kopię (JSON)", st.session_state["backup_file"],
+                file_name=f"portfel-kopia-{dt.date.today().isoformat()}.json", mime="application/json",
+            )
 
 
 def _connect_backends() -> tuple[object, object] | None:
@@ -1158,6 +1237,13 @@ def _connect_backends() -> tuple[object, object] | None:
 
     try:
         portfolio_conn = portfolio_backend.connect_portfolio()
+    except BackupVerificationError as exc:
+        st.error(
+            f"Aktualizacja bazy wstrzymana: kopia zapasowa nie przeszła weryfikacji ({exc}). "
+            "Dane nie zostały zmienione."
+        )
+        st.stop()
+        return None
     except PgStoreUnavailableError as exc:
         st.error(
             f"Baza portfela (Supabase) jest chwilowo niedostępna: {exc}\n\n"

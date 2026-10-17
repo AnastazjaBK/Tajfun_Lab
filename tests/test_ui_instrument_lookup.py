@@ -149,3 +149,43 @@ def test_save_allowed_manually_when_fmp_did_not_recognize():
 
 def test_save_blocked_on_empty_symbol():
     assert instrument_save_errors("  ", looked_up=True, result=None, confirmed=False)
+
+
+# --- Faza 11 (P0b): routing FMP / EODHD ---
+
+from buffett_scanner.ui import instrument_lookup as il  # noqa: E402
+from buffett_scanner.ui.market_data import Cached  # noqa: E402
+
+
+class _Market:
+    def __init__(self, rows):
+        self.rows, self.searched = rows, []
+
+    def eodhd_search(self, symbol):
+        self.searched.append(symbol)
+        return Cached(self.rows, "2026-10-17 12:00:00", False)
+
+
+def test_european_symbol_routes_to_eodhd_and_keeps_exact_listing():
+    market = _Market([
+        {"Code": "4GLD", "Exchange": "F", "Name": "Xetra-Gold", "Type": "ETF", "Currency": "EUR", "ISIN": None},
+        {"Code": "4GLD", "Exchange": "XETRA", "Name": "Xetra-Gold", "Type": "ETF", "Currency": "EUR",
+         "ISIN": "DE000A0S9GB0", "previousClose": 119.43},
+    ])
+    result = il.lookup_instrument_routed("4GLD.DE", market)
+    assert market.searched == ["4GLD.XETRA"]
+    assert (result.provider, result.provider_symbol, result.isin, result.exchange) == (
+        "EODHD", "4GLD.XETRA", "DE000A0S9GB0", "XETRA",
+    )
+
+
+def test_european_symbol_without_exact_listing_is_not_recognized():
+    market = _Market([{"Code": "GSK", "Exchange": "US", "Name": "GSK ADR", "Currency": "USD"}])
+    assert il.lookup_instrument_routed("GSK.L", market) is None
+
+
+def test_us_symbol_routes_to_fmp(monkeypatch):
+    monkeypatch.setattr(il, "lookup_instrument", lambda s: "FMP:" + s)
+    market = _Market([])
+    assert il.lookup_instrument_routed("AAPL", market) == "FMP:AAPL"
+    assert market.searched == []

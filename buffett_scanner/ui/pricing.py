@@ -50,6 +50,8 @@ class Quote:
     price: float
     currency: str  # zawsze waluta GŁÓWNA (po `normalize_quote`)
     source: str
+    as_of: str | None = None  # data notowania (EODHD) albo pobrania (FMP)
+    stale: bool = False  # True = ostatnia poprawna wartość, dostawca chwilowo niedostępny
 
 
 @dataclass(frozen=True)

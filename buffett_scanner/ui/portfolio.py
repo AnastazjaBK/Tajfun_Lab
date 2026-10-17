@@ -65,6 +65,11 @@ class PositionSummary:
     # "cena bieżąca niedostępna", nigdy fałszywą wartość 0.
     current_value_by_currency: dict[str, float] | None
     unrealized_pl_by_currency: dict[str, float] | None
+    # Faza 11 (P0b): skąd i z kiedy jest cena bieżąca (wypełniane w
+    # `ui/queries.get_position_summary`, nie liczone tutaj).
+    quote_source: str | None = None
+    quote_as_of: str | None = None
+    quote_stale: bool = False
 
 
 def compute_broker_currency_subpositions(

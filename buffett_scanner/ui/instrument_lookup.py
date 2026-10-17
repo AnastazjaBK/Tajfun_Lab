@@ -38,6 +38,11 @@ class InstrumentLookupResult:
     currency: str | None
     price: float | None
     cik: str | None
+    # Faza 11 (P0b): tożsamość i źródło ceny.
+    isin: str | None = None
+    provider: str = "FMP"
+    provider_symbol: str | None = None
+    asset_type: str | None = None  # typ wg dostawcy -- tylko podpowiedź, klasę potwierdza użytkownik
 
 
 def lookup_instrument(symbol: str) -> InstrumentLookupResult | None:
@@ -54,13 +59,56 @@ def lookup_instrument(symbol: str) -> InstrumentLookupResult | None:
             profile = client.get_company_profile(symbol)
     except FMPError:
         return None
+    resolved = profile.get("symbol") or symbol
     return InstrumentLookupResult(
-        symbol=profile.get("symbol") or symbol,
+        symbol=resolved,
         company_name=profile.get("companyName"),
         exchange=profile.get("exchange") or profile.get("exchangeShortName"),
         currency=profile.get("currency"),
         price=profile.get("price"),
         cik=profile.get("cik"),
+        isin=profile.get("isin"),
+        provider="FMP",
+        provider_symbol=resolved,
+        asset_type="ETF" if profile.get("isEtf") else ("Common Stock" if profile.get("companyName") else None),
+    )
+
+
+def lookup_instrument_routed(symbol: str, market) -> InstrumentLookupResult | None:
+    """Faza 11 (P0b, Decyzja właścicielki 2026-10-17): symbol z
+    europejskim sufiksem giełdy (`SU.PA`, `GSK.L`, `EUNL.DE`, ...) ->
+    wyszukiwarka EODHD (wspólny cache + budżet dzienny przez `market`),
+    pozostałe -> profil FMP jak dotąd. Z wyników EODHD brany jest
+    WYŁĄCZNIE wpis o dokładnie tym kodzie i giełdzie -- nigdy dopasowanie
+    po nazwie ani "najbliższy" listing."""
+    from buffett_scanner.providers.eodhd import to_eodhd_symbol
+
+    symbol = symbol.strip()
+    eodhd_symbol = to_eodhd_symbol(symbol)
+    if eodhd_symbol is None:
+        return lookup_instrument(symbol)
+    cached = market.eodhd_search(eodhd_symbol)
+    if cached is None:
+        return None
+    code, exchange = eodhd_symbol.rsplit(".", 1)
+    matches = [
+        r for r in cached.value
+        if isinstance(r, dict) and str(r.get("Code", "")).upper() == code and str(r.get("Exchange", "")).upper() == exchange
+    ]
+    if not matches:
+        return None
+    row = matches[0]
+    return InstrumentLookupResult(
+        symbol=symbol.upper(),
+        company_name=row.get("Name"),
+        exchange=row.get("Exchange"),
+        currency=row.get("Currency"),
+        price=row.get("previousClose"),
+        cik=None,
+        isin=row.get("ISIN"),
+        provider="EODHD",
+        provider_symbol=eodhd_symbol,
+        asset_type=row.get("Type"),
     )
 
 

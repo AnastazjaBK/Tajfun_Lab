@@ -46,6 +46,7 @@ resolve_api_key` w `config.py`) — nigdy w repo, nigdy zalogowany.
 
 from __future__ import annotations
 
+import json
 import os
 
 import psycopg2
@@ -163,9 +164,100 @@ PG_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("purchase_transactions", "void_reason", "TEXT"),
     ("sale_transactions", "voided_at", "TEXT"),
     ("sale_transactions", "void_reason", "TEXT"),
+    # Faza 11 (P0b-P4, Decyzja właścicielki 2026-10-17) -- tożsamość
+    # instrumentu i źródło ceny (P0b), kurs rzeczywisty brokera (P1),
+    # klasy aktywów i dane metali fizycznych (P4). Wszystkie nullable:
+    # NULL `asset_class` = STOCK (pozycje sprzed Fazy 11).
+    ("positions", "isin", "TEXT"),
+    ("positions", "quote_currency", "TEXT"),
+    ("positions", "price_provider", "TEXT"),
+    ("positions", "price_symbol", "TEXT"),
+    ("positions", "asset_class", "TEXT"),
+    ("positions", "metal", "TEXT"),
+    ("positions", "product_form", "TEXT"),
+    ("positions", "unit_weight", "DOUBLE PRECISION"),
+    ("positions", "weight_unit", "TEXT"),
+    ("positions", "fineness", "DOUBLE PRECISION"),
+    ("positions", "storage_location", "TEXT"),
+    ("positions", "is_collectible", "INTEGER"),
+    ("positions", "exposure_type", "TEXT"),
+    ("positions", "annual_fee_pct", "DOUBLE PRECISION"),
+    ("purchase_transactions", "fx_rate_actual", "DOUBLE PRECISION"),
+    ("sale_transactions", "fx_rate_actual", "DOUBLE PRECISION"),
 )
 
 _PG_NOW = "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+
+# Faza 11 -- nowe tabele. `market_data_cache` jest WSPÓLNY dla wszystkich
+# użytkowników i sesji (ceny, kursy NBP, historia, dywidendy) -- jedno
+# zapytanie do dostawcy obsługuje wszystkich (limit EODHD Free 20/dzień).
+PG_NEW_TABLES: tuple[tuple[str, str], ...] = (
+    ("market_data_cache", f"""
+        CREATE TABLE IF NOT EXISTS market_data_cache (
+            cache_key   TEXT PRIMARY KEY,
+            payload     TEXT NOT NULL,
+            fetched_at  TEXT NOT NULL DEFAULT {_PG_NOW}
+        )"""),
+    ("dividend_receipts", f"""
+        CREATE TABLE IF NOT EXISTS dividend_receipts (
+            receipt_id       SERIAL PRIMARY KEY,
+            position_id      INTEGER NOT NULL REFERENCES positions(position_id),
+            broker           TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+            pay_date         TEXT NOT NULL,
+            ex_date          TEXT,
+            gross_amount     DOUBLE PRECISION NOT NULL,
+            withholding_tax  DOUBLE PRECISION,
+            net_amount       DOUBLE PRECISION,
+            currency         TEXT NOT NULL,
+            fx_rate_actual   DOUBLE PRECISION,
+            note             TEXT,
+            voided_at        TEXT,
+            created_at       TEXT NOT NULL DEFAULT {_PG_NOW}
+        )"""),
+    ("manual_valuations", f"""
+        CREATE TABLE IF NOT EXISTS manual_valuations (
+            valuation_id     SERIAL PRIMARY KEY,
+            position_id      INTEGER NOT NULL REFERENCES positions(position_id),
+            kind             TEXT NOT NULL CHECK (kind IN ('MARKET','BUYBACK')),
+            price_per_unit   DOUBLE PRECISION NOT NULL,
+            currency         TEXT NOT NULL,
+            valuation_date   TEXT NOT NULL,
+            note             TEXT,
+            voided_at        TEXT,
+            created_at       TEXT NOT NULL DEFAULT {_PG_NOW}
+        )"""),
+)
+
+PG_BACKUP_TABLE = f"""
+CREATE TABLE IF NOT EXISTS portfolio_backups (
+    backup_id   SERIAL PRIMARY KEY,
+    created_at  TEXT NOT NULL DEFAULT {_PG_NOW},
+    reason      TEXT NOT NULL,
+    row_counts  TEXT NOT NULL,
+    payload     TEXT NOT NULL
+)"""
+
+# Tabele z danymi użytkowników objęte kopią zapasową (cache rynkowy jest
+# odtwarzalny, więc pomijany).
+BACKUP_TABLES = (
+    "users", "positions", "purchase_transactions", "sale_transactions",
+    "user_decisions", "purchase_thesis", "holding_user_actions",
+    "dividend_receipts", "manual_valuations",
+)
+
+# Kolumny pozycji, które wolno zmieniać przez `update_position_fields`
+# (Faza 11) -- jawna lista, nazwy kolumn nigdy nie pochodzą z wejścia.
+POSITION_EXTRA_FIELDS = (
+    "isin", "quote_currency", "price_provider", "price_symbol", "asset_class",
+    "metal", "product_form", "unit_weight", "weight_unit", "fineness",
+    "storage_location", "is_collectible", "exposure_type", "annual_fee_pct",
+)
+
+
+class BackupVerificationError(RuntimeError):
+    """Kopia zapasowa nie zgadza się z danymi -- migracja NIE jest
+    wykonywana (Decyzja właścicielki: migracja wyłącznie po
+    zweryfikowanym backupie)."""
 
 
 def resolve_database_url() -> str:
@@ -201,19 +293,83 @@ def connect(database_url: str | None = None):
     return conn
 
 
+def _existing_schema(cur) -> tuple[set[str], set[tuple[str, str]]]:
+    cur.execute(
+        "SELECT table_name, column_name FROM information_schema.columns "
+        "WHERE table_schema = current_schema()"
+    )
+    columns = {(r["table_name"], r["column_name"]) for r in cur.fetchall()}
+    return {t for t, _ in columns}, columns
+
+
+def backup_payload(conn) -> tuple[dict[str, list[dict]], dict[str, int]]:
+    """Pełna zawartość tabel użytkowników (`BACKUP_TABLES`, tylko
+    istniejące) + liczba wierszy per tabela."""
+    with conn.cursor() as cur:
+        tables, _ = _existing_schema(cur)
+        payload: dict[str, list[dict]] = {}
+        for table in BACKUP_TABLES:
+            if table in tables:
+                cur.execute(f"SELECT * FROM {table}")
+                payload[table] = [dict(r) for r in cur.fetchall()]
+    return payload, {t: len(rows) for t, rows in payload.items()}
+
+
+def create_verified_backup(conn, reason: str) -> int:
+    """Faza 11: zapisuje kopię wszystkich danych użytkowników do
+    `portfolio_backups` i WERYFIKUJE ją (odczyt z bazy, liczba wierszy
+    per tabela == liczba wierszy w tabelach źródłowych). Niezgodność ->
+    `BackupVerificationError` i rollback; wołający nie migruje."""
+    payload, counts = backup_payload(conn)
+    with conn.cursor() as cur:
+        cur.execute(PG_BACKUP_TABLE)
+        cur.execute(
+            "INSERT INTO portfolio_backups (reason, row_counts, payload) VALUES (%s, %s, %s) RETURNING backup_id",
+            (reason, json.dumps(counts), json.dumps(payload, default=str)),
+        )
+        backup_id = cur.fetchone()["backup_id"]
+        cur.execute("SELECT payload FROM portfolio_backups WHERE backup_id = %s", (backup_id,))
+        stored = json.loads(cur.fetchone()["payload"])
+        for table, count in counts.items():
+            cur.execute(f"SELECT count(*) AS n FROM {table}")
+            if cur.fetchone()["n"] != count or len(stored.get(table, [])) != count:
+                conn.rollback()
+                raise BackupVerificationError(f"Kopia zapasowa niezgodna dla tabeli {table}.")
+    conn.commit()
+    return backup_id
+
+
+def get_latest_backup_info(conn):
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT backup_id, created_at, reason, row_counts FROM portfolio_backups "
+            "ORDER BY backup_id DESC LIMIT 1"
+        )
+        return cur.fetchone()
+
+
 def init_schema(conn) -> None:
-    """Idempotentne (`CREATE TABLE IF NOT EXISTS`) -- bezpieczne do
-    wywołania na już istniejącej bazie z danymi, nigdy nie kasuje/
-    nadpisuje istniejących wierszy (ten sam wzorzec co `db.init_db`)."""
+    """Idempotentne -- bezpieczne do wywołania na już istniejącej bazie z
+    danymi, nigdy nie kasuje/nadpisuje istniejących wierszy. Faza 11:
+    jeśli brakuje jakiejkolwiek nowej tabeli/kolumny, NAJPIERW powstaje
+    zweryfikowana kopia zapasowa (`create_verified_backup`), dopiero
+    potem migracja (wyłącznie CREATE TABLE / ADD COLUMN)."""
     with conn.cursor() as cur:
         cur.execute(PG_SCHEMA)
-        cur.execute(
-            "SELECT table_name, column_name FROM information_schema.columns "
-            "WHERE table_schema = current_schema()"
-        )
-        existing = {(r["table_name"], r["column_name"]) for r in cur.fetchall()}
+        cur.execute(PG_BACKUP_TABLE)
+        tables, columns = _existing_schema(cur)
+    conn.commit()
+    pending = [name for name, _ in PG_NEW_TABLES if name not in tables]
+    pending += [f"{t}.{c}" for t, c, _ in PG_COLUMN_MIGRATIONS if (t, c) not in columns]
+    if not pending:
+        return
+    create_verified_backup(conn, reason="przed migracją: " + ", ".join(pending))
+    with conn.cursor() as cur:
+        for name, ddl in PG_NEW_TABLES:
+            if name not in tables:
+                cur.execute(ddl)
         for table, column, coltype in PG_COLUMN_MIGRATIONS:
-            if (table, column) not in existing:
+            if (table, column) not in columns:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
     conn.commit()
 
@@ -460,5 +616,116 @@ def get_latest_holding_user_action(conn, position_id: int):
             ORDER BY action_id DESC LIMIT 1
             """,
             (position_id,),
+        )
+        return cur.fetchone()
+
+
+# ---------------------------------------------------------------------------
+# Faza 11 (P0b-P4)
+# ---------------------------------------------------------------------------
+
+
+def update_position_fields(conn, position_id: int, **fields) -> None:
+    """Zmienia wyłącznie kolumny z `POSITION_EXTRA_FIELDS`."""
+    unknown = set(fields) - set(POSITION_EXTRA_FIELDS)
+    if unknown:
+        raise ValueError(f"Niedozwolone pola pozycji: {sorted(unknown)}")
+    if not fields:
+        return
+    assignments = ", ".join(f"{name} = %s" for name in fields)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE positions SET {assignments}, updated_at = {_PG_NOW} WHERE position_id = %s",
+            (*fields.values(), position_id),
+        )
+
+
+def set_transaction_fx_rate(conn, *, kind: str, transaction_id: int, fx_rate_actual: float | None) -> None:
+    """Kurs rzeczywisty brokera (PLN za 1 jednostkę waluty transakcji).
+    Uzupełnienie danych, nie zmiana transakcji: kwoty, daty i waluta
+    zostają nietknięte."""
+    table = {"PURCHASE": "purchase_transactions", "SALE": "sale_transactions"}[kind]
+    with conn.cursor() as cur:
+        cur.execute(f"UPDATE {table} SET fx_rate_actual = %s WHERE transaction_id = %s", (fx_rate_actual, transaction_id))
+
+
+def get_cache_entry(conn, cache_key: str):
+    with conn.cursor() as cur:
+        cur.execute("SELECT payload, fetched_at FROM market_data_cache WHERE cache_key = %s", (cache_key,))
+        return cur.fetchone()
+
+
+def put_cache_entry(conn, cache_key: str, payload: str, fetched_at: str) -> None:
+    """`fetched_at` (UTC "YYYY-MM-DD HH:MM:SS") podaje wołający -- ten sam
+    zegar, którym potem liczy wiek wpisu."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO market_data_cache (cache_key, payload, fetched_at) VALUES (%s, %s, %s)
+            ON CONFLICT (cache_key) DO UPDATE SET payload = EXCLUDED.payload, fetched_at = EXCLUDED.fetched_at
+            """,
+            (cache_key, payload, fetched_at),
+        )
+
+
+def insert_dividend_receipt(
+    conn, *, position_id: int, broker: str, pay_date: str, gross_amount: float, currency: str,
+    ex_date: str | None = None, withholding_tax: float | None = None, net_amount: float | None = None,
+    fx_rate_actual: float | None = None, note: str | None = None,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO dividend_receipts (
+                position_id, broker, pay_date, ex_date, gross_amount, withholding_tax,
+                net_amount, currency, fx_rate_actual, note
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING receipt_id
+            """,
+            (position_id, broker, pay_date, ex_date, gross_amount, withholding_tax,
+             net_amount, currency, fx_rate_actual, note),
+        )
+        return cur.fetchone()["receipt_id"]
+
+
+def get_dividend_receipts(conn, position_id: int) -> list:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT * FROM dividend_receipts WHERE position_id = %s AND voided_at IS NULL ORDER BY pay_date",
+            (position_id,),
+        )
+        return cur.fetchall()
+
+
+def void_dividend_receipt(conn, receipt_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE dividend_receipts SET voided_at = {_PG_NOW} WHERE receipt_id = %s AND voided_at IS NULL",
+            (receipt_id,),
+        )
+
+
+def insert_manual_valuation(
+    conn, *, position_id: int, kind: str, price_per_unit: float, currency: str,
+    valuation_date: str, note: str | None = None,
+) -> int:
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO manual_valuations (position_id, kind, price_per_unit, currency, valuation_date, note)
+            VALUES (%s, %s, %s, %s, %s, %s) RETURNING valuation_id
+            """,
+            (position_id, kind, price_per_unit, currency, valuation_date, note),
+        )
+        return cur.fetchone()["valuation_id"]
+
+
+def get_latest_manual_valuation(conn, position_id: int, kind: str):
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            SELECT * FROM manual_valuations WHERE position_id = %s AND kind = %s AND voided_at IS NULL
+            ORDER BY valuation_date DESC, valuation_id DESC LIMIT 1
+            """,
+            (position_id, kind),
         )
         return cur.fetchone()

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 
 from buffett_scanner.analysis_schema import AnalysisOutput
 from buffett_scanner.config import load_config
@@ -147,11 +148,13 @@ def is_instrument_confirmed(position) -> bool:
 
 
 def get_current_quote_for_position(scanner_conn: sqlite3.Connection, position, quote_fn=None) -> Quote | None:
-    """Faza 9: najpierw FMP po tickerze (tylko pozycja z potwierdzonym
-    instrumentem, `quote_fn` wstrzykiwane przez UI -- cache'owane tam),
-    potem dotychczasowy fallback `price_daily` po `cik` (EOD, USD)."""
+    """Faza 9/11: najpierw dostawca ceny pozycji (FMP albo EODHD --
+    `quote_fn(position)` wstrzykiwane przez UI, zwykle
+    `MarketData.quote_for_position`; tylko pozycja z potwierdzonym
+    instrumentem), potem dotychczasowy fallback `price_daily` po `cik`
+    (EOD, USD)."""
     if quote_fn is not None and is_instrument_confirmed(position):
-        quote = quote_fn(position["ticker"])
+        quote = quote_fn(position)
         if quote is not None:
             return quote
     price, currency = get_current_price_for_position(scanner_conn, position)
@@ -182,12 +185,15 @@ def get_position_summary(
         purchases = [p for p in purchases if p["broker"] == broker]
         sales = [s for s in sales if s["broker"] == broker]
     quote = get_current_quote_for_position(scanner_conn, position, quote_fn=quote_fn)
-    return compute_position_summary(
+    summary = compute_position_summary(
         position["position_id"], purchases, sales,
         current_price=quote.price if quote else None,
         current_price_currency=quote.currency if quote else None,
         fx=fx,
     )
+    if quote is None:
+        return summary
+    return replace(summary, quote_source=quote.source, quote_as_of=quote.as_of, quote_stale=quote.stale)
 
 
 def get_user_positions_with_summaries(

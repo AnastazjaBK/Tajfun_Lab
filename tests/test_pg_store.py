@@ -12,6 +12,7 @@ ten sam styl co `tests/test_db.py` z osobnym `tmp_path` per test)."""
 
 from __future__ import annotations
 
+import json
 import os
 
 import pytest
@@ -23,6 +24,7 @@ from buffett_scanner import pg_store  # noqa: E402
 TEST_POSTGRES_URL_ENV_VAR = "TEST_POSTGRES_URL"
 
 _TABLES_IN_FK_SAFE_TRUNCATE_ORDER = (
+    "dividend_receipts", "manual_valuations", "market_data_cache", "portfolio_backups",
     "holding_user_actions", "purchase_thesis", "sale_transactions",
     "purchase_transactions", "positions", "user_decisions", "users",
 )
@@ -313,3 +315,70 @@ def test_phase9_corrections_update_instrument_and_void_rows(conn):
     pg_store.void_position(conn, pid)
     conn.commit()
     assert pg_store.get_positions_for_user(conn, uid) == []
+
+
+@pytest.mark.integration
+def test_phase11_migration_runs_only_after_verified_backup(conn):
+    """Żywa baza z danymi i schematem sprzed Fazy 11: init_schema najpierw
+    zapisuje i weryfikuje kopię, dopiero potem dodaje tabele/kolumny."""
+    with conn.cursor() as cur:
+        for name, _ in pg_store.PG_NEW_TABLES:
+            cur.execute(f"DROP TABLE IF EXISTS {name}")
+        for table, column, _ in pg_store.PG_COLUMN_MIGRATIONS:
+            if column in ("isin", "asset_class", "fx_rate_actual"):
+                cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}")
+        cur.execute("DELETE FROM portfolio_backups")
+    conn.commit()
+    uid = pg_store.create_user(conn, "Anastazja")
+    pid = pg_store.insert_position(conn, user_id=uid, ticker="SU.PA", company_name="Schneider Electric")
+    pg_store.insert_purchase_transaction(
+        conn, position_id=pid, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+        purchase_date="2026-10-06", shares=0.15, total_invested=154.54, currency="PLN",
+    )
+    conn.commit()
+
+    pg_store.init_schema(conn)
+
+    info = pg_store.get_latest_backup_info(conn)
+    assert "positions.isin" in info["reason"]
+    assert json.loads(info["row_counts"])["purchase_transactions"] == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT payload FROM portfolio_backups WHERE backup_id = %s", (info["backup_id"],))
+        payload = json.loads(cur.fetchone()["payload"])
+    assert payload["positions"][0]["ticker"] == "SU.PA"
+    [position] = pg_store.get_positions_for_user(conn, uid)
+    assert position["isin"] is None and position["asset_class"] is None
+    pg_store.init_schema(conn)  # brak oczekujących migracji -> brak kolejnej kopii
+    assert pg_store.get_latest_backup_info(conn)["backup_id"] == info["backup_id"]
+
+
+@pytest.mark.integration
+def test_phase11_crud(conn):
+    uid = pg_store.create_user(conn, "Anastazja")
+    pid = pg_store.insert_position(conn, user_id=uid, ticker="GSK.L", company_name="GSK plc")
+    pg_store.update_position_fields(
+        conn, pid, isin="GB00BN7SWP63", quote_currency="GBX", price_provider="EODHD",
+        price_symbol="GSK.LSE", asset_class="STOCK",
+    )
+    with pytest.raises(ValueError):
+        pg_store.update_position_fields(conn, pid, ticker="X")
+    position = pg_store.get_position(conn, pid)
+    assert (position["price_provider"], position["price_symbol"]) == ("EODHD", "GSK.LSE")
+
+    pg_store.put_cache_entry(conn, "k", '{"a": 1}', "2026-10-17 12:00:00")
+    pg_store.put_cache_entry(conn, "k", '{"a": 2}', "2026-10-17 13:00:00")
+    assert pg_store.get_cache_entry(conn, "k")["payload"] == '{"a": 2}'
+
+    rid = pg_store.insert_dividend_receipt(
+        conn, position_id=pid, broker="TRADE_REPUBLIC", pay_date="2026-10-08", gross_amount=0.31,
+        currency="GBP", withholding_tax=0.0, net_amount=0.31,
+    )
+    assert len(pg_store.get_dividend_receipts(conn, pid)) == 1
+    pg_store.void_dividend_receipt(conn, rid)
+    assert pg_store.get_dividend_receipts(conn, pid) == []
+
+    pg_store.insert_manual_valuation(
+        conn, position_id=pid, kind="BUYBACK", price_per_unit=10.0, currency="PLN", valuation_date="2026-10-17",
+    )
+    assert pg_store.get_latest_manual_valuation(conn, pid, "BUYBACK")["price_per_unit"] == 10.0
+    conn.commit()

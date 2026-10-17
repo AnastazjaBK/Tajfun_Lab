@@ -250,6 +250,28 @@ class FMPClient:
         normalized.sort(key=lambda r: r["date"])
         return normalized
 
+    def get_dividends(self, symbol: str) -> list[dict]:
+        """Faza 11 (P3): historia dywidend na akcję (`stable/dividends`).
+        Pola potwierdzone empirycznie 2026-10-17: date (ex-dividend),
+        recordDate, paymentDate, declarationDate, dividend, adjDividend,
+        yield, frequency."""
+        data = self._get("dividends", symbol=symbol)
+        return data if isinstance(data, list) else []
+
+    def get_quote(self, symbol: str) -> dict | None:
+        """Faza 11 (P4): notowanie (krypto `BTCUSD`, kontrakty `GCUSD`/
+        `SIUSD`) -- price, timestamp, name, exchange."""
+        data = self._get("quote", symbol=symbol)
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data if isinstance(data, dict) and data else None
+
+    def get_splits(self, symbol: str) -> list[dict]:
+        """Faza 11 (P2): zdarzenia korporacyjne (`stable/splits`), m.in.
+        `splitType: "spin-off"` (potwierdzone na CTVA 2026-10-17)."""
+        data = self._get("splits", symbol=symbol)
+        return data if isinstance(data, list) else []
+
     def _get_statement(self, path: str, symbol: str, *, period: str, limit: int) -> list[dict]:
         data = self._get(path, symbol=symbol, period=period, limit=limit)
         if not isinstance(data, list):
