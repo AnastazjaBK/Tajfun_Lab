@@ -1,0 +1,21 @@
+name: "DIAG EODHD: pokrycie darmowego klucza (jednorazowy)"
+
+# Jednorazowa diagnostyka (Decyzja właścicielki 2026-10-17). Uruchamia się
+# wyłącznie przy pushu na ten osobny branch -- nie dotyka main ani brancha
+# produkcyjnego appki.
+on:
+  push:
+    branches: [claude/diag-eodhd]
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install "httpx>=0.27"
+      - run: python -m diag.eodhd_coverage
+        env:
+          EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
