@@ -28,10 +28,19 @@ from typing import Callable
 import httpx
 
 from buffett_scanner.config import load_config
-from buffett_scanner.portfolio_backend import get_cache_entry, put_cache_entry
+from buffett_scanner.portfolio_backend import get_cache_entry, get_latest_manual_valuation, put_cache_entry
 from buffett_scanner.providers.eodhd import EODHDClient, EODHDError
 from buffett_scanner.providers.eodhd import resolve_api_key as resolve_eodhd_key
 from buffett_scanner.providers.fmp import FMPClient, FMPError
+from buffett_scanner.ui.assets import (
+    CRYPTO,
+    PHYSICAL,
+    PHYSICAL_GOLD,
+    PHYSICAL_SILVER,
+    TROY_OUNCE_G,
+    asset_class_of,
+    pure_grams_per_piece,
+)
 from buffett_scanner.ui.pricing import (
     MINOR_UNIT_CURRENCIES,
     NBP_TABLE_A_URL,
@@ -387,12 +396,65 @@ class MarketData:
         return Quote(price=normalized[0], currency=normalized[1], source="FMP",
                      as_of=cached.fetched_at[:10], stale=cached.stale)
 
+    def manual_valuation(self, position, kind: str) -> Quote | None:
+        """Ostatnia wycena ręczna (P4): MARKET (np. srebro, moneta
+        kolekcjonerska) albo BUYBACK (szacunkowa cena odkupu u dealera)."""
+        row = get_latest_manual_valuation(self._conn, position["position_id"], kind)
+        if row is None:
+            return None
+        return Quote(price=row["price_per_unit"], currency=str(row["currency"]).upper(),
+                     source="wycena ręczna", as_of=row["valuation_date"])
+
+    def _physical_metal_quote(self, position) -> Quote | None:
+        """Cena JEDNEJ sztuki = czysty metal x cena spot (złoto: NBP PLN/g;
+        srebro: FMP SIUSD -- kontrakt terminowy jako przybliżenie spot).
+        Moneta kolekcjonerska albo brak ceny automatycznej -> wycena ręczna."""
+        def field(name):
+            return position[name] if name in position.keys() else None
+
+        if not field("is_collectible"):
+            grams = pure_grams_per_piece(field("unit_weight"), field("weight_unit"), field("fineness"))
+            if grams is not None and asset_class_of(position) == PHYSICAL_GOLD:
+                gold = self.nbp_gold_pln_per_gram()
+                if gold is not None:
+                    return Quote(price=grams * gold[1], currency="PLN", source="NBP (cena złota)", as_of=gold[0])
+            if grams is not None and asset_class_of(position) == PHYSICAL_SILVER:
+                cached = self.fmp_quote("SIUSD")
+                if cached is not None and cached.value.get("price"):
+                    return Quote(
+                        price=grams * cached.value["price"] / TROY_OUNCE_G, currency="USD",
+                        source="FMP (kontrakt na srebro)", as_of=_timestamp_date(cached.value.get("timestamp")),
+                        stale=cached.stale,
+                    )
+        return self.manual_valuation(position, "MARKET")
+
+    def crypto_quote(self, symbol: str) -> Quote | None:
+        cached = self.fmp_quote(symbol)
+        if cached is None or not cached.value.get("price"):
+            return None
+        currency = symbol[-3:].upper() if len(symbol) > 3 else "USD"
+        return Quote(price=float(cached.value["price"]), currency=currency, source="FMP (krypto)",
+                     as_of=_timestamp_date(cached.value.get("timestamp")), stale=cached.stale)
+
     def quote_for_position(self, position) -> Quote | None:
         keys = position.keys()
+        asset_class = asset_class_of(position)
+        if asset_class in PHYSICAL:
+            return self._physical_metal_quote(position)
+        if asset_class == CRYPTO:
+            symbol = (position["price_symbol"] if "price_symbol" in keys else None) or position["ticker"]
+            return self.crypto_quote(symbol)
         provider = position["price_provider"] if "price_provider" in keys else None
         symbol = (position["price_symbol"] if "price_symbol" in keys else None) or position["ticker"]
         quote_currency = position["quote_currency"] if "quote_currency" in keys else None
         return self.quote_for_symbol(provider, symbol, quote_currency)
+
+
+def _timestamp_date(timestamp) -> str | None:
+    try:
+        return dt.datetime.fromtimestamp(int(timestamp), dt.timezone.utc).date().isoformat()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
 
 
 def _default_fmp_factory() -> FMPClient | None:

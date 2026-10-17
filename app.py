@@ -77,6 +77,7 @@ from buffett_scanner.portfolio_backend import (
     get_latest_backup_info,
     get_dividend_receipts,
     insert_dividend_receipt,
+    insert_manual_valuation,
     set_transaction_fx_rate,
     update_position_fields,
     void_dividend_receipt,
@@ -84,6 +85,23 @@ from buffett_scanner.portfolio_backend import (
     void_position,
     void_purchase_transaction,
     void_sale_transaction,
+)
+from buffett_scanner.ui.assets import (
+    ASSET_CLASS_LABELS,
+    CRYPTO,
+    ETC,
+    ETF,
+    ETN,
+    EXCHANGE_TRADED,
+    EXPOSURE_LABELS,
+    METAL_LABELS,
+    PHYSICAL,
+    PHYSICAL_GOLD,
+    PHYSICAL_SILVER,
+    PRODUCT_FORM_LABELS,
+    asset_class_of,
+    exposure_summary,
+    pure_grams_per_piece,
 )
 from buffett_scanner.ui.data_quality import data_quality_warning
 from buffett_scanner.ui.instrument_lookup import (
@@ -183,12 +201,7 @@ _PL_LOSS_CSS = "color: #e5534b; font-weight: 600"
 # Faza 11 (P0b): klasy aktywów wybierane przy potwierdzaniu instrumentu.
 # Typ podany przez dostawcę jest tylko podpowiedzią (EODHD oznacza ETC
 # Xetra-Gold jako "ETF") -- decyduje użytkownik.
-_ASSET_CLASS_LABELS = {
-    "STOCK": "Akcja",
-    "ETF": "ETF",
-    "ETC": "ETC (np. złoto/srebro giełdowe)",
-    "ETN": "ETN",
-}
+_ASSET_CLASS_LABELS = {c: ASSET_CLASS_LABELS[c] for c in EXCHANGE_TRADED}
 
 
 def _market(portfolio_conn) -> MarketData:
@@ -555,6 +568,8 @@ def _render_portfolio_dividends(portfolio_conn, positions_with_summaries: list, 
         all_receipts += receipts
         received = summarize_receipts(receipts, pln_rate_fn=market.pln_rate, year=today.year)
         metrics = None
+        if asset_class_of(position) in (*PHYSICAL, CRYPTO):
+            continue
         if is_instrument_confirmed(position):
             provider = position.get("price_provider")
             symbol = position.get("price_symbol") or position["ticker"]
@@ -924,6 +939,7 @@ def _render_portfolio_summary_tab(
         cols[1].metric("Zainwestowany kapitał", _format_currency_dict(bar["invested_by_currency"]))
         _render_pl_metric(cols[2], "Zysk/strata", bar["unrealized_pl_by_currency"])
         st.caption("Każda waluta osobno — bez przeliczania i bez sumowania różnych walut.")
+    _render_exposure(positions_with_summaries)
 
     portfolio_view = st.radio("Widok pozycji", _PORTFOLIO_VIEWS, horizontal=True, key="portfolio_view")
     if portfolio_view == "Zmiany cen":
@@ -960,7 +976,7 @@ def _render_portfolio_summary_tab(
                 "Ticker": position["ticker"],
                 "Spółka": position["company_name"],
                 "Platforma": broker_label(sub.broker),
-                "Akcje": _format_shares(sub.shares_held),
+                "Ilość": _format_shares(sub.shares_held),
                 "Śr. cena zakupu": _format_optional(sub.avg_price),
                 "Własny koszt": f"{sub.total_invested:.2f} {sub.currency}",
                 "Bieżąca cena": (
@@ -1010,10 +1026,44 @@ def _render_portfolio_summary_tab(
 _PORTFOLIO_VIEWS = ("Wycena", "Zmiany cen", "Dywidendy")
 
 
+def _render_exposure(positions_with_summaries: list) -> None:
+    """Faza 11 (P4): udział klas aktywów i ekspozycja na metale (PLN)."""
+    exposure = exposure_summary(positions_with_summaries)
+    total = sum(exposure["by_class"].values())
+    if total <= 0:
+        return
+    with st.expander("Klasy aktywów i ekspozycja na metale szlachetne"):
+        st.dataframe(
+            [
+                {"Klasa aktywów": ASSET_CLASS_LABELS[c], "Wartość (PLN)": round(v, 2), "Udział": f"{v / total * 100:.1f}%"}
+                for c, v in sorted(exposure["by_class"].items(), key=lambda kv: -kv[1])
+            ],
+            hide_index=True, use_container_width=True,
+        )
+        rows = []
+        for metal, parts in exposure["metals"].items():
+            if parts["physical"] or parts["exchange"]:
+                rows.append({
+                    "Metal": METAL_LABELS[metal], "Fizyczny (PLN)": round(parts["physical"], 2),
+                    "Giełdowy ETF/ETC/ETN (PLN)": round(parts["exchange"], 2),
+                    "Razem (PLN)": round(parts["physical"] + parts["exchange"], 2),
+                })
+        if rows:
+            st.dataframe(rows, hide_index=True, use_container_width=True)
+            precious = sum(r["Razem (PLN)"] for r in rows)
+            st.write(f"Łącznie metale szlachetne: **{precious:,.0f} PLN** ({precious / total * 100:.1f}% wycenionej części portfela).")
+        st.caption(
+            "Metal fizyczny wyceniany po cenie spot czystego metalu (złoto: NBP; srebro: kontrakt FMP jako "
+            "przybliżenie) — to nie cena odkupu u dealera. Giełdowe ETF/ETC/ETN po cenie rynkowej, nie jako gramy "
+            "metalu na własność; każda pozycja liczona raz."
+            + (f" Bez wyceny (pominięte): {', '.join(exposure['unpriced'])}." if exposure["unpriced"] else "")
+        )
+
+
 def _position_history(market: MarketData, position) -> tuple[list[dict], bool, str] | None:
     """Notowania pozycji od jej dostawcy ceny (tylko potwierdzony instrument)."""
     position = dict(position)
-    if not is_instrument_confirmed(position):
+    if not is_instrument_confirmed(position) or asset_class_of(position) in PHYSICAL:
         return None
     provider = position.get("price_provider")
     symbol = position.get("price_symbol") or position["ticker"]
@@ -1125,12 +1175,54 @@ def _render_position_card(portfolio_conn, position: dict, summary) -> None:
             st.rerun()
 
     st.markdown("---")
-    with st.expander("Dywidendy otrzymane"):
-        _render_dividend_register(portfolio_conn, position)
+    if asset_class_of(position) in PHYSICAL:
+        with st.expander("Wycena ręczna i cena odkupu", expanded=True):
+            _render_manual_valuations(portfolio_conn, position, summary)
+    else:
+        with st.expander("Dywidendy otrzymane"):
+            _render_dividend_register(portfolio_conn, position)
     with st.expander("Popraw dane / anuluj błędny wpis"):
         _render_instrument_correction(portfolio_conn, position)
         st.markdown("---")
         _render_transaction_voiding(portfolio_conn, position)
+
+
+def _render_manual_valuations(portfolio_conn, position: dict, summary) -> None:
+    """Faza 11 (P4): metal fizyczny -- wycena ręczna (gdy brak ceny
+    automatycznej albo moneta kolekcjonerska) i szacunkowa cena odkupu u
+    dealera, zawsze z datą. Odkup pokazywany OBOK spot, nigdy zamiast."""
+    market = _market(portfolio_conn)
+    grams = pure_grams_per_piece(position.get("unit_weight"), position.get("weight_unit"), position.get("fineness"))
+    st.write(
+        f"{PRODUCT_FORM_LABELS.get(position.get('product_form'), 'produkt')} · czysty metal w sztuce: "
+        f"{f'{grams:.4f} g' if grams else '—'} · przechowywanie: {position.get('storage_location') or '—'}"
+        + (" · moneta kolekcjonerska (bez wyceny spot)" if position.get("is_collectible") else "")
+    )
+    buyback = market.manual_valuation(position, "BUYBACK")
+    if buyback is not None:
+        st.write(
+            f"Szacunkowa wartość odkupu: **{buyback.price * summary.shares_held:,.2f} {buyback.currency}** "
+            f"({buyback.price:,.2f} {buyback.currency}/szt., wpis z {buyback.as_of})."
+        )
+    with st.form(f"manual_valuation_{position['position_id']}", clear_on_submit=True):
+        kind = st.radio(
+            "Rodzaj wyceny", ("BUYBACK", "MARKET"), horizontal=True,
+            format_func=lambda k: "cena odkupu u dealera" if k == "BUYBACK" else "wartość rynkowa (zamiast spot)",
+        )
+        price = st.number_input("Cena za 1 sztukę", min_value=0.0, step=0.01, format="%.2f")
+        currency = st.text_input("Waluta", value="PLN")
+        valuation_date = st.date_input("Data wyceny")
+        note = st.text_input("Źródło / notatka (np. nazwa dealera)")
+        if st.form_submit_button("Zapisz wycenę"):
+            if price <= 0 or not currency.strip():
+                st.error("Podaj cenę i walutę.")
+            else:
+                insert_manual_valuation(
+                    portfolio_conn, position_id=position["position_id"], kind=kind, price_per_unit=price,
+                    currency=currency.strip().upper(), valuation_date=str(valuation_date), note=note.strip() or None,
+                )
+                portfolio_conn.commit()
+                st.rerun()
 
 
 def _render_dividend_register(portfolio_conn, position: dict) -> None:
@@ -1476,6 +1568,7 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
     confirmed_result = choice.confirmed_result
     _render_quote_currency_hint(choice)
     asset_class = _render_asset_class_picker("new_pos_asset_class", _default_asset_class(choice.result))
+    fund_fields = _render_fund_fields("new_pos") if asset_class in (ETF, ETC, ETN) else {}
     acquisition_type = _render_acquisition_type_picker("new_pos_acq_type")
 
     with st.form("new_position_form", clear_on_submit=True):
@@ -1487,7 +1580,7 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
         )
         broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key="new_pos_broker")
         purchase_date = st.date_input("Data transakcji", key="new_pos_date")
-        shares = st.number_input("Liczba akcji", min_value=0.0, step=0.00000001, format="%.8f", key="new_pos_shares")
+        shares = st.number_input("Liczba (akcji / sztuk / jednostek)", min_value=0.0, step=0.00000001, format="%.8f", key="new_pos_shares")
         currency = st.text_input("Waluta transakcji (np. PLN, USD, EUR)", key="new_pos_currency")
         total_invested = st.number_input(
             "Zainwestowany kapitał (cała kwota, która zeszła z konta)" if acquisition_type == "BUY"
@@ -1533,6 +1626,7 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
                 )
                 update_position_fields(
                     portfolio_conn, position_id, **_instrument_identity_fields(confirmed_result, asset_class),
+                    **fund_fields,
                 )
                 transaction_id = insert_purchase_transaction(
                     portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
@@ -1564,7 +1658,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key=f"ep_broker_{position_id}")
             purchase_date = st.date_input("Data transakcji", key=f"ep_date_{position_id}")
             shares = st.number_input(
-                "Liczba akcji", min_value=0.0, step=0.00000001, format="%.8f", key=f"ep_shares_{position_id}",
+                "Liczba (akcji / sztuk / jednostek)", min_value=0.0, step=0.00000001, format="%.8f", key=f"ep_shares_{position_id}",
             )
             currency = st.text_input(
                 "Waluta transakcji", value=position["instrument_currency"] or "", key=f"ep_currency_{position_id}",
@@ -1687,6 +1781,174 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                     st.rerun()
 
 
+_NEW_ASSET_KINDS = ("Instrument giełdowy (akcja/ETF/ETC/ETN)", "Złoto fizyczne", "Srebro fizyczne", "Kryptowaluta")
+
+
+def _render_fund_fields(key_prefix: str) -> dict:
+    """ETF/ETC/ETN (P4): ekspozycja na metal, sposób zabezpieczenia,
+    opłata roczna -- dane opisowe, nie zmieniają wyceny rynkowej."""
+    cols = st.columns(3)
+    metal = cols[0].selectbox(
+        "Metal bazowy", ("", "GOLD", "SILVER"), format_func=lambda m: METAL_LABELS.get(m, "— brak —"),
+        key=f"{key_prefix}_metal",
+    )
+    exposure = cols[1].selectbox(
+        "Sposób ekspozycji", ("", *EXPOSURE_LABELS), format_func=lambda e: EXPOSURE_LABELS.get(e, "— nieznany —"),
+        key=f"{key_prefix}_exposure",
+    )
+    fee = cols[2].number_input("Opłata roczna % (opcjonalnie)", min_value=0.0, step=0.01, format="%.2f",
+                               key=f"{key_prefix}_fee")
+    return {"metal": metal or None, "exposure_type": exposure or None, "annual_fee_pct": fee or None}
+
+
+def _render_purchase_fields(key_prefix: str, *, default_broker_index: int = 0, quantity_label: str = "Liczba sztuk"):
+    """Wspólne pola zakupu dla metali i kryptowalut (wewnątrz st.form)."""
+    broker = st.selectbox(
+        "Platforma / miejsce zakupu", _BROKER_OPTIONS, index=default_broker_index, format_func=broker_label,
+        key=f"{key_prefix}_broker",
+    )
+    purchase_date = st.date_input("Data zakupu", key=f"{key_prefix}_date")
+    quantity = st.number_input(quantity_label, min_value=0.0, step=0.00000001, format="%.8f", key=f"{key_prefix}_qty")
+    currency = st.text_input("Waluta zakupu (np. PLN, USD, EUR)", key=f"{key_prefix}_ccy")
+    total = st.number_input(
+        "Łączny koszt (cała kwota, z prowizją/premią)", min_value=0.0, step=0.01, format="%.2f", key=f"{key_prefix}_total",
+    )
+    fees = st.number_input(
+        "W tym opłaty/prowizje (informacyjnie)", min_value=0.0, step=0.01, format="%.2f", key=f"{key_prefix}_fees",
+    )
+    fx_rate = st.number_input(
+        "Kurs (opcjonalnie, waluta inna niż PLN): ile PLN za 1 jednostkę waluty", min_value=0.0, step=0.0001,
+        format="%.4f", key=f"{key_prefix}_fx",
+    )
+    note = st.text_input("Notatka (opcjonalnie)", key=f"{key_prefix}_note")
+    return broker, purchase_date, quantity, currency, total, fees, fx_rate, note
+
+
+def _save_new_asset_position(
+    portfolio_conn, user: dict, *, ticker: str, name: str, fields: dict, broker: str, purchase_date, quantity: float,
+    currency: str, total: float, fees: float, fx_rate: float, note: str,
+) -> None:
+    position_id = insert_position(
+        portfolio_conn, user_id=user["user_id"], ticker=ticker, company_name=name,
+        instrument_currency=currency.strip(), instrument_confirmed=True,
+    )
+    update_position_fields(portfolio_conn, position_id, **fields)
+    transaction_id = insert_purchase_transaction(
+        portfolio_conn, position_id=position_id, broker=broker, acquisition_type="BUY",
+        purchase_date=str(purchase_date), shares=quantity, total_invested=total, currency=currency.strip(),
+        price_per_share=total / quantity, fees=(fees or None), note=(note.strip() or None),
+    )
+    if fx_rate and currency.strip().upper() != "PLN":
+        set_transaction_fx_rate(portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate)
+    portfolio_conn.commit()
+
+
+def _purchase_errors(quantity: float, currency: str, total: float) -> list[str]:
+    errors = []
+    if quantity <= 0:
+        errors.append("Ilość musi być większa od zera.")
+    if not currency.strip():
+        errors.append("Waluta jest wymagana.")
+    if total <= 0:
+        errors.append("Łączny koszt musi być większy od zera.")
+    return errors
+
+
+def _render_new_physical_metal_form(portfolio_conn, user: dict, asset_class: str) -> None:
+    """Faza 11 (P4): moneta/sztabka. Wycena: czysty metal x cena spot
+    (złoto NBP, srebro FMP -- kontrakt jako przybliżenie spot); moneta
+    kolekcjonerska tylko wyceną ręczną. Cenę odkupu wpisuje się w karcie."""
+    metal = "GOLD" if asset_class == PHYSICAL_GOLD else "SILVER"
+    st.markdown(f"##### Nowa pozycja: {ASSET_CLASS_LABELS[asset_class].lower()}")
+    with st.form(f"new_{asset_class}_form", clear_on_submit=True):
+        name = st.text_input("Nazwa produktu (np. Krugerrand 1 oz, sztabka 10 g)", key=f"{asset_class}_name")
+        form = st.selectbox("Rodzaj", list(PRODUCT_FORM_LABELS), format_func=PRODUCT_FORM_LABELS.get,
+                            key=f"{asset_class}_form")
+        cols = st.columns(2)
+        unit_weight = cols[0].number_input("Masa jednej sztuki", min_value=0.0, step=0.01, format="%.4f",
+                                           key=f"{asset_class}_w")
+        weight_unit = cols[1].selectbox(
+            "Jednostka", ("OZT", "G"), format_func=lambda u: "uncja trojańska" if u == "OZT" else "gram",
+            key=f"{asset_class}_wu",
+        )
+        fineness = st.number_input(
+            "Próba (np. 0.9999 albo 999.9)", min_value=0.0, value=0.9999 if metal == "GOLD" else 0.999,
+            step=0.0001, format="%.4f", key=f"{asset_class}_fine",
+        )
+        collectible = st.checkbox(
+            "Moneta kolekcjonerska (wycena tylko ręczna, nie po cenie metalu)", key=f"{asset_class}_coll",
+        )
+        storage = st.text_input("Miejsce przechowywania (opcjonalnie)", key=f"{asset_class}_storage")
+        broker, purchase_date, quantity, currency, total, fees, fx_rate, note = _render_purchase_fields(
+            asset_class, default_broker_index=_BROKER_OPTIONS.index("OTHER"),
+        )
+        if st.form_submit_button("Zapisz"):
+            errors = _purchase_errors(quantity, currency, total)
+            if not name.strip():
+                errors.append("Nazwa produktu jest wymagana.")
+            if pure_grams_per_piece(unit_weight, weight_unit, fineness) is None:
+                errors.append("Podaj masę sztuki i próbę (ułamek 0–1 albo promile 100–1000).")
+            for error in errors:
+                st.error(error)
+            if not errors:
+                _save_new_asset_position(
+                    portfolio_conn, user, ticker=f"{'Złoto' if metal == 'GOLD' else 'Srebro'}: {name.strip()}"[:40],
+                    name=name.strip(),
+                    fields={"asset_class": asset_class, "metal": metal, "product_form": form,
+                            "unit_weight": unit_weight, "weight_unit": weight_unit, "fineness": fineness,
+                            "is_collectible": 1 if collectible else 0, "storage_location": storage.strip() or None,
+                            "price_provider": "NBP" if metal == "GOLD" else "FMP"},
+                    broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
+                    total=total, fees=fees, fx_rate=fx_rate, note=note,
+                )
+                st.toast("Zapisano pozycję.")
+                st.rerun()
+
+
+def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
+    """Faza 11 (P4): kryptowaluta identyfikowana parą notowania FMP (np.
+    BTCUSD), nie samym symbolem -- wynik trzeba potwierdzić."""
+    st.markdown("##### Nowa pozycja: kryptowaluta")
+    market = _market(portfolio_conn)
+    symbol = st.text_input("Para notowania (np. BTCUSD, ETHUSD)", key="crypto_symbol").strip().upper()
+    if st.button("Sprawdź", key="crypto_lookup_btn") and symbol:
+        cached = market.fmp_quote(symbol)
+        st.session_state["crypto_lookup"] = (symbol, cached.value if cached is not None else None)
+    looked_up = st.session_state.get("crypto_lookup")
+    confirmed = False
+    name = None
+    if looked_up and looked_up[0] == symbol:
+        quote = looked_up[1]
+        if not quote or not quote.get("price"):
+            st.warning("FMP nie zna tej pary — sprawdź zapis (np. BTCUSD).")
+        else:
+            name = quote.get("name") or symbol
+            st.success(f"FMP: **{name}** — cena {quote['price']:,.2f} {symbol[-3:]}.")
+            confirmed = st.checkbox("Tak, to właściwe aktywo", key="crypto_confirm")
+    with st.form("new_crypto_form", clear_on_submit=True):
+        storage = st.text_input("Gdzie przechowywane (giełda/portfel, opcjonalnie)", key="crypto_storage")
+        broker, purchase_date, quantity, currency, total, fees, fx_rate, note = _render_purchase_fields(
+            "crypto", quantity_label="Ilość (do 8 miejsc po przecinku)",
+        )
+        if st.form_submit_button("Zapisz"):
+            errors = _purchase_errors(quantity, currency, total)
+            if not confirmed:
+                errors.append("Najpierw sprawdź parę notowania i potwierdź aktywo.")
+            for error in errors:
+                st.error(error)
+            if not errors:
+                _save_new_asset_position(
+                    portfolio_conn, user, ticker=symbol, name=name,
+                    fields={"asset_class": CRYPTO, "price_provider": "FMP", "price_symbol": symbol,
+                            "quote_currency": symbol[-3:], "storage_location": storage.strip() or None},
+                    broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
+                    total=total, fees=fees, fx_rate=fx_rate, note=note,
+                )
+                st.session_state.pop("crypto_lookup", None)
+                st.toast("Zapisano pozycję.")
+                st.rerun()
+
+
 def _render_add_transaction_tab(portfolio_conn, scanner_conn, user: dict) -> None:
     """Sekcja 11 specyfikacji -- formularz "Dodaj transakcję". Jedna
     `position_id` może mieć transakcje na wielu brokerach (sekcja 7) --
@@ -1699,7 +1961,15 @@ def _render_add_transaction_tab(portfolio_conn, scanner_conn, user: dict) -> Non
     choice = st.selectbox("Pozycja", options, key="add_tx_position_choice")
 
     if choice == "+ Nowa pozycja":
-        _render_new_position_form(portfolio_conn, user)
+        kind = st.radio("Rodzaj aktywa", _NEW_ASSET_KINDS, horizontal=True, key="new_asset_kind")
+        if kind == _NEW_ASSET_KINDS[0]:
+            _render_new_position_form(portfolio_conn, user)
+        elif kind == _NEW_ASSET_KINDS[3]:
+            _render_new_crypto_form(portfolio_conn, user)
+        else:
+            _render_new_physical_metal_form(
+                portfolio_conn, user, PHYSICAL_GOLD if kind == _NEW_ASSET_KINDS[1] else PHYSICAL_SILVER,
+            )
     else:
         _render_existing_position_transaction_form(portfolio_conn, positions[options.index(choice) - 1])
 

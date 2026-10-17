@@ -138,3 +138,69 @@ def test_nbp_gold_price(conn):
 ])
 def test_to_eodhd_symbol(symbol, expected):
     assert to_eodhd_symbol(symbol) == expected
+
+
+# --- Faza 11 (P4): metale fizyczne, kryptowaluty ---
+
+from buffett_scanner.db import create_user, insert_manual_valuation, insert_position, update_position_fields  # noqa: E402
+
+
+class FakeFMP:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return None
+
+    def get_quote(self, symbol):
+        return {"SIUSD": {"symbol": "SIUSD", "price": 57.305, "timestamp": 1792184402},
+                "BTCUSD": {"symbol": "BTCUSD", "price": 81543.5, "timestamp": 1792268808}}.get(symbol)
+
+
+def _metal_position(conn, asset_class, **fields):
+    uid = create_user(conn, "A")
+    pid = insert_position(conn, user_id=uid, ticker="METAL", company_name="Moneta", instrument_confirmed=True)
+    update_position_fields(conn, pid, asset_class=asset_class, **fields)
+    conn.commit()
+    return conn.execute("SELECT * FROM positions WHERE position_id = ?", (pid,)).fetchone()
+
+
+def test_physical_gold_valued_from_nbp_gold_price(conn):
+    position = _metal_position(conn, "PHYSICAL_GOLD", unit_weight=1.0, weight_unit="OZT", fineness=0.9999)
+    market = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=lambda: None, now_fn=Clock(),
+                        http_get=lambda url, **kw: FakeResp([{"data": "2026-10-16", "cena": 519.85}]))
+    quote = market.quote_for_position(position)
+    assert quote.currency == "PLN"
+    assert quote.price == pytest.approx(31.1034768 * 0.9999 * 519.85)
+    assert quote.as_of == "2026-10-16"
+
+
+def test_physical_silver_uses_fmp_futures_per_gram(conn):
+    position = _metal_position(conn, "PHYSICAL_SILVER", unit_weight=100.0, weight_unit="G", fineness=999.0)
+    market = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=FakeFMP, now_fn=Clock())
+    quote = market.quote_for_position(position)
+    assert (quote.currency, quote.source) == ("USD", "FMP (kontrakt na srebro)")
+    assert quote.price == pytest.approx(99.9 * 57.305 / 31.1034768)
+
+
+def test_collectible_coin_uses_manual_valuation_only(conn):
+    position = _metal_position(conn, "PHYSICAL_GOLD", unit_weight=1.0, weight_unit="OZT", fineness=0.9999,
+                               is_collectible=1)
+    market = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=lambda: None, now_fn=Clock(),
+                        http_get=lambda url, **kw: FakeResp([{"data": "2026-10-16", "cena": 519.85}]))
+    assert market.quote_for_position(position) is None
+    insert_manual_valuation(conn, position_id=position["position_id"], kind="MARKET", price_per_unit=25000.0,
+                            currency="pln", valuation_date="2026-10-10")
+    conn.commit()
+    quote = market.quote_for_position(position)
+    assert (quote.price, quote.currency, quote.source) == (25000.0, "PLN", "wycena ręczna")
+
+
+def test_crypto_quote(conn):
+    uid = create_user(conn, "A")
+    pid = insert_position(conn, user_id=uid, ticker="BTCUSD", company_name="Bitcoin", instrument_confirmed=True)
+    update_position_fields(conn, pid, asset_class="CRYPTO", price_symbol="BTCUSD")
+    conn.commit()
+    position = conn.execute("SELECT * FROM positions WHERE position_id = ?", (pid,)).fetchone()
+    quote = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=FakeFMP, now_fn=Clock()).quote_for_position(position)
+    assert (quote.price, quote.currency) == (81543.5, "USD")
