@@ -49,7 +49,16 @@ import pandas as pd
 import streamlit as st
 
 from buffett_scanner import portfolio_backend
-from buffett_scanner.db import init_db
+from buffett_scanner.db import get_fundamentals_periods, init_db
+from buffett_scanner.shareholder_returns import payout_ratio
+from buffett_scanner.ui.dividends import (
+    FREQUENCY_LABELS,
+    TREND_LABELS,
+    compute_dividend_metrics,
+    cut_risk_note,
+    receipt_net,
+    summarize_receipts,
+)
 from buffett_scanner.pg_store import BackupVerificationError, PgStoreUnavailableError
 from buffett_scanner.portfolio_backend import (
     create_user,
@@ -66,8 +75,11 @@ from buffett_scanner.portfolio_backend import (
     insert_user_decision,
     backup_payload,
     get_latest_backup_info,
+    get_dividend_receipts,
+    insert_dividend_receipt,
     set_transaction_fx_rate,
     update_position_fields,
+    void_dividend_receipt,
     update_position_instrument,
     void_position,
     void_purchase_transaction,
@@ -101,7 +113,7 @@ from buffett_scanner.ui.portfolio import (
     compute_portfolio_pln_summary,
 )
 from buffett_scanner.ui.market_data import EODHD_DAILY_BUDGET, MarketData
-from buffett_scanner.ui.pricing import FxRates
+from buffett_scanner.ui.pricing import FxRates, convert
 from buffett_scanner.ui.queries import (
     get_brokers_in_use_for_user,
     get_candidate_detail,
@@ -230,7 +242,10 @@ def _format_shares(value: float) -> str:
     return text if text not in ("", "-0") else "0"
 
 
-def _render_pln_summary(container, positions_with_summaries: list, fx: FxRates | None, *, compact: bool) -> None:
+def _render_pln_summary(
+    container, positions_with_summaries: list, fx: FxRates | None, *, compact: bool,
+    dividends_net_pln: float | None = 0.0,
+) -> None:
     """Faza 11 (P1): portfel w PLN. Koszt = kursy z dni transakcji (kurs
     brokera, jeśli zapisany, inaczej NBP sprzed transakcji), wartość =
     dzisiejszy kurs NBP. Suma bez ceny/kursu którejś pozycji jest jawnie
@@ -246,8 +261,16 @@ def _render_pln_summary(container, positions_with_summaries: list, fx: FxRates |
     if pct:
         cols[2].caption(pct.strip())
     _render_pl_metric(cols[3], "Zrealizowany (sprzedaże)", {"PLN": pln["realized_pl_pln"]})
-    total = pln["total_result_pln"]
-    container.markdown(f"Łączny wynik: {_color_pl_text(total, _format_pln(total, signed=True))}")
+    total = pln["total_result_pln"] + (dividends_net_pln or 0.0)
+    dividends_text = (
+        f" (w tym otrzymane dywidendy netto {_format_pln(dividends_net_pln)})" if dividends_net_pln else ""
+    )
+    if dividends_net_pln is None:
+        dividends_text = " (bez dywidend — brak kursu dla części wypłat)"
+    container.markdown(
+        f"Łączny wynik: {_color_pl_text(total, _format_pln(total, signed=True))}{dividends_text} — "
+        "zmiana wartości + sprzedaże + dywidendy, po opłatach."
+    )
     if partial:
         container.warning(
             "* Suma częściowa — brak ceny bieżącej lub kursu dla: " + ", ".join(pln["missing"])
@@ -276,6 +299,18 @@ def _render_pln_summary(container, positions_with_summaries: list, fx: FxRates |
     )
 
 
+def _dividends_received_pln(portfolio_conn, market: MarketData, positions_with_summaries: list, broker: str | None):
+    receipts = []
+    for position, _summary in positions_with_summaries:
+        receipts += [
+            r for r in get_dividend_receipts(portfolio_conn, position["position_id"])
+            if broker is None or r["broker"] == broker
+        ]
+    if not receipts:
+        return 0.0
+    return summarize_receipts(receipts, pln_rate_fn=market.pln_rate, year=dt.date.today().year).net_pln
+
+
 def _format_quote_source(summary) -> str:
     if summary.quote_source is None:
         return "—"
@@ -294,7 +329,7 @@ def _render_pricing_caption(container, summaries: list, fx: FxRates | None, eodh
     eodhd_text = f" (dziś {eodhd_calls}/{EODHD_DAILY_BUDGET} zapytań darmowego planu)" if eodhd_calls is not None else ""
     container.caption(
         f"Cena bieżąca dostępna dla {priced} z {len(summaries)} pozycji.{partial} Ceny odświeżane automatycznie: "
-        f"FMP (USA, co godzinę), EODHD (Europa, ceny zamknięcia, co 6 h{eodhd_text}); {fx_text}."
+        f"FMP (USA, co godzinę), EODHD (Europa, ceny zamknięcia, co 12 h{eodhd_text}); {fx_text}."
     )
 
 
@@ -366,6 +401,10 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
         _render_top20_price_changes(scanner_conn, portfolio_conn, run, rows)
         st.caption(METHODOLOGY_DISCLAIMER)
         return run["run_id"], rows
+    if view == "Dywidendy":
+        _render_top20_dividends(portfolio_conn, run, rows)
+        st.caption(METHODOLOGY_DISCLAIMER)
+        return run["run_id"], rows
 
     table_data = [
         {
@@ -391,7 +430,201 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
     return run["run_id"], rows
 
 
-_TOP20_VIEWS = ("Scoring", "Zmiany cen")
+_TOP20_VIEWS = ("Scoring", "Zmiany cen", "Dywidendy")
+
+
+def _dividend_cells(metrics) -> dict:
+    yield_text = f"{metrics.yield_ttm_pct:.2f}%" if metrics.yield_ttm_pct is not None else "N/A"
+    per_100 = f"{metrics.gross_per_100_pln:.2f} PLN" if metrics.gross_per_100_pln is not None else "N/A"
+    last = metrics.last_event
+    return {
+        "Yield TTM": yield_text,
+        "Częstotliwość": FREQUENCY_LABELS[metrics.frequency],
+        "Brutto/100 PLN rocznie": per_100,
+        "Trend": TREND_LABELS[metrics.trend],
+        "Ostatnia ex-date": last.ex_date if last else "—",
+    }
+
+
+def _render_top20_dividends(portfolio_conn, run, rows: list[dict]) -> None:
+    """Faza 11 (P3): dywidendy TOP20 -- wypłaty na akcję z FMP. Widok "na
+    dzień skanu" liczy yield z ceny skanu i wypłat z ex-date <= data skanu
+    (bez look-ahead), "bieżący" -- z ceny i wypłat na dziś. Scoring
+    dywidendowy scannera bez zmian."""
+    source = st.radio("Dane", _CHANGE_SOURCES, horizontal=True, key="top20_dividend_source")
+    market = _market(portfolio_conn)
+    table_rows = []
+    for r in rows:
+        with st.spinner(f"Pobieram dywidendy {r['ticker']}…"):
+            events = market.dividend_events_for_symbol("FMP", r["ticker"], "USD")
+        if source == _CHANGE_SOURCES[0]:
+            price, as_of = r["current_price"], run["run_date"]
+        else:
+            quote = market.quote_for_symbol("FMP", r["ticker"])
+            price, as_of = (quote.price if quote else None), dt.date.today().isoformat()
+        notes = []
+        warning = data_quality_warning(run["run_id"], r["cik"])
+        if warning:
+            notes.append(warning)
+        if events is None:
+            cells = {k: "N/A" for k in ("Yield TTM", "Częstotliwość", "Brutto/100 PLN rocznie", "Trend")}
+            cells["Ostatnia ex-date"] = "—"
+            notes.append("brak danych o dywidendach")
+        else:
+            metrics = compute_dividend_metrics(events, price=price, price_currency="USD", as_of=as_of)
+            cells = _dividend_cells(metrics)
+            if metrics.ttm_special:
+                notes.append(f"wypłaty specjalne w 12 mies.: {metrics.ttm_special:.2f} USD (poza yieldem)")
+        table_rows.append({
+            "Ticker": r["ticker"],
+            "Finalista": f"★ {r['finalist_position']}" if r["finalist_position"] else "",
+            "Spółka": r["company_name"], **cells, "Uwagi": "; ".join(notes),
+        })
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+    st.caption(
+        "Yield TTM = regularne wypłaty na akcję z ostatnich 12 miesięcy / cena (bez wypłat specjalnych). "
+        "„Brutto/100 PLN” = orientacyjna roczna dywidenda brutto na każde 100 PLN zainwestowane po tej cenie "
+        "(przed podatkiem, bez zmian kursu). Wysoki yield nie oznacza bezpiecznej dywidendy. Źródło: FMP."
+    )
+
+
+def _render_company_dividends(scanner_conn, portfolio_conn, *, cik: str, ticker: str) -> None:
+    """Faza 11 (P3): szczegóły dywidend na karcie spółki (dane bieżące)."""
+    st.markdown("#### Dywidendy")
+    market = _market(portfolio_conn)
+    events = market.dividend_events_for_symbol("FMP", ticker, "USD")
+    if events is None:
+        st.info("Dane o dywidendach chwilowo niedostępne.")
+        return
+    if not events:
+        st.write("Spółka nie wypłaca dywidend (brak wypłat w danych FMP).")
+        return
+    quote = market.quote_for_symbol("FMP", ticker)
+    today = dt.date.today().isoformat()
+    m = compute_dividend_metrics(events, price=quote.price if quote else None, price_currency="USD", as_of=today)
+    last = m.last_event
+    cols = st.columns(3)
+    cols[0].metric("Ostatnia dywidenda/akcję", f"{last.amount:.4f} {last.currency or ''}" if last else "—")
+    cols[1].metric("DPS TTM (regularne)", f"{m.ttm_dps:.4f}")
+    cols[2].metric("DPS od początku roku", f"{m.ytd_dps:.4f}")
+    st.write(
+        f"Yield TTM: **{f'{m.yield_ttm_pct:.2f}%' if m.yield_ttm_pct is not None else 'N/A'}** · "
+        f"częstotliwość: **{FREQUENCY_LABELS[m.frequency]}** · trend: **{TREND_LABELS[m.trend]}**"
+    )
+    if last:
+        st.write(f"Ostatnia ex-date: {last.ex_date} · data wypłaty: {last.pay_date or 'brak danych'}")
+    if m.next_confirmed:
+        n = m.next_confirmed
+        st.write(
+            f"Najbliższa potwierdzona ex-date: **{n.ex_date}** (ogłoszona {n.declaration_date}), "
+            f"wypłata: {n.pay_date or 'brak danych'}, kwota {n.amount:.4f}"
+        )
+    else:
+        st.caption("Brak ogłoszonej przyszłej wypłaty — kolejne daty nie są prognozowane.")
+    if m.ttm_special:
+        st.write(f"Wypłaty specjalne w ostatnich 12 mies.: {m.ttm_special:.4f} (nie wliczane do yieldu).")
+    if m.by_year:
+        st.dataframe(
+            [{"Rok": y, "Suma wypłat/akcję": round(v, 4)} for y, v in m.by_year.items()],
+            hide_index=True,
+        )
+    periods = get_fundamentals_periods(scanner_conn, cik)
+    payout = payout_ratio(periods[-1]).value_pct if periods else None
+    risk = cut_risk_note(m, payout)
+    if payout is not None:
+        st.caption(f"Wypłata dywidend / wolne przepływy pieniężne (ostatni rok obrotowy): {payout:.0f}%.")
+    if risk:
+        st.warning(f"Ryzyko obniżki: {risk}.")
+
+
+def _render_portfolio_dividends(portfolio_conn, positions_with_summaries: list, fx, broker: str | None) -> None:
+    """Faza 11 (P3): dywidendy posiadanych pozycji -- prognoza (z
+    regularnych wypłat TTM) oddzielona od faktycznie otrzymanych (rejestr)."""
+    market = _market(portfolio_conn)
+    today = dt.date.today()
+    table_rows = []
+    forecast_total_pln = 0.0
+    forecast_missing = []
+    all_receipts = []
+    for position, summary in positions_with_summaries:
+        position = dict(position)
+        receipts = [
+            r for r in get_dividend_receipts(portfolio_conn, position["position_id"])
+            if broker is None or r["broker"] == broker
+        ]
+        all_receipts += receipts
+        received = summarize_receipts(receipts, pln_rate_fn=market.pln_rate, year=today.year)
+        metrics = None
+        if is_instrument_confirmed(position):
+            provider = position.get("price_provider")
+            symbol = position.get("price_symbol") or position["ticker"]
+            events = market.dividend_events_for_symbol(provider, symbol, position.get("quote_currency"))
+            quote = market.quote_for_position(position)
+            if events is not None:
+                metrics = compute_dividend_metrics(
+                    events, price=quote.price if quote else None,
+                    price_currency=quote.currency if quote else None, as_of=today.isoformat(),
+                )
+        forecast_pln = None
+        if metrics is not None and metrics.currency:
+            forecast = metrics.ttm_dps * summary.shares_held
+            forecast_pln = convert(forecast, metrics.currency, "PLN", fx)
+        if forecast_pln is None:
+            forecast_missing.append(position["ticker"])
+        else:
+            forecast_total_pln += forecast_pln
+        # Yield on Cost tylko dla akcji z kosztem > 0: akcje z bonusu (koszt 0)
+        # nie mogą zawyżać wskaźnika; same bonusy -> N/A.
+        paid = [s for s in summary.by_broker_currency if s.invested_pln and s.invested_pln > 0 and s.shares_held > 0]
+        cost_pln = sum(s.invested_pln for s in paid)
+        paid_shares = sum(s.shares_held for s in paid)
+        yoc = None
+        if metrics is not None and metrics.currency and cost_pln > 0:
+            paid_forecast_pln = convert(metrics.ttm_dps * paid_shares, metrics.currency, "PLN", fx)
+            yoc = paid_forecast_pln / cost_pln * 100.0 if paid_forecast_pln is not None else None
+        table_rows.append({
+            "Ticker": position["ticker"],
+            "Yield (bieżąca cena)": (
+                f"{metrics.yield_ttm_pct:.2f}%" if metrics and metrics.yield_ttm_pct is not None else "N/A"
+            ),
+            "Yield on Cost": f"{yoc:.2f}%" if yoc is not None else "N/A",
+            "Prognoza roczna brutto": f"{forecast_pln:,.2f} PLN" if forecast_pln is not None else "N/A",
+            "Otrzymane netto (łącznie)": f"{received.net_pln:,.2f} PLN" if receipts and received.net_pln is not None else "—",
+            "Otrzymane netto (od 1.01)": f"{received.ytd_net_pln:,.2f} PLN" if receipts and received.ytd_net_pln is not None else "—",
+            "Częstotliwość": FREQUENCY_LABELS[metrics.frequency] if metrics else "N/A",
+            "Trend": TREND_LABELS[metrics.trend] if metrics else "N/A",
+            "Najbliższa potwierdzona ex-date": (
+                metrics.next_confirmed.ex_date if metrics and metrics.next_confirmed else "—"
+            ),
+        })
+    totals = summarize_receipts(all_receipts, pln_rate_fn=market.pln_rate, year=today.year)
+    cols = st.columns(3)
+    cols[0].metric("Prognoza roczna brutto" + (" *" if forecast_missing else ""), _format_pln(forecast_total_pln))
+    cols[1].metric(
+        "Otrzymane netto (łącznie)",
+        f"{totals.net_pln:,.2f} PLN" if all_receipts and totals.net_pln is not None else "—",
+    )
+    cols[2].metric(
+        "Otrzymane netto (od 1 stycznia)",
+        f"{totals.ytd_net_pln:,.2f} PLN" if all_receipts and totals.ytd_net_pln is not None else "—",
+    )
+    if forecast_missing:
+        st.caption("* Bez prognozy (brak danych o dywidendach lub kursie): " + ", ".join(forecast_missing) + ".")
+    if all_receipts:
+        def money(values):
+            return " | ".join(f"{v:,.2f} {c}" for c, v in sorted(values.items())) or "—"
+
+        st.caption(
+            f"Otrzymane brutto: {money(totals.gross_by_currency)} · podatek u źródła: "
+            f"{money(totals.tax_by_currency)} · netto: {money(totals.net_by_currency)}"
+            + (" · część kwot PLN po kursie NBP (orientacyjnie)" if totals.estimated else "")
+        )
+    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+    st.caption(
+        "Prognoza = regularne wypłaty na akcję z ostatnich 12 mies. × posiadane akcje (brutto, dzisiejszy kurs NBP) — "
+        "to NIE są otrzymane pieniądze. Yield on Cost = prognoza / koszt posiadanych akcji w PLN (przy koszcie 0, "
+        "np. bonus: N/A). Otrzymane = Twój rejestr wypłat (karta pozycji → „Dywidendy otrzymane”)."
+    )
 _CHANGE_SOURCES = ("Na dzień skanu", "Bieżące")
 
 
@@ -508,7 +741,10 @@ def _render_portfolio_bar(portfolio_conn, scanner_conn, user: dict) -> None:
     cols[0].metric("Pozycje", len(summaries))
     cols[1].metric("Do przeglądu", review_needed)
     if summaries:
-        _render_pln_summary(st, positions_with_summaries, fx, compact=True)
+        _render_pln_summary(
+            st, positions_with_summaries, fx, compact=True,
+            dividends_net_pln=_dividends_received_pln(portfolio_conn, market, positions_with_summaries, broker),
+        )
         _render_pricing_caption(st, summaries, fx, market.eodhd_calls_today())
 
 
@@ -615,6 +851,7 @@ def _render_candidate_card(scanner_conn, portfolio_conn, run_id: str, cik: str, 
             st.write(f"- {item}")
 
     _render_valuation_section(detail["valuation_result"], detail["current_price"])
+    _render_company_dividends(scanner_conn, portfolio_conn, cik=cik, ticker=detail["ticker"])
 
     st.markdown("#### Co muszę sprawdzić przed zakupem?")
     if analysis is None:
@@ -674,7 +911,12 @@ def _render_portfolio_summary_tab(
         return
 
     st.markdown("##### Łączne wartości (PLN)")
-    _render_pln_summary(st, positions_with_summaries, fx, compact=False)
+    market = _market(portfolio_conn)
+    broker = None if platform_filter == "ALL" else platform_filter
+    _render_pln_summary(
+        st, positions_with_summaries, fx, compact=False,
+        dividends_net_pln=_dividends_received_pln(portfolio_conn, market, positions_with_summaries, broker),
+    )
     with st.expander("Kwoty w oryginalnych walutach"):
         bar = compute_portfolio_bar_summary(summaries, review_needed_count=0)
         cols = st.columns(3)
@@ -686,6 +928,9 @@ def _render_portfolio_summary_tab(
     portfolio_view = st.radio("Widok pozycji", _PORTFOLIO_VIEWS, horizontal=True, key="portfolio_view")
     if portfolio_view == "Zmiany cen":
         _render_portfolio_price_changes(portfolio_conn, positions_with_summaries)
+        return
+    if portfolio_view == "Dywidendy":
+        _render_portfolio_dividends(portfolio_conn, positions_with_summaries, fx, broker)
         return
 
     st.markdown("##### Pozycje (rozbicie per broker)")
@@ -762,7 +1007,7 @@ def _render_portfolio_summary_tab(
     )
 
 
-_PORTFOLIO_VIEWS = ("Wycena", "Zmiany cen")
+_PORTFOLIO_VIEWS = ("Wycena", "Zmiany cen", "Dywidendy")
 
 
 def _position_history(market: MarketData, position) -> tuple[list[dict], bool, str] | None:
@@ -880,10 +1125,82 @@ def _render_position_card(portfolio_conn, position: dict, summary) -> None:
             st.rerun()
 
     st.markdown("---")
+    with st.expander("Dywidendy otrzymane"):
+        _render_dividend_register(portfolio_conn, position)
     with st.expander("Popraw dane / anuluj błędny wpis"):
         _render_instrument_correction(portfolio_conn, position)
         st.markdown("---")
         _render_transaction_voiding(portfolio_conn, position)
+
+
+def _render_dividend_register(portfolio_conn, position: dict) -> None:
+    """Faza 11 (P3): rejestr FAKTYCZNIE otrzymanych dywidend (z wyciągu
+    brokera) -- brutto, podatek u źródła, netto, waluta, kurs brokera.
+    Reinwestycję wpisuje się osobno jako zakup."""
+    position_id = position["position_id"]
+    receipts = get_dividend_receipts(portfolio_conn, position_id)
+    if receipts:
+        st.dataframe(
+            [
+                {"Wypłata": r["pay_date"], "Ex-date": r["ex_date"] or "—", "Platforma": broker_label(r["broker"]),
+                 "Brutto": r["gross_amount"], "Podatek u źródła": r["withholding_tax"] or 0.0,
+                 "Netto": round(receipt_net(r), 4), "Waluta": r["currency"],
+                 "Kurs brokera": r["fx_rate_actual"] or "—"}
+                for r in receipts
+            ],
+            hide_index=True, use_container_width=True,
+        )
+    else:
+        st.caption("Brak zapisanych wypłat.")
+    with st.form(f"dividend_form_{position_id}", clear_on_submit=True):
+        broker = st.selectbox("Platforma", _BROKER_OPTIONS, format_func=broker_label, key=f"div_broker_{position_id}")
+        pay_date = st.date_input("Data wypłaty", key=f"div_pay_{position_id}")
+        gross = st.number_input("Kwota brutto", min_value=0.0, step=0.01, format="%.4f", key=f"div_gross_{position_id}")
+        tax = st.number_input("Podatek u źródła", min_value=0.0, step=0.01, format="%.4f", key=f"div_tax_{position_id}")
+        net = st.number_input(
+            "Kwota netto (opcjonalnie — domyślnie brutto minus podatek)", min_value=0.0, step=0.01, format="%.4f",
+            key=f"div_net_{position_id}",
+        )
+        currency = st.text_input("Waluta wypłaty (np. USD, EUR, PLN)", key=f"div_ccy_{position_id}")
+        fx_rate = st.number_input(
+            "Kurs brokera (opcjonalnie): ile PLN za 1 jednostkę waluty", min_value=0.0, step=0.0001, format="%.4f",
+            key=f"div_fx_{position_id}",
+        )
+        note = st.text_input("Notatka (opcjonalnie)", key=f"div_note_{position_id}")
+        if st.form_submit_button("Zapisz otrzymaną dywidendę"):
+            errors = []
+            if gross <= 0:
+                errors.append("Kwota brutto musi być większa od zera.")
+            if not currency.strip():
+                errors.append("Waluta jest wymagana.")
+            if tax > gross:
+                errors.append("Podatek nie może być wyższy niż kwota brutto.")
+            for error in errors:
+                st.error(error)
+            if not errors:
+                insert_dividend_receipt(
+                    portfolio_conn, position_id=position_id, broker=broker, pay_date=str(pay_date),
+                    gross_amount=gross, currency=currency.strip().upper(), withholding_tax=tax or None,
+                    net_amount=net or None, fx_rate_actual=(fx_rate or None) if currency.strip().upper() != "PLN" else None,
+                    note=note.strip() or None,
+                )
+                portfolio_conn.commit()
+                st.toast("Zapisano dywidendę.")
+                st.rerun()
+    if receipts:
+        with st.form(f"dividend_void_form_{position_id}"):
+            index = st.selectbox(
+                "Błędny wpis do anulowania", range(len(receipts)),
+                format_func=lambda i: f"{receipts[i]['pay_date']} · {receipts[i]['gross_amount']} {receipts[i]['currency']}",
+            )
+            sure = st.checkbox("Tak, anuluj ten wpis (zostaje w historii bazy)")
+            if st.form_submit_button("Anuluj wpis dywidendy"):
+                if not sure:
+                    st.error("Zaznacz potwierdzenie.")
+                else:
+                    void_dividend_receipt(portfolio_conn, receipts[index]["receipt_id"])
+                    portfolio_conn.commit()
+                    st.rerun()
 
 
 def _render_instrument_correction(portfolio_conn, position: dict) -> None:

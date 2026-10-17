@@ -85,7 +85,7 @@ def test_cache_is_shared_second_call_hits_database_not_provider(conn):
 def test_expired_entry_with_provider_failure_returns_last_good_value_as_stale(conn):
     clock = Clock()
     _market(conn, FakeEODHD(), clock).eodhd_eod("GSK.LSE")
-    clock.now += dt.timedelta(hours=7)
+    clock.now += dt.timedelta(hours=13)  # po TTL notowań EODHD (12 h)
     failing = FakeEODHD(fail=True)
     cached = _market(conn, failing, clock).eodhd_eod("GSK.LSE")
     assert cached.stale is True

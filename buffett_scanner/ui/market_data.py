@@ -47,12 +47,13 @@ FMP_ROWS_PER_REQUEST = 5000
 FMP_HISTORY_MAX_CHUNKS = 3
 FAILURE_BACKOFF_S = 15 * 60
 
-TTL_EODHD_EOD_S = 6 * 3600
+TTL_EODHD_EOD_S = 12 * 3600  # notowania dzienne: zamknięcie zmienia się raz dziennie
 TTL_EODHD_SEARCH_S = 7 * 24 * 3600
 TTL_FMP_PROFILE_S = 3600
 TTL_FMP_QUOTE_S = 15 * 60
 TTL_HISTORY_S = 12 * 3600
 TTL_DIVIDENDS_S = 24 * 3600
+TTL_EODHD_DIVIDENDS_S = 3 * 24 * 3600  # oszczędza limit EODHD Free
 TTL_SPLITS_S = 24 * 3600
 TTL_NBP_TABLE_S = 3600
 TTL_NBP_GOLD_S = 3600
@@ -187,7 +188,7 @@ class MarketData:
     def eodhd_dividends(self, eodhd_symbol: str) -> Cached | None:
         start = (self._now().date() - dt.timedelta(days=6 * 366)).isoformat()
         return self._cached(
-            f"eodhd:div:{eodhd_symbol}", TTL_DIVIDENDS_S,
+            f"eodhd:div:{eodhd_symbol}", TTL_EODHD_DIVIDENDS_S,
             lambda: self._eodhd(lambda c: c.dividends(eodhd_symbol, from_date=start)),
         )
 
@@ -348,6 +349,21 @@ class MarketData:
         if found is None:
             return None
         return found[1] / divisor, PLN_RATE_NBP
+
+    def dividend_events_for_symbol(self, provider: str | None, symbol: str, quote_currency: str | None):
+        """Znormalizowane wypłaty (Faza 11, P3) albo None przy braku danych."""
+        from buffett_scanner.ui.dividends import events_from_eodhd, events_from_fmp
+
+        if provider == PROVIDER_EODHD:
+            cached = self.eodhd_dividends(symbol)
+            return None if cached is None else events_from_eodhd(cached.value)
+        cached = self.fmp_dividends(symbol)
+        if cached is None:
+            return None
+        if quote_currency is None:
+            profile = self.fmp_profile(symbol)
+            quote_currency = profile.value.get("currency") if profile is not None else None
+        return events_from_fmp(cached.value, quote_currency)
 
     # --- cena pozycji --------------------------------------------------
 
