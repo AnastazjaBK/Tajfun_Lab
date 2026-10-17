@@ -2658,6 +2658,8 @@ Pełne raporty: [`docs/audyt-rozszerzenia-2026-10-17.md`](audyt-rozszerzenia-202
 
 **Wdrożone (commit `1d4f1de`, za zgodą właścicielki):** wyłącznie ostrzeżenie „Wynik niewiarygodny — możliwe zniekształcenie przez zdarzenie korporacyjne” nad tabelą TOP20 i na karcie CTVA, dla jawnej pary (run_id, cik) w `buffett_scanner/ui/data_quality.py`. Zero zmian scoringu, DCF, rankingu, snapshotu i portfela. 796 testów przechodzi; smoke test na prawdziwym snapshocie: ostrzeżenie tylko dla CTVA.
 
+**Diagnostyka EODHD (darmowy klucz, 2026-10-17, run [39070026144](https://github.com/AnastazjaBK/Tajfun_Lab/actions/runs/39070026144), 14/20 zapytań):** pełne wyniki w [`docs/eodhd-wyniki-2026-10-17.md`](eodhd-wyniki-2026-10-17.md). `SU.PA`, `GSK.LSE`, `EUNL.XETRA`, `4GLD.XETRA`: ceny, waluta notowania (GSK w GBX), ISIN, notowania 1 rok (Free), dywidendy od 2020 (także ETF `VGWL.XETRA`), cena bieżąca ze znacznikiem czasu — wszystko ✅. Free ogranicza historię do 1 roku (jawne ostrzeżenie API); limit 20 zapytań/dzień. Rekomendacja P0b: FMP dla USA bez zmian + EODHD dla notowań europejskich.
+
 **Korekta wcześniejszej informacji:** test europejskich cen z Fazy 7 był na planie Premium, nie Free — poprawione w opisie Fazy 7 i Fazy 9.
 
 ## LATER — bezpieczne do odłożenia
