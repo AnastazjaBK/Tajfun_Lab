@@ -68,6 +68,7 @@ from buffett_scanner.portfolio_backend import (
     void_purchase_transaction,
     void_sale_transaction,
 )
+from buffett_scanner.ui.data_quality import data_quality_warning
 from buffett_scanner.ui.instrument_lookup import (
     InstrumentLookupResult,
     instrument_save_errors,
@@ -298,6 +299,11 @@ def _render_synthesis_table(scanner_conn) -> tuple[str | None, list[dict]]:
         st.info("Ten skan nie wytypował żadnych kandydatów (to prawidłowy wynik).")
         return run["run_id"], rows
 
+    for r in rows:
+        warning = data_quality_warning(run["run_id"], r["cik"])
+        if warning:
+            st.warning(f"⚠ {r['ticker']}: {warning}")
+
     table_data = [
         {
             "Ticker": r["ticker"],
@@ -430,6 +436,9 @@ def _render_candidate_card(scanner_conn, portfolio_conn, run_id: str, cik: str, 
     analysis = detail["analysis"]
 
     st.header(f"{detail['ticker']} — {detail['company_name']}")
+    warning = data_quality_warning(run_id, cik)
+    if warning:
+        st.warning(f"⚠ {warning}")
 
     st.markdown("#### Co to za firma?")
     reasoning = analysis.business_understandability.reasoning.strip() if analysis else ""
