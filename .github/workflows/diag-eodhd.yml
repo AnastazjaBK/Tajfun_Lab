@@ -1,4 +1,4 @@
-name: "DIAG EODHD: pokrycie darmowego klucza (jednorazowy)"
+name: "DIAG: EODHD / NBP (jednorazowy)"
 
 # Jednorazowa diagnostyka (Decyzja właścicielki 2026-10-17). Uruchamia się
 # wyłącznie przy pushu na ten osobny branch -- nie dotyka main ani brancha
@@ -16,6 +16,6 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install "httpx>=0.27"
-      - run: python -m diag.eodhd_coverage
+      - run: python -m diag.nbp_formats
         env:
           EODHD_API_KEY: ${{ secrets.EODHD_API_KEY }}
