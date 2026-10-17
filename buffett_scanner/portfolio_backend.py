@@ -46,6 +46,10 @@ if HOSTED:
         insert_purchase_transaction,
         insert_sale_transaction,
         insert_user_decision,
+        update_position_instrument,
+        void_position,
+        void_purchase_transaction,
+        void_sale_transaction,
     )
 else:
     from buffett_scanner.db import (
@@ -65,6 +69,10 @@ else:
         insert_purchase_transaction,
         insert_sale_transaction,
         insert_user_decision,
+        update_position_instrument,
+        void_position,
+        void_purchase_transaction,
+        void_sale_transaction,
     )
 
 

@@ -34,6 +34,7 @@ from buffett_scanner.portfolio_backend import (
 )
 from buffett_scanner.scanner import PriceBar, compute_price_changes
 from buffett_scanner.ui.portfolio import PositionSummary, compute_position_summary
+from buffett_scanner.ui.pricing import FxRates, Quote
 from buffett_scanner.valuation import compute_valuation
 
 
@@ -132,8 +133,36 @@ def get_current_price_for_position(scanner_conn: sqlite3.Connection, position) -
     return row["close"], "USD"
 
 
+def is_instrument_confirmed(position) -> bool:
+    """Pozycja ma potwierdzoną tożsamość instrumentu, gdy użytkownik
+    jawnie zaznaczył wynik FMP ("Tak, to właściwy instrument") --
+    `instrument_confirmed_at` (Faza 9) albo, dla pozycji sprzed Fazy 9,
+    ustawione `cik` (było ustawiane WYŁĄCZNIE po potwierdzeniu). Tylko
+    takie pozycje dostają cenę z FMP po tickerze -- niepotwierdzony
+    ticker może wskazywać inną spółkę (`SU` = Suncor, nie Schneider)."""
+    keys = position.keys()
+    if "instrument_confirmed_at" in keys and position["instrument_confirmed_at"]:
+        return True
+    return position["cik"] is not None
+
+
+def get_current_quote_for_position(scanner_conn: sqlite3.Connection, position, quote_fn=None) -> Quote | None:
+    """Faza 9: najpierw FMP po tickerze (tylko pozycja z potwierdzonym
+    instrumentem, `quote_fn` wstrzykiwane przez UI -- cache'owane tam),
+    potem dotychczasowy fallback `price_daily` po `cik` (EOD, USD)."""
+    if quote_fn is not None and is_instrument_confirmed(position):
+        quote = quote_fn(position["ticker"])
+        if quote is not None:
+            return quote
+    price, currency = get_current_price_for_position(scanner_conn, position)
+    if price is None:
+        return None
+    return Quote(price=price, currency=currency, source="scanner (EOD)")
+
+
 def get_position_summary(
     portfolio_conn, scanner_conn: sqlite3.Connection, position, *, broker: str | None = None,
+    quote_fn=None, fx: FxRates | None = None,
 ) -> PositionSummary:
     """`broker=None` (domyślnie) -- wszystkie platformy, bez zmian.
     `broker="TRADE_REPUBLIC"`/`"REVOLUT"`/`"OTHER"` -- filtr platformy
@@ -144,21 +173,26 @@ def get_position_summary(
     Model danych/logika average-cost w `ui/portfolio.py` NIE są
     zmieniane -- filtr działa wyłącznie na poziomie tego, co dostaje.
     `portfolio_conn`/`scanner_conn` -- dwa osobne silniki w trybie
-    hostowanym (Faza 8 Etap D), ten sam obiekt w trybie lokalnym."""
+    hostowanym (Faza 8 Etap D), ten sam obiekt w trybie lokalnym.
+    `quote_fn`/`fx` -- Faza 9, patrz `get_current_quote_for_position`
+    i `compute_position_summary`."""
     purchases = get_purchase_transactions(portfolio_conn, position["position_id"])
     sales = get_sale_transactions(portfolio_conn, position["position_id"])
     if broker is not None:
         purchases = [p for p in purchases if p["broker"] == broker]
         sales = [s for s in sales if s["broker"] == broker]
-    current_price, current_price_currency = get_current_price_for_position(scanner_conn, position)
+    quote = get_current_quote_for_position(scanner_conn, position, quote_fn=quote_fn)
     return compute_position_summary(
         position["position_id"], purchases, sales,
-        current_price=current_price, current_price_currency=current_price_currency,
+        current_price=quote.price if quote else None,
+        current_price_currency=quote.currency if quote else None,
+        fx=fx,
     )
 
 
 def get_user_positions_with_summaries(
     portfolio_conn, scanner_conn: sqlite3.Connection, user_id: int, *, broker: str | None = None,
+    quote_fn=None, fx: FxRates | None = None,
 ) -> list[tuple[object, PositionSummary]]:
     """`broker` -- patrz `get_position_summary`. Gdy ustawiony, pozycje
     bez ŻADNEJ transakcji na tym brokerze są pomijane całkowicie (nie
@@ -167,7 +201,7 @@ def get_user_positions_with_summaries(
     positions = get_positions_for_user(portfolio_conn, user_id)
     result = []
     for p in positions:
-        summary = get_position_summary(portfolio_conn, scanner_conn, p, broker=broker)
+        summary = get_position_summary(portfolio_conn, scanner_conn, p, broker=broker, quote_fn=quote_fn, fx=fx)
         if broker is not None and summary.shares_held == 0 and not summary.by_broker_currency:
             continue
         result.append((p, summary))

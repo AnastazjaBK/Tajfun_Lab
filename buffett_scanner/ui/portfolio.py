@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
+from buffett_scanner.ui.pricing import FxRates, convert
+
 
 @dataclass(frozen=True)
 class BrokerCurrencySubposition:
@@ -122,12 +124,16 @@ def compute_position_summary(
     *,
     current_price: float | None = None,
     current_price_currency: str | None = None,
+    fx: FxRates | None = None,
 ) -> PositionSummary:
     """`current_price`/`current_price_currency` to JEDNA cena (z
-    `price_daily`/profilu FMP) w JEDNEJ walucie -- jeśli subpozycja jest
-    w innej walucie niż `current_price_currency`, jej bieżąca wartość
-    jest NIEZNANA (nigdy przeliczana bez FX engine, sekcja 12
-    specyfikacji) i nie trafia do `current_value_by_currency`.
+    `price_daily`/profilu FMP) w JEDNEJ walucie (głównej -- pensy GBp są
+    już przeliczone na GBP w `ui/pricing.normalize_quote`). Subpozycja w
+    innej walucie (np. akcje z Paryża kupione w PLN) dostaje wartość
+    przeliczoną kursem NBP (`fx`, Faza 9) -- czyli wartość w walucie, w
+    której użytkownik faktycznie zapłacił, z efektem kursowym od zakupu.
+    Brak kursu -> wartość NIEZNANA (nigdy 0, nigdy zgadnięta) i nie
+    trafia do `current_value_by_currency`.
 
     Każda subpozycja (`BrokerCurrencySubposition.current_value`) dostaje
     WŁASNĄ, osobno policzoną wartość (`shares_held * current_price`) --
@@ -142,9 +148,10 @@ def compute_position_summary(
     for s in raw_subpositions:
         current_value = None
         unrealized_pl = None
-        if current_price is not None and current_price_currency is not None and s.currency == current_price_currency:
-            current_value = s.shares_held * current_price
-            unrealized_pl = current_value - s.total_invested
+        if current_price is not None and current_price_currency is not None:
+            current_value = convert(s.shares_held * current_price, current_price_currency, s.currency, fx)
+            if current_value is not None:
+                unrealized_pl = current_value - s.total_invested
         enriched_subpositions.append(replace(s, current_value=current_value, unrealized_pl=unrealized_pl))
 
     shares_held = sum(s.shares_held for s in enriched_subpositions)

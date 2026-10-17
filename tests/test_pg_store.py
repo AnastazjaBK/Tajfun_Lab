@@ -255,3 +255,61 @@ def test_connect_wraps_unreachable_host_as_pg_store_unavailable_error():
     bad_url = "postgresql://user:pass@127.0.0.1:1/nonexistent?connect_timeout=1"
     with pytest.raises(pg_store.PgStoreUnavailableError):
         pg_store.connect(database_url=bad_url)
+
+
+@pytest.mark.integration
+def test_init_schema_adds_phase9_columns_to_existing_phase8_tables(conn):
+    """Żywa baza Supabase ma tabele z Fazy 8 BEZ kolumn Fazy 9 --
+    `init_schema` musi je dodać bez utraty danych."""
+    with conn.cursor() as cur:
+        for table, column, _ in pg_store.PG_COLUMN_MIGRATIONS:
+            cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}")
+    conn.commit()
+    uid = pg_store.create_user(conn, "Anastazja")
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO positions (user_id, ticker, company_name) VALUES (%s, 'SU', 'Schneider Electric')",
+            (uid,),
+        )
+    conn.commit()
+    pg_store.init_schema(conn)
+    [position] = pg_store.get_positions_for_user(conn, uid)
+    assert position["ticker"] == "SU"
+    assert position["instrument_confirmed_at"] is None
+    assert position["voided_at"] is None
+
+
+@pytest.mark.integration
+def test_phase9_corrections_update_instrument_and_void_rows(conn):
+    uid = pg_store.create_user(conn, "Anastazja")
+    pid = pg_store.insert_position(conn, user_id=uid, ticker="SU", company_name="Schneider Electric")
+    tx = pg_store.insert_purchase_transaction(
+        conn, position_id=pid, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+        purchase_date="2026-10-06", shares=0.15, total_invested=154.54, currency="PLN",
+    )
+    sale = pg_store.insert_sale_transaction(
+        conn, position_id=pid, broker="TRADE_REPUBLIC", sale_date="2026-10-10",
+        shares=0.05, sale_price=300.0, currency="PLN",
+    )
+    conn.commit()
+
+    pg_store.update_position_instrument(
+        conn, position_id=pid, ticker="SU.PA", company_name="Schneider Electric S.E.",
+        cik=None, exchange="PAR", instrument_confirmed=True,
+    )
+    position = pg_store.get_position(conn, pid)
+    assert position["ticker"] == "SU.PA"
+    assert position["instrument_confirmed_at"] is not None
+
+    pg_store.void_sale_transaction(conn, sale, "pomyłka")
+    pg_store.void_purchase_transaction(conn, tx, "pomyłka")
+    conn.commit()
+    assert pg_store.get_sale_transactions(conn, pid) == []
+    assert pg_store.get_purchase_transactions(conn, pid) == []
+    with conn.cursor() as cur:
+        cur.execute("SELECT count(*) AS n FROM purchase_transactions WHERE voided_at IS NOT NULL")
+        assert cur.fetchone()["n"] == 1  # wiersz zostaje (audit trail)
+
+    pg_store.void_position(conn, pid)
+    conn.commit()
+    assert pg_store.get_positions_for_user(conn, uid) == []

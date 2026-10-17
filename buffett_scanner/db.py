@@ -775,6 +775,16 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # PO tym, jak `sale_transactions` mogła już istnieć w plikach DB
     # zseedowanych wcześniejszą wersją tej samej migracji w tej fazie.
     ("sale_transactions", "cost_basis_method_used", "TEXT"),
+    # Faza 9 (2026-10-17) — korekty w portfelu (Decyzja właścicielki):
+    # potwierdzenie tożsamości instrumentu (tylko takie pozycje dostają
+    # cenę z FMP po tickerze) i anulowanie błędnych wpisów BEZ kasowania
+    # (audit trail: wiersz zostaje, `voided_at` go wyłącza z obliczeń).
+    ("positions", "instrument_confirmed_at", "TEXT"),
+    ("positions", "voided_at", "TEXT"),
+    ("purchase_transactions", "voided_at", "TEXT"),
+    ("purchase_transactions", "void_reason", "TEXT"),
+    ("sale_transactions", "voided_at", "TEXT"),
+    ("sale_transactions", "void_reason", "TEXT"),
 )
 
 
@@ -1849,20 +1859,55 @@ def insert_position(
     cik: str | None = None,
     exchange: str | None = None,
     instrument_currency: str | None = None,
+    instrument_confirmed: bool = False,
 ) -> int:
     cur = conn.execute(
         """
-        INSERT INTO positions (user_id, cik, ticker, company_name, exchange, instrument_currency)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO positions (
+            user_id, cik, ticker, company_name, exchange, instrument_currency, instrument_confirmed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, CASE WHEN ? THEN datetime('now') END)
         """,
-        (user_id, cik, ticker, company_name, exchange, instrument_currency),
+        (user_id, cik, ticker, company_name, exchange, instrument_currency, instrument_confirmed),
     )
     return cur.lastrowid
 
 
+def update_position_instrument(
+    conn: sqlite3.Connection,
+    *,
+    position_id: int,
+    ticker: str,
+    company_name: str,
+    cik: str | None,
+    exchange: str | None,
+    instrument_confirmed: bool,
+) -> None:
+    """Faza 9 -- poprawa tożsamości instrumentu (np. `SU` -> `SU.PA`).
+    Pozycja to NIE transakcja: zasada append-only dotyczy transakcji,
+    tu dozwolony jest UPDATE (historia kosztu jest w transakcjach)."""
+    conn.execute(
+        """
+        UPDATE positions SET ticker = ?, company_name = ?, cik = ?, exchange = ?,
+            instrument_confirmed_at = CASE WHEN ? THEN datetime('now') END,
+            updated_at = datetime('now')
+        WHERE position_id = ?
+        """,
+        (ticker, company_name, cik, exchange, instrument_confirmed, position_id),
+    )
+
+
+def void_position(conn: sqlite3.Connection, position_id: int) -> None:
+    """Faza 9 -- ukrywa błędnie dodaną pozycję (wiersz zostaje)."""
+    conn.execute(
+        "UPDATE positions SET voided_at = datetime('now'), updated_at = datetime('now') "
+        "WHERE position_id = ? AND voided_at IS NULL",
+        (position_id,),
+    )
+
+
 def get_positions_for_user(conn: sqlite3.Connection, user_id: int) -> list[sqlite3.Row]:
     return conn.execute(
-        "SELECT * FROM positions WHERE user_id = ? ORDER BY created_at", (user_id,)
+        "SELECT * FROM positions WHERE user_id = ? AND voided_at IS NULL ORDER BY created_at", (user_id,)
     ).fetchall()
 
 
@@ -1907,10 +1952,28 @@ def insert_purchase_transaction(
 
 
 def get_purchase_transactions(conn: sqlite3.Connection, position_id: int) -> list[sqlite3.Row]:
+    """Wyłącznie AKTYWNE transakcje -- anulowane (`voided_at`) i
+    zastąpione (`superseded_by`) zostają w tabeli jako audit trail, ale
+    nigdy nie wchodzą do obliczeń."""
     return conn.execute(
-        "SELECT * FROM purchase_transactions WHERE position_id = ? ORDER BY purchase_date",
+        """
+        SELECT * FROM purchase_transactions
+        WHERE position_id = ? AND voided_at IS NULL AND superseded_by IS NULL
+        ORDER BY purchase_date
+        """,
         (position_id,),
     ).fetchall()
+
+
+def void_purchase_transaction(conn: sqlite3.Connection, transaction_id: int, reason: str | None = None) -> None:
+    """Faza 9 -- anulowanie błędnego wpisu: UPDATE wyłącznie znacznika
+    `voided_at`/`void_reason`, nigdy DELETE ani zmiana danych transakcji
+    (sekcja 11 design review: korekta nie niszczy historii)."""
+    conn.execute(
+        "UPDATE purchase_transactions SET voided_at = datetime('now'), void_reason = ? "
+        "WHERE transaction_id = ? AND voided_at IS NULL",
+        (reason, transaction_id),
+    )
 
 
 def insert_sale_transaction(
@@ -1937,10 +2000,24 @@ def insert_sale_transaction(
 
 
 def get_sale_transactions(conn: sqlite3.Connection, position_id: int) -> list[sqlite3.Row]:
+    """Patrz `get_purchase_transactions` -- wyłącznie aktywne."""
     return conn.execute(
-        "SELECT * FROM sale_transactions WHERE position_id = ? ORDER BY sale_date",
+        """
+        SELECT * FROM sale_transactions
+        WHERE position_id = ? AND voided_at IS NULL AND superseded_by IS NULL
+        ORDER BY sale_date
+        """,
         (position_id,),
     ).fetchall()
+
+
+def void_sale_transaction(conn: sqlite3.Connection, transaction_id: int, reason: str | None = None) -> None:
+    """Patrz `void_purchase_transaction`."""
+    conn.execute(
+        "UPDATE sale_transactions SET voided_at = datetime('now'), void_reason = ? "
+        "WHERE transaction_id = ? AND voided_at IS NULL",
+        (reason, transaction_id),
+    )
 
 
 def insert_purchase_thesis(

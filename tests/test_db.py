@@ -1524,3 +1524,30 @@ def test_holding_user_action_append_only_latest_wins(conn):
         "SELECT * FROM holding_user_actions WHERE position_id = ?", (position_id,),
     ).fetchall()
     assert len(all_rows) == 2
+
+
+def test_init_db_adds_phase9_portfolio_columns_to_existing_tables(tmp_path):
+    """Plik DB z Fazy 7/8 (tabele portfela bez kolumn Fazy 9) --
+    `init_db` dodaje je bez utraty danych."""
+    import sqlite3
+
+    from buffett_scanner.db import init_db
+
+    path = tmp_path / "old.db"
+    conn = init_db(path)
+    for table, column in (
+        ("positions", "instrument_confirmed_at"), ("positions", "voided_at"),
+        ("purchase_transactions", "voided_at"), ("purchase_transactions", "void_reason"),
+        ("sale_transactions", "voided_at"), ("sale_transactions", "void_reason"),
+    ):
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+    conn.execute("INSERT INTO users (display_name) VALUES ('A')")
+    conn.execute("INSERT INTO positions (user_id, ticker, company_name) VALUES (1, 'SU', 'Schneider')")
+    conn.commit()
+    conn.close()
+
+    conn = init_db(path)
+    row = conn.execute("SELECT * FROM positions").fetchone()
+    assert row["ticker"] == "SU"
+    assert row["instrument_confirmed_at"] is None
+    assert isinstance(conn, sqlite3.Connection)

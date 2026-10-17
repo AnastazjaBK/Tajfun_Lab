@@ -62,3 +62,25 @@ def lookup_instrument(symbol: str) -> InstrumentLookupResult | None:
         price=profile.get("price"),
         cik=profile.get("cik"),
     )
+
+
+def instrument_save_errors(
+    symbol: str, *, looked_up: bool, result: InstrumentLookupResult | None, confirmed: bool,
+) -> list[str]:
+    """Faza 9 (Decyzja właścicielki 2026-10-17): zapis pozycji jest
+    ZABLOKOWANY, gdy FMP rozpoznał symbol, ale użytkownik nie potwierdził
+    wyniku -- realny przypadek: `SU` (FMP: Suncor) zapisane jako
+    Schneider Electric. Zapis bez weryfikacji jest dozwolony WYŁĄCZNIE,
+    gdy FMP symbolu nie rozpoznał (ręczny wpis, bez automatycznej ceny,
+    Faza 7 pkt 6). `looked_up` = sprawdzenie wykonano dla DOKŁADNIE
+    obecnego symbolu."""
+    if not symbol.strip():
+        return ["Symbol/ticker jest wymagany."]
+    if not looked_up:
+        return ["Kliknij „Sprawdź instrument w FMP” przed zapisem."]
+    if result is not None and not confirmed:
+        return [
+            f"FMP rozpoznał ten symbol jako {result.company_name or '—'} ({result.exchange or '—'}). "
+            "Zaznacz „Tak, to właściwy instrument” albo zmień symbol (np. dodaj sufiks giełdy: SU.PA, GSK.L)."
+        ]
+    return []

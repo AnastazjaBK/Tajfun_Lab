@@ -118,3 +118,34 @@ def test_lookup_empty_symbol_returns_none_without_calling_fmp(monkeypatch):
 
     monkeypatch.setattr(instrument_lookup, "load_config", _boom)
     assert instrument_lookup.lookup_instrument("   ") is None
+
+
+# --- Faza 9: blokada zapisu bez potwierdzenia ---
+
+from buffett_scanner.ui.instrument_lookup import InstrumentLookupResult, instrument_save_errors  # noqa: E402
+
+_SUNCOR = InstrumentLookupResult(
+    symbol="SU", company_name="Suncor Energy Inc.", exchange="NYSE", currency="USD", price=30.0, cik="0000311337",
+)
+
+
+def test_save_blocked_when_fmp_recognized_but_not_confirmed():
+    errors = instrument_save_errors("SU", looked_up=True, result=_SUNCOR, confirmed=False)
+    assert len(errors) == 1
+    assert "Suncor" in errors[0]
+
+
+def test_save_blocked_when_symbol_not_checked():
+    assert instrument_save_errors("SU.PA", looked_up=False, result=None, confirmed=False)
+
+
+def test_save_allowed_when_confirmed():
+    assert instrument_save_errors("SU", looked_up=True, result=_SUNCOR, confirmed=True) == []
+
+
+def test_save_allowed_manually_when_fmp_did_not_recognize():
+    assert instrument_save_errors("XYZ.WA", looked_up=True, result=None, confirmed=False) == []
+
+
+def test_save_blocked_on_empty_symbol():
+    assert instrument_save_errors("  ", looked_up=True, result=None, confirmed=False)

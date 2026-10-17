@@ -150,6 +150,23 @@ CREATE TABLE IF NOT EXISTS holding_user_actions (
 CREATE INDEX IF NOT EXISTS idx_holding_user_actions_position_id ON holding_user_actions(position_id);
 """
 
+# Faza 9 (2026-10-17) -- kolumny dodane PO wdrożeniu Fazy 8 (żywa baza
+# Supabase już ma te tabele z danymi). Ten sam cel co
+# `db._COLUMN_MIGRATIONS`. `init_schema` jest wołane przy KAŻDYM
+# połączeniu (każdy rerun appki), a `ALTER TABLE` bierze blokadę
+# ACCESS EXCLUSIVE nawet z `IF NOT EXISTS` -- dlatego ALTER jest
+# wykonywany wyłącznie, gdy `information_schema` mówi, że kolumny brak.
+PG_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    ("positions", "instrument_confirmed_at", "TEXT"),
+    ("positions", "voided_at", "TEXT"),
+    ("purchase_transactions", "voided_at", "TEXT"),
+    ("purchase_transactions", "void_reason", "TEXT"),
+    ("sale_transactions", "voided_at", "TEXT"),
+    ("sale_transactions", "void_reason", "TEXT"),
+)
+
+_PG_NOW = "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
+
 
 def resolve_database_url() -> str:
     """Czyta connection string WYŁĄCZNIE ze zmiennej środowiskowej --
@@ -190,6 +207,14 @@ def init_schema(conn) -> None:
     nadpisuje istniejących wierszy (ten sam wzorzec co `db.init_db`)."""
     with conn.cursor() as cur:
         cur.execute(PG_SCHEMA)
+        cur.execute(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = current_schema()"
+        )
+        existing = {(r["table_name"], r["column_name"]) for r in cur.fetchall()}
+        for table, column, coltype in PG_COLUMN_MIGRATIONS:
+            if (table, column) not in existing:
+                cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
     conn.commit()
 
 
@@ -260,22 +285,50 @@ def get_latest_user_decisions_for_user(conn, user_id: int) -> dict:
 def insert_position(
     conn, *, user_id: int, ticker: str, company_name: str,
     cik: str | None = None, exchange: str | None = None,
-    instrument_currency: str | None = None,
+    instrument_currency: str | None = None, instrument_confirmed: bool = False,
 ) -> int:
     with conn.cursor() as cur:
         cur.execute(
-            """
-            INSERT INTO positions (user_id, cik, ticker, company_name, exchange, instrument_currency)
-            VALUES (%s, %s, %s, %s, %s, %s) RETURNING position_id
+            f"""
+            INSERT INTO positions (
+                user_id, cik, ticker, company_name, exchange, instrument_currency, instrument_confirmed_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, CASE WHEN %s THEN {_PG_NOW} END) RETURNING position_id
             """,
-            (user_id, cik, ticker, company_name, exchange, instrument_currency),
+            (user_id, cik, ticker, company_name, exchange, instrument_currency, instrument_confirmed),
         )
         return cur.fetchone()["position_id"]
 
 
+def update_position_instrument(
+    conn, *, position_id: int, ticker: str, company_name: str,
+    cik: str | None, exchange: str | None, instrument_confirmed: bool,
+) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            UPDATE positions SET ticker = %s, company_name = %s, cik = %s, exchange = %s,
+                instrument_confirmed_at = CASE WHEN %s THEN {_PG_NOW} END,
+                updated_at = {_PG_NOW}
+            WHERE position_id = %s
+            """,
+            (ticker, company_name, cik, exchange, instrument_confirmed, position_id),
+        )
+
+
+def void_position(conn, position_id: int) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE positions SET voided_at = {_PG_NOW}, updated_at = {_PG_NOW} "
+            "WHERE position_id = %s AND voided_at IS NULL",
+            (position_id,),
+        )
+
+
 def get_positions_for_user(conn, user_id: int) -> list:
     with conn.cursor() as cur:
-        cur.execute("SELECT * FROM positions WHERE user_id = %s ORDER BY created_at", (user_id,))
+        cur.execute(
+            "SELECT * FROM positions WHERE user_id = %s AND voided_at IS NULL ORDER BY created_at", (user_id,),
+        )
         return cur.fetchall()
 
 
@@ -309,10 +362,23 @@ def insert_purchase_transaction(
 def get_purchase_transactions(conn, position_id: int) -> list:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM purchase_transactions WHERE position_id = %s ORDER BY purchase_date",
+            """
+            SELECT * FROM purchase_transactions
+            WHERE position_id = %s AND voided_at IS NULL AND superseded_by IS NULL
+            ORDER BY purchase_date
+            """,
             (position_id,),
         )
         return cur.fetchall()
+
+
+def void_purchase_transaction(conn, transaction_id: int, reason: str | None = None) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE purchase_transactions SET voided_at = {_PG_NOW}, void_reason = %s "
+            "WHERE transaction_id = %s AND voided_at IS NULL",
+            (reason, transaction_id),
+        )
 
 
 def insert_sale_transaction(
@@ -334,10 +400,23 @@ def insert_sale_transaction(
 def get_sale_transactions(conn, position_id: int) -> list:
     with conn.cursor() as cur:
         cur.execute(
-            "SELECT * FROM sale_transactions WHERE position_id = %s ORDER BY sale_date",
+            """
+            SELECT * FROM sale_transactions
+            WHERE position_id = %s AND voided_at IS NULL AND superseded_by IS NULL
+            ORDER BY sale_date
+            """,
             (position_id,),
         )
         return cur.fetchall()
+
+
+def void_sale_transaction(conn, transaction_id: int, reason: str | None = None) -> None:
+    with conn.cursor() as cur:
+        cur.execute(
+            f"UPDATE sale_transactions SET voided_at = {_PG_NOW}, void_reason = %s "
+            "WHERE transaction_id = %s AND voided_at IS NULL",
+            (reason, transaction_id),
+        )
 
 
 def insert_purchase_thesis(

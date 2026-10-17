@@ -398,3 +398,125 @@ def test_get_review_needed_count_counts_only_review_later_action(conn):
     conn.commit()
 
     assert get_review_needed_count(conn, user_id) == 1  # position_untouched (brak akcji) NIE liczy się
+
+
+# --- Faza 9: ceny FMP po tickerze, korekty (anulowanie/poprawa instrumentu) ---
+
+from buffett_scanner.db import (  # noqa: E402
+    get_position,
+    update_position_instrument,
+    void_position,
+    void_purchase_transaction,
+    void_sale_transaction,
+)
+from buffett_scanner.ui.pricing import FxRates, Quote  # noqa: E402
+from buffett_scanner.ui.queries import get_current_quote_for_position, is_instrument_confirmed  # noqa: E402
+
+_FX = FxRates(mid_pln={"PLN": 1.0, "EUR": 4.25}, effective_date="2026-10-16")
+
+
+def _schneider_pln(conn, *, confirmed: bool, ticker: str = "SU.PA"):
+    user_id = create_user(conn, "Anastazja")
+    position_id = insert_position(
+        conn, user_id=user_id, ticker=ticker, company_name="Schneider Electric",
+        instrument_confirmed=confirmed,
+    )
+    insert_purchase_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+        purchase_date="2026-10-06", shares=0.15, total_invested=154.54, currency="PLN",
+    )
+    conn.commit()
+    return user_id, position_id
+
+
+def test_unconfirmed_ticker_never_gets_fmp_price(conn):
+    """Realny przypadek właścicielki: `SU` wpisane dla Schneidera bez
+    potwierdzenia -- FMP dla `SU` zwraca Suncor. Cena NIE może być
+    pobrana po niepotwierdzonym tickerze."""
+    _user_id, position_id = _schneider_pln(conn, confirmed=False, ticker="SU")
+    calls = []
+
+    def quote_fn(symbol):
+        calls.append(symbol)
+        return Quote(price=30.0, currency="USD", source="FMP")
+
+    position = get_position(conn, position_id)
+    assert is_instrument_confirmed(position) is False
+    assert get_current_quote_for_position(conn, position, quote_fn=quote_fn) is None
+    assert calls == []
+
+
+def test_confirmed_european_position_valued_in_pln(conn):
+    user_id, _position_id = _schneider_pln(conn, confirmed=True)
+    quote_fn = lambda symbol: Quote(price=250.0, currency="EUR", source="FMP")  # noqa: E731
+    [(_position, summary)] = get_user_positions_with_summaries(conn, conn, user_id, quote_fn=quote_fn, fx=_FX)
+    assert summary.current_value_by_currency == {"PLN": pytest.approx(0.15 * 250.0 * 4.25)}
+    assert summary.unrealized_pl_by_currency == {"PLN": pytest.approx(0.15 * 250.0 * 4.25 - 154.54)}
+
+
+def test_legacy_position_with_cik_counts_as_confirmed(conn):
+    user_id = create_user(conn, "Anastazja")
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    position_id = insert_position(conn, user_id=user_id, cik="0000320193", ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    assert is_instrument_confirmed(get_position(conn, position_id)) is True
+
+
+def test_fmp_failure_falls_back_to_scanner_price_daily(conn):
+    user_id = create_user(conn, "Anastazja")
+    upsert_company(conn, cik="0000320193", name="Apple Inc.")
+    insert_price_rows(conn, "0000320193", source="fmp", rows=[
+        {"date": "2026-10-02", "open": 1, "high": 1, "low": 1, "close": 155.0, "adjClose": 155.0, "volume": 1},
+    ])
+    position_id = insert_position(conn, user_id=user_id, cik="0000320193", ticker="AAPL", company_name="Apple Inc.")
+    conn.commit()
+    quote = get_current_quote_for_position(conn, get_position(conn, position_id), quote_fn=lambda s: None)
+    assert (quote.price, quote.currency) == (155.0, "USD")
+
+
+def test_voided_purchase_is_excluded_from_position(conn):
+    user_id, position_id = _schneider_pln(conn, confirmed=True)
+    tx_id = conn.execute("SELECT transaction_id FROM purchase_transactions").fetchone()[0]
+    void_purchase_transaction(conn, tx_id, "pomyłka")
+    conn.commit()
+    [(_position, summary)] = get_user_positions_with_summaries(conn, conn, user_id)
+    assert summary.shares_held == 0.0
+    row = conn.execute("SELECT voided_at, void_reason FROM purchase_transactions").fetchone()
+    assert row["voided_at"] is not None  # wiersz zostaje (audit trail)
+    assert row["void_reason"] == "pomyłka"
+
+
+def test_voided_sale_is_excluded(conn):
+    user_id, position_id = _schneider_pln(conn, confirmed=True)
+    sale_id = insert_sale_transaction(
+        conn, position_id=position_id, broker="TRADE_REPUBLIC", sale_date="2026-10-10",
+        shares=0.05, sale_price=300.0, currency="PLN",
+    )
+    void_sale_transaction(conn, sale_id)
+    conn.commit()
+    [(_position, summary)] = get_user_positions_with_summaries(conn, conn, user_id)
+    assert summary.shares_held == pytest.approx(0.15)
+
+
+def test_update_position_instrument_fixes_ticker_and_confirms(conn):
+    user_id, position_id = _schneider_pln(conn, confirmed=False, ticker="SU")
+    update_position_instrument(
+        conn, position_id=position_id, ticker="SU.PA", company_name="Schneider Electric S.E.",
+        cik=None, exchange="PAR", instrument_confirmed=True,
+    )
+    conn.commit()
+    position = get_position(conn, position_id)
+    assert position["ticker"] == "SU.PA"
+    assert position["exchange"] == "PAR"
+    assert is_instrument_confirmed(position) is True
+    # transakcja nietknięta
+    [(_p, summary)] = get_user_positions_with_summaries(conn, conn, user_id)
+    assert summary.invested_by_currency == {"PLN": pytest.approx(154.54)}
+
+
+def test_void_position_hides_it(conn):
+    user_id, position_id = _schneider_pln(conn, confirmed=False, ticker="SU")
+    void_position(conn, position_id)
+    conn.commit()
+    assert get_user_positions_with_summaries(conn, conn, user_id) == []
+    assert get_position(conn, position_id) is not None  # wiersz zostaje

@@ -2611,6 +2611,34 @@ Właściciel zaakceptował jako zobowiązania (nie tylko rekomendacje): stworzen
 
 ---
 
+## Faza 9 — Portfel: ceny europejskie, kursy NBP, korekty wpisów (2026-10-17)
+
+**Decyzja właścicielki (2026-10-17):** „Wprowadź wszystko. Kursy NBP. Zysk i strata na zielono/czerwono, zysk/strata w tabeli na każdej pozycji.” Kontekst: przy wpisywaniu realnych pozycji (Trade Republic, płatność w PLN) wyszły trzy problemy: (1) `SU` zapisane jako Schneider Electric, choć FMP rozpoznał Suncor — formularz pozwalał zapisać bez potwierdzenia; (2) brak bieżącej wartości dla pozycji w PLN i dla spółek spoza USA; (3) Apple BONUS „nie dało się zapisać” — wybór Bonus był w liście rozwijanej wewnątrz `st.form`, a pole kapitału nie wyszarzało się przed zapisem.
+
+**Ceny i waluty** — nowy moduł `buffett_scanner/ui/pricing.py`:
+- Cena bieżąca: profil FMP po tickerze (`get_company_profile`, ten sam endpoint co weryfikacja instrumentu, empirycznie działający dla `SU.PA`/`GSK.L` na planie Free — Faza 7), `max_retries=1`, cache 1 h w UI (`st.cache_data`), przycisk „Odśwież ceny”. Fallback: dotychczasowe `price_daily` po `cik` (EOD, USD).
+- **Cena pobierana WYŁĄCZNIE dla pozycji z potwierdzonym instrumentem** (`positions.instrument_confirmed_at` albo `cik` z czasów Fazy 7/8). Niepotwierdzony ticker może wskazywać inną spółkę (`SU` = Suncor) — taka pozycja pokazuje „Instrument niepotwierdzony — popraw w karcie pozycji”, nigdy cenę obcej spółki.
+- Jednostki zdawkowe: `GBp`/`GBX` → GBP ÷100, `ZAc` → ZAR ÷100, `ILA` → ILS ÷100 (bez tego wartość pozycji z Londynu byłaby zawyżona 100×).
+- Kursy: NBP tabela A (kurs średni), jedno zapytanie o całą tabelę, cache 1 h. Wartość subpozycji = akcje × cena × kurs → w walucie, w której użytkownik zapłacił (PLN dla Trade Republic). Zysk/strata zawiera efekt kursowy od dnia zakupu. Brak kursu → „niedostępne”, nigdy 0.
+- Łączne kwoty w PLN (gdy portfel ma też USD): kwoty USD przeliczone po dzisiejszym kursie NBP, z jawnym podpisem. Zysk/strata liczony tylko dla pozycji z ceną — podpis wyjaśnia, czemu wartość − kapitał ≠ zysk/strata, gdy część pozycji nie ma ceny.
+- **Niezweryfikowane empirycznie:** odpowiedź `api.nbp.pl` (sandbox deweloperski nie ma do niego dostępu); parser oparty na dokumentacji NBP, każdy inny kształt → „kurs niedostępny”. Weryfikacja: po wdrożeniu porównać kurs i datę pokazane w appce z nbp.pl.
+
+**Korekty (karta pozycji → „Popraw dane / anuluj błędny wpis”):**
+- Poprawa instrumentu (`update_position_instrument`): nowe sprawdzenie w FMP z tymi samymi regułami potwierdzenia; transakcje nietknięte. Pozycja nie podlega regule append-only (dotyczy transakcji).
+- Anulowanie transakcji (`void_purchase_transaction`/`void_sale_transaction`): UPDATE wyłącznie `voided_at`/`void_reason`, wiersz zostaje (audit trail, sekcja 11). Getterzy transakcji zwracają tylko aktywne (`voided_at IS NULL AND superseded_by IS NULL` — wcześniej `superseded_by` istniało w schemacie, ale nikt go nie czytał). Blokada anulowania zakupu, gdy sprzedaże przekroczyłyby posiadane akcje.
+- Usunięcie pozycji (`void_position`) tylko, gdy nie ma aktywnych transakcji; wiersz zostaje.
+- Migracje: SQLite przez `_COLUMN_MIGRATIONS`; Postgres przez `PG_COLUMN_MIGRATIONS` w `init_schema` (ALTER tylko, gdy `information_schema` mówi, że kolumny brak — `init_schema` biegnie przy każdym rerunie). Przetestowane na lokalnym Postgresie 16: baza w schemacie Fazy 8 z danymi → migracja bez utraty danych.
+
+**Formularze:**
+- Zapis nowej pozycji/poprawionego instrumentu zablokowany, gdy: symbol nie został sprawdzony w FMP albo FMP go rozpoznał, a „Tak, to właściwy instrument” nie jest zaznaczone. Zapis ręczny bez weryfikacji tylko, gdy FMP symbolu nie rozpoznał.
+- Waluta transakcji nie jest już podpowiadana z FMP (FMP zwraca walutę notowania, np. GBp); zamiast tego podpowiedź „wpisz walutę, w której zapłaciłaś”.
+- Zakup/Bonus jako przyciski nad formularzem — pole kapitału wyszarza się od razu po wyborze Bonus.
+- Zysk/strata kolorowany (zielony/czerwony) w pasku portfela, podsumowaniu, tabeli pozycji i karcie pozycji; kolumna „Uwagi” w tabeli tłumaczy brak ceny.
+
+**Weryfikacja:** 793 testy przechodzą (było 753; nowe: `test_ui_pricing.py`, Faza 9 w `test_ui_queries.py`, `test_ui_instrument_lookup.py`, `test_db.py`, `test_pg_store.py` — te ostatnie uruchomione na lokalnym Postgresie). Smoke test lokalny (Playwright, SQLite, ceny/kursy podmienione na stałe wartości testowe): blokada zapisu `SU`→Suncor, poprawka `SU`→`SU.PA`, anulowanie transakcji, Bonus z wyszarzonym kapitałem, kolory i sumy PLN — wyniki zgodne z ręcznym przeliczeniem. Znany, wcześniejszy problem infrastruktury testów: `tests/test_connect_backends.py` zawiesza się na lokalnym Postgresie także na kodzie sprzed Fazy 9 (nie wynika z tych zmian).
+
+**Po wdrożeniu do zrobienia przez właścicielkę:** w karcie każdej pozycji wpisanej przed Fazą 9 bez `cik` (Schneider, GSK, NYMT, …) użyć „Popraw dane” → sprawdzić symbol w FMP → zaznaczyć „Tak” → zapisać. Dopiero wtedy pozycja dostaje cenę.
+
 ## LATER — bezpieczne do odłożenia
 
 - Rozszerzenie na Nasdaq 100/Europę/GPW — architektura już ma być config-driven, nie wymaga pracy teraz.
