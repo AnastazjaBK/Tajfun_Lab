@@ -2662,6 +2662,22 @@ Pełne raporty: [`docs/audyt-rozszerzenia-2026-10-17.md`](audyt-rozszerzenia-202
 
 **Korekta wcześniejszej informacji:** test europejskich cen z Fazy 7 był na planie Premium, nie Free — poprawione w opisie Fazy 7 i Fazy 9.
 
+## Faza 11 — Implementacja P0b–P4 (2026-10-17)
+
+**Decyzja właścicielki (2026-10-17):** podział dostawców FMP (USA) + EODHD Free (Europa), bez zakupu nowych planów; P0b–P4 realizowane kolejno z testami i wdrożeniami; migracje tylko po zweryfikowanej kopii zapasowej; bez zmian scoringu, DCF, wag, hard gates, snapshotów; bez Claude API i pełnych skanów.
+
+| Etap | Commit | Zakres |
+|---|---|---|
+| P0b | `8084f07` | EODHD dla notowań europejskich (wyszukiwanie z potwierdzeniem: nazwa, giełda, waluta, ISIN), wspólny cache danych rynkowych w bazie (`market_data_cache`, ostatnia poprawna wartość, budżet EODHD 18/dzień), tożsamość instrumentu w pozycji, kolumna „Źródło ceny”, migracja niedestrukcyjna wszystkich kolumn/tabel P0b–P4 poprzedzona zweryfikowaną kopią (`portfolio_backups`), pobieranie kopii w aplikacji |
+| P1 | `1e2bc44` | Koszt historyczny w PLN kursem z dnia transakcji (kurs brokera, jeśli zapisany; inaczej NBP z dnia roboczego przed transakcją — orientacyjnie), wynik zrealizowany (średni koszt, opłaty sprzedaży), podsumowanie w PLN z podziałem na platformy i jawną sumą częściową, ilości do 8 miejsc |
+| P2 | `2dc5154` | Zmiany 1D–MAX: TOP20 (na dzień skanu / bieżące) z finalistami ★, portfel; N/A przy niepełnej historii; flaga anomalii ≥50% / ≥25% przy 5× wolumenie i spin-off z FMP `splits` |
+| P3 | `b8a6376` | Dywidendy: TOP20 (Yield TTM, częstotliwość, brutto/100 PLN, trend), karta spółki (DPS TTM/YTD, historia, potwierdzone daty, specjalne, wypłata/FCF), portfel (yield, YoC bez akcji z bonusu, prognoza vs otrzymane), rejestr otrzymanych wypłat (brutto/podatek/netto/kurs), dywidendy w łącznym wyniku |
+| P4 | `eee64b2` | Klasy aktywów: ETF/ETC/ETN (metal, ekspozycja, opłata), złoto/srebro fizyczne (masa, próba, NBP / kontrakt FMP, wycena ręczna i odkup), kryptowaluty (para FMP), udział klas i ekspozycja na metale |
+
+**Zweryfikowane empirycznie (2026-10-17):** format API NBP (tabela A/B, kursy historyczne, cena złota PLN/g — run 39070662443); EODHD Free (run 39070026144); FMP Premium (run 39066715293). Testy: 842 (SQLite) + testy Postgresa na lokalnym PG 16, w tym migracja bazy z danymi.
+
+**Ograniczenia (jawnie pokazywane w aplikacji):** EODHD Free = notowania z 1 roku (5Y/MAX dla Europy = N/A); srebro z kontraktu terminowego FMP (przybliżenie spot); dostępność danych FMP po przejściu na Starter (28.10) do sprawdzenia zaplanowanym testem; kursy NBP orientacyjne, nie kurs brokera ani podatkowy.
+
 ## LATER — bezpieczne do odłożenia
 
 - Rozszerzenie na Nasdaq 100/Europę/GPW — architektura już ma być config-driven, nie wymaga pracy teraz.
