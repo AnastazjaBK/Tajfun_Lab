@@ -437,7 +437,7 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
         }
         for r in rows
     ]
-    st.dataframe(table_data, use_container_width=True, hide_index=True)
+    _show_table(_name_first(table_data))
     st.caption("★ = finaliści skanu (pierwsza piątka raportu wg pełnego wyniku).")
     st.caption(METHODOLOGY_DISCLAIMER)
     return run["run_id"], rows
@@ -493,7 +493,7 @@ def _render_top20_dividends(portfolio_conn, run, rows: list[dict]) -> None:
             "Finalista": f"★ {r['finalist_position']}" if r["finalist_position"] else "",
             "Spółka": r["company_name"], **cells, "Uwagi": "; ".join(notes),
         })
-    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+    _show_table(_name_first(table_rows))
     st.caption(
         "Yield TTM = regularne wypłaty na akcję z ostatnich 12 miesięcy / cena (bez wypłat specjalnych). "
         "„Brutto/100 PLN” = orientacyjna roczna dywidenda brutto na każde 100 PLN zainwestowane po tej cenie "
@@ -598,7 +598,7 @@ def _render_portfolio_dividends(portfolio_conn, positions_with_summaries: list, 
             paid_forecast_pln = convert(metrics.ttm_dps * paid_shares, metrics.currency, "PLN", fx)
             yoc = paid_forecast_pln / cost_pln * 100.0 if paid_forecast_pln is not None else None
         table_rows.append({
-            "Ticker": position["ticker"],
+            "Ticker": position["ticker"], "Spółka": position["company_name"],
             "Yield (bieżąca cena)": (
                 f"{metrics.yield_ttm_pct:.2f}%" if metrics and metrics.yield_ttm_pct is not None else "N/A"
             ),
@@ -634,7 +634,7 @@ def _render_portfolio_dividends(portfolio_conn, positions_with_summaries: list, 
             f"{money(totals.tax_by_currency)} · netto: {money(totals.net_by_currency)}"
             + (" · część kwot PLN po kursie NBP (orientacyjnie)" if totals.estimated else "")
         )
-    st.dataframe(table_rows, use_container_width=True, hide_index=True)
+    _show_table(_name_first(table_rows))
     st.caption(
         "Prognoza = regularne wypłaty na akcję z ostatnich 12 mies. × posiadane akcje (brutto, dzisiejszy kurs NBP) — "
         "to NIE są otrzymane pieniądze. Yield on Cost = prognoza / koszt posiadanych akcji w PLN (przy koszcie 0, "
@@ -666,13 +666,30 @@ def _price_changes_cells(rows: list[dict], *, complete: bool, ref_date: str | No
     return cells, signs, note
 
 
+_NAME_COLUMN = "Spółka"
+
+
+def _name_first(rows: list[dict]) -> list[dict]:
+    """Nazwa spółki jako pierwsza kolumna -- przypięta przy przewijaniu w prawo."""
+    return [{_NAME_COLUMN: r.get(_NAME_COLUMN), **{k: v for k, v in r.items() if k != _NAME_COLUMN}} for r in rows]
+
+
+def _show_table(data) -> None:
+    """Tabela z przypiętą kolumną „Spółka” (Decyzja właścicielki 2026-10-18:
+    przy przewijaniu w prawo nazwa spółki zostaje widoczna)."""
+    st.dataframe(
+        data, use_container_width=True, hide_index=True,
+        column_config={_NAME_COLUMN: st.column_config.TextColumn(_NAME_COLUMN, pinned=True)},
+    )
+
+
 def _style_change_table(table_rows: list[dict], signs: list[dict]):
     def css(column):
         return [
             _PL_GAIN_CSS if sign.get(column.name, 0) > 0 else _PL_LOSS_CSS if sign.get(column.name, 0) < 0 else ""
             for sign in signs
         ]
-    return pd.DataFrame(table_rows).style.apply(css, subset=list(PERIODS))
+    return pd.DataFrame(_name_first(table_rows)).style.apply(css, subset=list(PERIODS))
 
 
 def _render_top20_price_changes(scanner_conn, portfolio_conn, run, rows: list[dict]) -> None:
@@ -713,7 +730,7 @@ def _render_top20_price_changes(scanner_conn, portfolio_conn, run, rows: list[di
             "Spółka": r["company_name"], **cells, "Uwagi": "; ".join(notes),
         })
         signs.append(sign)
-    st.dataframe(_style_change_table(table_rows, signs), use_container_width=True, hide_index=True)
+    _show_table(_style_change_table(table_rows, signs))
     if source == _CHANGE_SOURCES[0]:
         st.caption(
             f"Notowania zapisane w skanie (ostatnia sesja {max(scan_dates) if scan_dates else '—'}); skan pobiera "
@@ -1012,11 +1029,11 @@ def _render_portfolio_summary_tab(
         return [_PL_GAIN_CSS if sign > 0 else _PL_LOSS_CSS if sign < 0 else "" for sign in pln_signs]
 
     styled = (
-        pd.DataFrame(table_rows).style
+        pd.DataFrame(_name_first(table_rows)).style
         .apply(_pl_column_css, subset=["Zysk/strata", "Zysk/strata %"])
         .apply(_pln_column_css, subset=["Zysk/strata (PLN)"])
     )
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    _show_table(styled)
     st.caption(
         "Bieżąca cena i wartość w walucie, w której zapłaciłaś/eś (np. PLN) — przeliczone kursem NBP. "
         "Zysk/strata = bieżąca wartość − własny koszt, razem z efektem zmiany kursu waluty."
@@ -1088,7 +1105,7 @@ def _render_portfolio_price_changes(portfolio_conn, positions_with_summaries: li
             "Źródło": source, "Uwagi": note,
         })
         signs.append(sign)
-    st.dataframe(_style_change_table(table_rows, signs), use_container_width=True, hide_index=True)
+    _show_table(_style_change_table(table_rows, signs))
     st.caption(
         "Zmiana ceny instrumentu w walucie notowania (nie Twój wynik inwestycji — ten jest w widoku „Wycena”). "
         "EODHD w darmowym planie daje tylko ostatni rok: 5Y i MAX = N/A. ⚠ = możliwe zdarzenie korporacyjne."
@@ -1781,6 +1798,138 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                     st.rerun()
 
 
+_ADD_MODES = ("Nowa transakcja", "Skopiuj istniejącą transakcję")
+_COPY_TARGETS = ("Kolejny zakup tej samej pozycji", "Nowa pozycja z tymi samymi danymi produktu")
+
+
+def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) -> None:
+    """Kopia istniejącego zakupu (Decyzja właścicielki 2026-10-18):
+    formularz wypełniony danymi źródłowej transakcji -- zmienia się tylko
+    to, co inne (np. nazwa monety, cena). Oryginał pozostaje bez zmian.
+    Dla metali fizycznych kopia może być nową pozycją (inna moneta/
+    sztabka); dla akcji, ETF i kryptowalut -- kolejnym zakupem tej samej
+    pozycji (nowy instrument wymaga sprawdzenia symbolu)."""
+    sources = [
+        (position, tx) for position in positions
+        for tx in get_purchase_transactions(portfolio_conn, position["position_id"])
+    ]
+    if not sources:
+        st.info("Nie ma jeszcze zakupów do skopiowania.")
+        return
+    index = st.selectbox(
+        "Transakcja do skopiowania", range(len(sources)),
+        format_func=lambda i: f"{sources[i][0]['company_name']} · " + _describe_transaction("PURCHASE", sources[i][1]),
+        key="copy_source",
+    )
+    position, tx = sources[index]
+    physical = asset_class_of(position) in PHYSICAL
+    target = (
+        st.radio("Zapisz kopię jako", _COPY_TARGETS, horizontal=True, key=f"copy_target_{tx['transaction_id']}")
+        if physical else _COPY_TARGETS[0]
+    )
+    if not physical:
+        st.caption("Kopia zostanie dopisana jako kolejny zakup tej samej pozycji. Inną spółkę dodaj jako nową transakcję.")
+    key = f"copy_{tx['transaction_id']}_{_COPY_TARGETS.index(target)}"
+    acquisition_type = st.radio(
+        "Sposób nabycia", _ACQUISITION_TYPE_OPTIONS, index=_ACQUISITION_TYPE_OPTIONS.index(tx["acquisition_type"]),
+        format_func=lambda t: acquisition_types_label((t,)), key=f"{key}_acq", horizontal=True,
+    )
+    with st.form(f"{key}_form"):
+        product = {}
+        if target == _COPY_TARGETS[1]:
+            product["name"] = st.text_input("Nazwa produktu", value=position["company_name"], key=f"{key}_name")
+            forms = list(PRODUCT_FORM_LABELS)
+            product["product_form"] = st.selectbox(
+                "Rodzaj", forms, index=forms.index(position.get("product_form") or "OTHER"),
+                format_func=PRODUCT_FORM_LABELS.get, key=f"{key}_form",
+            )
+            cols = st.columns(2)
+            product["unit_weight"] = cols[0].number_input(
+                "Masa jednej sztuki", min_value=0.0, value=float(position.get("unit_weight") or 0.0), step=0.01,
+                format="%.4f", key=f"{key}_w",
+            )
+            units = ("OZT", "G")
+            product["weight_unit"] = cols[1].selectbox(
+                "Jednostka", units, index=units.index(position.get("weight_unit") or "OZT"),
+                format_func=lambda u: "uncja trojańska" if u == "OZT" else "gram", key=f"{key}_wu",
+            )
+            product["fineness"] = st.number_input(
+                "Próba", min_value=0.0, value=float(position.get("fineness") or 0.0), step=0.0001, format="%.4f",
+                key=f"{key}_fine",
+            )
+            product["is_collectible"] = 1 if st.checkbox(
+                "Moneta kolekcjonerska", value=bool(position.get("is_collectible")), key=f"{key}_coll",
+            ) else 0
+            product["storage_location"] = st.text_input(
+                "Miejsce przechowywania", value=position.get("storage_location") or "", key=f"{key}_storage",
+            ).strip() or None
+        broker = st.selectbox(
+            "Platforma", _BROKER_OPTIONS, index=_BROKER_OPTIONS.index(tx["broker"]), format_func=broker_label,
+            key=f"{key}_broker",
+        )
+        purchase_date = st.date_input("Data zakupu", value=dt.date.fromisoformat(str(tx["purchase_date"])[:10]),
+                                      key=f"{key}_date")
+        quantity = st.number_input(
+            "Liczba (akcji / sztuk / jednostek)", min_value=0.0, value=float(tx["shares"]), step=0.00000001,
+            format="%.8f", key=f"{key}_qty",
+        )
+        currency = st.text_input("Waluta", value=tx["currency"], key=f"{key}_ccy")
+        total = st.number_input(
+            "Łączny koszt (cała kwota, która zeszła z konta)" if acquisition_type == "BUY" else "Koszt (bonus = 0)",
+            min_value=0.0, value=float(tx["total_invested"] or 0.0), step=0.01, format="%.2f",
+            disabled=acquisition_type == "BONUS", key=f"{key}_total",
+        )
+        fees = st.number_input("W tym opłaty (informacyjnie)", min_value=0.0, value=float(tx["fees"] or 0.0),
+                               step=0.01, format="%.2f", key=f"{key}_fees")
+        fx_rate = st.number_input(
+            "Kurs brokera (opcjonalnie, waluta inna niż PLN)", min_value=0.0,
+            value=float(tx["fx_rate_actual"] or 0.0), step=0.0001, format="%.4f", key=f"{key}_fx",
+        )
+        note = st.text_input("Notatka", value=tx["note"] or "", key=f"{key}_note")
+        if st.form_submit_button("Zapisz kopię"):
+            final_total = 0.0 if acquisition_type == "BONUS" else total
+            errors = []
+            if quantity <= 0:
+                errors.append("Ilość musi być większa od zera.")
+            if not currency.strip():
+                errors.append("Waluta jest wymagana.")
+            if acquisition_type == "BUY" and final_total <= 0:
+                errors.append("Koszt zakupu musi być większy od zera (albo wybierz „Bonus”).")
+            if product and not product["name"].strip():
+                errors.append("Nazwa produktu jest wymagana.")
+            if product and pure_grams_per_piece(product["unit_weight"], product["weight_unit"], product["fineness"]) is None:
+                errors.append("Podaj masę sztuki i próbę (ułamek 0–1 albo promile 100–1000).")
+            for error in errors:
+                st.error(error)
+            if errors:
+                return
+            if product:
+                metal = "GOLD" if asset_class_of(position) == PHYSICAL_GOLD else "SILVER"
+                name = product.pop("name").strip()
+                _save_new_asset_position(
+                    portfolio_conn, user, ticker=f"{'Złoto' if metal == 'GOLD' else 'Srebro'}: {name}"[:40], name=name,
+                    fields={"asset_class": asset_class_of(position), "metal": metal,
+                            "price_provider": position.get("price_provider"), **product},
+                    broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
+                    total=final_total, fees=fees, fx_rate=fx_rate, note=note, acquisition_type=acquisition_type,
+                )
+            else:
+                transaction_id = insert_purchase_transaction(
+                    portfolio_conn, position_id=position["position_id"], broker=broker,
+                    acquisition_type=acquisition_type, purchase_date=str(purchase_date), shares=quantity,
+                    total_invested=final_total, currency=currency.strip(),
+                    price_per_share=(final_total / quantity) if acquisition_type == "BUY" else None,
+                    fees=(fees or None), note=(note.strip() or None),
+                )
+                if fx_rate and currency.strip().upper() != "PLN":
+                    set_transaction_fx_rate(
+                        portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate,
+                    )
+                portfolio_conn.commit()
+            st.toast("Zapisano kopię transakcji.")
+            st.rerun()
+
+
 _NEW_ASSET_KINDS = ("Instrument giełdowy (akcja/ETF/ETC/ETN)", "Złoto fizyczne", "Srebro fizyczne", "Kryptowaluta")
 
 
@@ -1826,7 +1975,7 @@ def _render_purchase_fields(key_prefix: str, *, default_broker_index: int = 0, q
 
 def _save_new_asset_position(
     portfolio_conn, user: dict, *, ticker: str, name: str, fields: dict, broker: str, purchase_date, quantity: float,
-    currency: str, total: float, fees: float, fx_rate: float, note: str,
+    currency: str, total: float, fees: float, fx_rate: float, note: str, acquisition_type: str = "BUY",
 ) -> None:
     position_id = insert_position(
         portfolio_conn, user_id=user["user_id"], ticker=ticker, company_name=name,
@@ -1834,9 +1983,10 @@ def _save_new_asset_position(
     )
     update_position_fields(portfolio_conn, position_id, **fields)
     transaction_id = insert_purchase_transaction(
-        portfolio_conn, position_id=position_id, broker=broker, acquisition_type="BUY",
+        portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
         purchase_date=str(purchase_date), shares=quantity, total_invested=total, currency=currency.strip(),
-        price_per_share=total / quantity, fees=(fees or None), note=(note.strip() or None),
+        price_per_share=(total / quantity) if acquisition_type == "BUY" else None,
+        fees=(fees or None), note=(note.strip() or None),
     )
     if fx_rate and currency.strip().upper() != "PLN":
         set_transaction_fx_rate(portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate)
@@ -1956,6 +2106,11 @@ def _render_add_transaction_tab(portfolio_conn, scanner_conn, user: dict) -> Non
     pozycji dla tego samego instrumentu."""
     positions_with_summaries = get_user_positions_with_summaries(portfolio_conn, scanner_conn, user["user_id"])
     positions = [dict(p) for p, _ in positions_with_summaries]
+
+    mode = st.radio("Co chcesz zrobić?", _ADD_MODES, horizontal=True, key="add_tx_mode")
+    if mode == _ADD_MODES[1]:
+        _render_copy_transaction(portfolio_conn, user, positions)
+        return
 
     options = ["+ Nowa pozycja"] + [f"{p['ticker']} — {p['company_name']}" for p in positions]
     choice = st.selectbox("Pozycja", options, key="add_tx_position_choice")
