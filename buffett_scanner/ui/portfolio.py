@@ -297,6 +297,9 @@ def retype_defaults(kind: str, row, new_type: str) -> dict:
     # wpływ po opłatach (netto). Zakup -> sprzedaż: dotychczasowa kwota
     # traktowana jako wpływ netto (cena = (kwota + opłaty) / liczba).
     defaults["fees_unknown"] = fees_unknown_default(row)
+    # BONUS: wartość informacyjna z dnia otrzymania -- tylko z samego wpisu
+    # BONUS; kwota zakupu nie jest automatycznie traktowana jako wartość prezentu.
+    defaults["received_value"] = float(_field(row, "received_value") or 0.0) if kind == "PURCHASE" else 0.0
     if new_type == "SELL":
         defaults["amount"] = sale_amounts(row)[1] if kind == "SALE" else float(row["total_invested"] or 0.0)
     else:

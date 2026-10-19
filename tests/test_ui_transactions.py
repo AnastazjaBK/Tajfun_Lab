@@ -271,3 +271,67 @@ def test_historic_bitcoin_purchase_can_be_marked_unsplit_then_split_without_chan
     history = conn.execute("SELECT transaction_id, fee_status, voided_at FROM purchase_transactions ORDER BY transaction_id").fetchall()
     assert [(r["transaction_id"], r["fee_status"], r["voided_at"] is not None) for r in history] == [
         (legacy, None, True), (marked, FEES_UNSPLIT, True), (split, FEES_KNOWN, False)]  # nic nie zniknęło
+
+
+# --- BONUS dla wszystkich klas aktywów (2026-10-19) ---
+
+from buffett_scanner.ui.assets import category_summaries  # noqa: E402
+
+
+@pytest.mark.parametrize("asset_class,category", [
+    ("STOCK", "STOCKS"), ("ETF", "FUNDS"), ("ETC", "FUNDS"), ("ETN", "FUNDS"),
+    ("PHYSICAL_SILVER", "SILVER"), ("PHYSICAL_GOLD", "GOLD"), ("COMMODITY", "PLATFORM_METALS"), ("CRYPTO", "CRYPTO"),
+])
+def test_bonus_adds_units_at_zero_cost_in_every_asset_class(asset_class, category):
+    gift = dict(buy(1, "2026-05-01", 1.0, 0.0, acq="BONUS"), received_value=150.0)
+    s = summary([gift], [], price=200.0)
+    [sub] = s.by_broker_currency
+    assert sub.shares_held == 1.0 and sub.total_invested == 0.0 and sub.invested_pln == 0.0
+    assert sub.current_value_pln == pytest.approx(200.0)  # wycena jak każdej jednostki
+    cats = category_summaries([({"ticker": "X", "asset_class": asset_class}, s)])
+    data = cats[category]
+    assert data["value_pln"] == pytest.approx(200.0) and data["cost_pln"] == 0.0  # 150 (wartość prezentu) to NIE koszt
+    assert data["unrealized_pl_pln"] == pytest.approx(200.0) and data["active_count"] == 1
+
+
+def test_selling_bonus_units_realizes_full_proceeds_and_mixed_cost_is_averaged():
+    gift = buy(2, "2026-02-01", 1.0, 0.0, acq="BONUS")
+    s = summary([buy(1, "2026-01-01", 1.0, 100.0), gift], [sell(1, "2026-03-01", 1.0, 120.0, fees=1.0)])
+    [sub] = s.by_broker_currency
+    assert sub.realized_pl == pytest.approx(119.0 - 50.0)  # średni koszt 50 (100 za 2 jednostki)
+    assert sub.shares_held == 1.0 and sub.total_invested == pytest.approx(50.0)
+
+
+def test_bonus_received_value_is_stored_separately_and_type_change_to_bonus(conn):
+    uid = db.create_user(conn, "Anastazja")
+    pid = db.insert_position(conn, user_id=uid, ticker="Srebro: Filharmonik", company_name="Filharmonik 1 oz")
+    db.update_position_fields(conn, pid, asset_class="PHYSICAL_SILVER", metal="SILVER")
+    wrong = db.insert_purchase_transaction(conn, position_id=pid, broker="OTHER", acquisition_type="BUY",
+                                           purchase_date="2026-06-01", shares=1.0, total_invested=180.0,
+                                           currency="PLN", note="prezent")
+    conn.commit()
+    row = dict(db.get_purchase_transactions(conn, pid)[0])
+    assert retype_defaults("PURCHASE", row, "BONUS")["received_value"] == 0.0  # kwota zakupu nie jest przenoszona
+    new_id = apply_transaction_change(
+        conn, pid, kind="PURCHASE", old_id=wrong, current_type="BUY", new_type="BONUS", note="prezent",
+        new_row={"broker": "OTHER", "currency": "PLN", "shares": 1.0, "purchase_date": "2026-06-01",
+                 "received_value": 180.0},
+    )
+    [active] = db.get_purchase_transactions(conn, pid)
+    assert (active["transaction_id"], active["acquisition_type"], active["total_invested"], active["received_value"],
+            active["note"]) == (new_id, "BONUS", 0.0, 180.0, "prezent")
+    [sub] = summary([dict(active)], [], price=200.0).by_broker_currency
+    assert sub.total_invested == 0.0 and sub.unrealized_pl == pytest.approx(200.0)
+    assert conn.execute("SELECT total_invested FROM purchase_transactions WHERE transaction_id = ?",
+                        (wrong,)).fetchone()[0] == 180.0  # stary wpis zostaje w historii bez zmian
+
+
+def test_received_value_is_ignored_for_non_bonus_rows(conn):
+    pid, wrong, _ = _position_with_wrong_buy(conn)
+    new_id = apply_transaction_change(
+        conn, pid, kind="PURCHASE", old_id=wrong, current_type="BUY", new_type="BUY",
+        new_row={"broker": "REVOLUT", "currency": "PLN", "shares": 10, "purchase_date": "2026-03-01",
+                 "total_invested": 1200.0, "fees": 2.0, "received_value": 999.0},
+    )
+    row = conn.execute("SELECT received_value FROM purchase_transactions WHERE transaction_id = ?", (new_id,)).fetchone()
+    assert row["received_value"] is None

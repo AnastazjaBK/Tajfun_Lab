@@ -1682,6 +1682,19 @@ def _render_amount_fields(key: str, *, side: str, amount: float = 0.0, fees: flo
     return includes, amount, fees, fees_unknown
 
 
+def _render_bonus_fields(key: str, *, received_value: float = 0.0) -> float | None:
+    """BONUS (wewnątrz st.form): jednostki bez wydatku -- koszt nabycia 0.
+    Wartość z dnia otrzymania jest zapisywana OSOBNO, tylko informacyjnie:
+    nie jest kosztem i aplikacja nie zakłada, że to wartość podatkowa."""
+    st.caption("Bonus: jednostki otrzymane bez wydatku (np. prezent, akcje za darmo) — koszt nabycia 0.")
+    value = st.number_input(
+        "Wartość w dniu otrzymania (opcjonalnie, informacyjnie — nie jest kosztem)", min_value=0.0,
+        value=float(received_value or 0.0), step=0.01, format="%.2f", key=f"{key}_received",
+        help="W walucie transakcji. Zapisywana osobno od kosztu; nie wpływa na koszt, wynik ani wycenę.",
+    )
+    return value or None
+
+
 def _resolve_buy(fields: tuple[bool, float, float, bool]) -> tuple[float, float | None, str]:
     includes, amount, fees, unknown = fields
     total, fees, status = resolve_purchase_amounts(amount, fees, amount_includes_fees=includes, fees_unknown=unknown)
@@ -1732,13 +1745,16 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
             "Ilość": _format_shares(row["shares"]),
             "Kwota": (
                 f"{sale_amounts(row)[1]:.2f} {row['currency']}" if kind == "SALE"
-                else f"{row['total_invested']:.2f} {row['currency']}"
+                else f"0.00 {row['currency']} (koszt)"
+                + (f" · wartość w dniu otrzymania {row['received_value']:.2f}" if row.get("received_value") else "")
+                if tx_type == "BONUS" else f"{row['total_invested']:.2f} {row['currency']}"
             ),
             "Opłaty": _fees_text(kind, row),
         })
     st.dataframe(history, hide_index=True, use_container_width=True)
     st.caption(
-        "Kwota: zakup — łączny koszt z opłatami; sprzedaż — wpływ po opłatach. "
+        "Kwota: zakup — łączny koszt z opłatami; sprzedaż — wpływ po opłatach; bonus — koszt 0 "
+        "(wartość w dniu otrzymania tylko informacyjnie, nie jest kosztem). "
         "„w kwocie (nieznane)” = opłaty zawarte w kwocie, wysokość nierozdzielona. "
         "Sposób rozliczenia opłat zmienisz poniżej: wybierz transakcję, ten sam typ, popraw kwotę/opłaty i zapisz."
     )
@@ -1773,14 +1789,17 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
         shares = st.number_input("Liczba jednostek", min_value=0.0, value=defaults["shares"], step=0.00000001,
                                  format="%.8f", key=f"{key}_shares")
         currency = st.text_input("Waluta", value=defaults["currency"], key=f"{key}_ccy")
-        amount_fields = None
+        amount_fields, received_value = None, None
         if new_type in ("BUY", "SELL"):
             amount_fields = _render_amount_fields(
                 key, side=new_type, amount=defaults["amount"], fees=defaults["fees"],
                 fees_unknown=defaults["fees_unknown"],
             )
         else:
-            st.caption("Bonus: bezpłatne jednostki — koszt 0.")
+            received_value = _render_bonus_fields(key, received_value=defaults["received_value"])
+            if current_type == "BUY":
+                st.caption(f"Dotychczasowa kwota zakupu: {defaults['total_invested']:.2f} {defaults['currency']} — "
+                           "nie jest przenoszona automatycznie; jeśli to wartość prezentu, wpisz ją powyżej.")
         fx_rate = st.number_input(
             "Kurs brokera (opcjonalnie, waluta inna niż PLN): ile PLN za 1 jednostkę waluty", min_value=0.0,
             value=float(defaults["fx_rate_actual"]), step=0.0001, format="%.4f", key=f"{key}_fx",
@@ -1808,6 +1827,7 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
                 "purchase_date": str(tx_date), "sale_date": str(tx_date),
                 "acquisition_type": new_type if new_type != "SELL" else None,
                 "total_invested": total_invested, "sale_price": sale_price, "fees": fees, "fee_status": fee_status,
+                "received_value": received_value,
             }
             if not errors:
                 negative = find_negative_holding(*replace_transaction(
@@ -2049,11 +2069,11 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
         purchase_date = st.date_input("Data transakcji", key="new_pos_date")
         shares = st.number_input("Liczba (akcji / sztuk / jednostek)", min_value=0.0, step=0.00000001, format="%.8f", key="new_pos_shares")
         currency = st.text_input("Waluta transakcji (np. PLN, USD, EUR)", key="new_pos_currency")
-        amount_fields = None
+        amount_fields, received_value = None, None
         if acquisition_type == "BUY":
             amount_fields = _render_amount_fields("new_pos", side="BUY")
         else:
-            st.caption("Bonus: bezpłatne jednostki — koszt 0.")
+            received_value = _render_bonus_fields("new_pos")
         fx_rate = st.number_input(
             "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
             min_value=0.0, step=0.0001, format="%.4f", key="new_pos_fx",
@@ -2094,7 +2114,7 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
                     portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                     purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                     currency=currency.strip(), price_per_share=price_per_share,
-                    fees=fees, note=(note.strip() or None), fee_status=fee_status,
+                    fees=fees, note=(note.strip() or None), fee_status=fee_status, received_value=received_value,
                 )
                 if fx_rate and currency.strip().upper() != "PLN":
                     set_transaction_fx_rate(
@@ -2126,11 +2146,11 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             currency = st.text_input(
                 "Waluta transakcji", value=position["instrument_currency"] or "", key=f"ep_currency_{position_id}",
             )
-            amount_fields = None
+            amount_fields, received_value = None, None
             if acquisition_type == "BUY":
                 amount_fields = _render_amount_fields(f"ep_{position_id}", side="BUY")
             else:
-                st.caption("Bonus: bezpłatne jednostki — koszt 0.")
+                received_value = _render_bonus_fields(f"ep_{position_id}")
             fx_rate = st.number_input(
                 "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
                 min_value=0.0, step=0.0001, format="%.4f", key=f"ep_fx_{position_id}",
@@ -2158,7 +2178,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                         portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                         purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                         currency=currency.strip(), price_per_share=price_per_share,
-                        fees=fees, note=(note.strip() or None), fee_status=fee_status,
+                        fees=fees, note=(note.strip() or None), fee_status=fee_status, received_value=received_value,
                     )
                     if fx_rate and currency.strip().upper() != "PLN":
                         set_transaction_fx_rate(
@@ -2307,14 +2327,14 @@ def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) 
             format="%.8f", key=f"{key}_qty",
         )
         currency = st.text_input("Waluta", value=tx["currency"], key=f"{key}_ccy")
-        amount_fields = None
+        amount_fields, received_value = None, None
         if acquisition_type == "BUY":
             amount_fields = _render_amount_fields(
                 key, side="BUY", amount=tx["total_invested"] or 0.0, fees=tx["fees"] or 0.0,
                 fees_unknown=fees_unknown_default(tx),
             )
         else:
-            st.caption("Bonus: bezpłatne jednostki — koszt 0.")
+            received_value = _render_bonus_fields(key, received_value=dict(tx).get("received_value") or 0.0)
         fx_rate = st.number_input(
             "Kurs brokera (opcjonalnie, waluta inna niż PLN)", min_value=0.0,
             value=float(tx["fx_rate_actual"] or 0.0), step=0.0001, format="%.4f", key=f"{key}_fx",
@@ -2349,7 +2369,7 @@ def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) 
                             "price_provider": position.get("price_provider"), **product},
                     broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
                     total=final_total, fees=fees, fx_rate=fx_rate, note=note, acquisition_type=acquisition_type,
-                    fee_status=fee_status,
+                    fee_status=fee_status, received_value=received_value,
                 )
             else:
                 transaction_id = insert_purchase_transaction(
@@ -2357,7 +2377,7 @@ def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) 
                     acquisition_type=acquisition_type, purchase_date=str(purchase_date), shares=quantity,
                     total_invested=final_total, currency=currency.strip(),
                     price_per_share=(final_total / quantity) if acquisition_type == "BUY" else None,
-                    fees=fees, note=(note.strip() or None), fee_status=fee_status,
+                    fees=fees, note=(note.strip() or None), fee_status=fee_status, received_value=received_value,
                 )
                 if fx_rate and currency.strip().upper() != "PLN":
                     set_transaction_fx_rate(
@@ -2392,28 +2412,46 @@ def _render_fund_fields(key_prefix: str) -> dict:
     return {"metal": metal or None, "exposure_type": exposure or None, "annual_fee_pct": fee or None}
 
 
-def _render_purchase_fields(key_prefix: str, *, default_broker_index: int = 0, quantity_label: str = "Liczba sztuk"):
-    """Wspólne pola zakupu dla metali i kryptowalut (wewnątrz st.form)."""
+def _render_purchase_fields(key_prefix: str, *, default_broker_index: int = 0, quantity_label: str = "Liczba sztuk",
+                            acquisition_type: str = "BUY"):
+    """Wspólne pola zakupu/bonusu dla metali i kryptowalut (wewnątrz st.form)."""
     broker = st.selectbox(
         "Platforma / miejsce zakupu", _BROKER_OPTIONS, index=default_broker_index, format_func=broker_label,
         key=f"{key_prefix}_broker",
     )
-    purchase_date = st.date_input("Data zakupu", key=f"{key_prefix}_date")
+    bonus = acquisition_type == "BONUS"
+    purchase_date = st.date_input("Data otrzymania" if bonus else "Data zakupu", key=f"{key_prefix}_date")
     quantity = st.number_input(quantity_label, min_value=0.0, step=0.00000001, format="%.8f", key=f"{key_prefix}_qty")
-    currency = st.text_input("Waluta zakupu (np. PLN, USD, EUR)", key=f"{key_prefix}_ccy")
-    amount_fields = _render_amount_fields(key_prefix, side="BUY")
+    currency = st.text_input("Waluta (np. PLN, USD, EUR)", value="PLN", key=f"{key_prefix}_ccy")
+    amount_fields, received_value = None, None
+    if bonus:
+        received_value = _render_bonus_fields(key_prefix)
+    else:
+        amount_fields = _render_amount_fields(key_prefix, side="BUY")
     fx_rate = st.number_input(
         "Kurs (opcjonalnie, waluta inna niż PLN): ile PLN za 1 jednostkę waluty", min_value=0.0, step=0.0001,
         format="%.4f", key=f"{key_prefix}_fx",
     )
     note = st.text_input("Notatka (opcjonalnie)", key=f"{key_prefix}_note")
-    return broker, purchase_date, quantity, currency, amount_fields, fx_rate, note
+    return broker, purchase_date, quantity, currency, amount_fields, received_value, fx_rate, note
+
+
+def _new_asset_amounts(amount_fields) -> tuple[float, float | None, str | None, list[str]]:
+    """(koszt, opłaty, fee_status, błędy) dla nowej pozycji metalu/krypto;
+    BONUS (brak pól kwoty) -> koszt 0."""
+    if amount_fields is None:
+        return 0.0, None, None, []
+    try:
+        total, fees, fee_status = _resolve_buy(amount_fields)
+    except AmountError as exc:
+        return 0.0, None, None, [str(exc)]
+    return total, fees, fee_status, []
 
 
 def _save_new_asset_position(
     portfolio_conn, user: dict, *, ticker: str, name: str, fields: dict, broker: str, purchase_date, quantity: float,
     currency: str, total: float, fees: float | None, fx_rate: float, note: str, acquisition_type: str = "BUY",
-    fee_status: str | None = None,
+    fee_status: str | None = None, received_value: float | None = None,
 ) -> None:
     position_id = insert_position(
         portfolio_conn, user_id=user["user_id"], ticker=ticker, company_name=name,
@@ -2425,6 +2463,7 @@ def _save_new_asset_position(
         purchase_date=str(purchase_date), shares=quantity, total_invested=total, currency=currency.strip(),
         price_per_share=(total / quantity) if acquisition_type == "BUY" else None,
         fees=fees, note=(note.strip() or None), fee_status=fee_status,
+        received_value=received_value if acquisition_type == "BONUS" else None,
     )
     if fx_rate and currency.strip().upper() != "PLN":
         set_transaction_fx_rate(portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate)
@@ -2448,7 +2487,8 @@ def _render_new_physical_metal_form(portfolio_conn, user: dict, asset_class: str
     kolekcjonerska tylko wyceną ręczną. Cenę odkupu wpisuje się w karcie."""
     metal = "GOLD" if asset_class == PHYSICAL_GOLD else "SILVER"
     st.markdown(f"##### Nowa pozycja: {ASSET_CLASS_LABELS[asset_class].lower()}")
-    with st.form(f"new_{asset_class}_form", clear_on_submit=True):
+    acquisition_type = _render_acquisition_type_picker(f"{asset_class}_acq")
+    with st.form(f"new_{asset_class}_{acquisition_type}_form", clear_on_submit=True):
         name = st.text_input("Nazwa produktu (np. Krugerrand 1 oz, sztabka 10 g)", key=f"{asset_class}_name")
         form = st.selectbox("Rodzaj", list(PRODUCT_FORM_LABELS), format_func=PRODUCT_FORM_LABELS.get,
                             key=f"{asset_class}_form")
@@ -2467,18 +2507,12 @@ def _render_new_physical_metal_form(portfolio_conn, user: dict, asset_class: str
             "Moneta kolekcjonerska (wycena tylko ręczna, nie po cenie metalu)", key=f"{asset_class}_coll",
         )
         storage = st.text_input("Miejsce przechowywania (opcjonalnie)", key=f"{asset_class}_storage")
-        broker, purchase_date, quantity, currency, amount_fields, fx_rate, note = _render_purchase_fields(
-            asset_class, default_broker_index=_BROKER_OPTIONS.index("OTHER"),
+        broker, purchase_date, quantity, currency, amount_fields, received_value, fx_rate, note = _render_purchase_fields(
+            asset_class, default_broker_index=_BROKER_OPTIONS.index("OTHER"), acquisition_type=acquisition_type,
         )
         if st.form_submit_button("Zapisz"):
-            total, fees, fee_status = 0.0, None, None
-            try:
-                total, fees, fee_status = _resolve_buy(amount_fields)
-            except AmountError as exc:
-                errors_amount = [str(exc)]
-            else:
-                errors_amount = []
-            errors = errors_amount + _purchase_errors(quantity, currency, total or 1.0)
+            total, fees, fee_status, errors = _new_asset_amounts(amount_fields)
+            errors += _purchase_errors(quantity, currency, total or 1.0)
             if not name.strip():
                 errors.append("Nazwa produktu jest wymagana.")
             if pure_grams_per_piece(unit_weight, weight_unit, fineness) is None:
@@ -2495,6 +2529,7 @@ def _render_new_physical_metal_form(portfolio_conn, user: dict, asset_class: str
                             "price_provider": "NBP" if metal == "GOLD" else "FMP"},
                     broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
                     total=total, fees=fees, fx_rate=fx_rate, note=note, fee_status=fee_status,
+                    acquisition_type=acquisition_type, received_value=received_value,
                 )
                 st.toast("Zapisano pozycję.")
                 st.rerun()
@@ -2508,23 +2543,31 @@ def _render_new_commodity_form(portfolio_conn, user: dict) -> None:
     Kolejny zakup tego samego metalu dopisuje się do istniejącej pozycji."""
     st.markdown("##### Złoto/srebro na platformie (np. Revolut)")
     st.caption("Metal kupiony w aplikacji platformy, nieprzechowywany przez Ciebie. Ilość w uncjach trojańskich (oz).")
-    with st.form("new_commodity_form", clear_on_submit=True):
+    acquisition_type = _render_acquisition_type_picker("commodity_acq")
+    bonus = acquisition_type == "BONUS"
+    with st.form(f"new_commodity_{acquisition_type}_form", clear_on_submit=True):
         symbol = st.selectbox("Instrument", list(_COMMODITY_LABELS), format_func=_COMMODITY_LABELS.get,
                               key="commodity_symbol")
         broker = st.selectbox("Platforma", _BROKER_OPTIONS, index=_BROKER_OPTIONS.index("REVOLUT"),
                               format_func=broker_label, key="commodity_broker")
-        purchase_date = st.date_input("Data transakcji", key="commodity_date")
+        purchase_date = st.date_input("Data otrzymania" if bonus else "Data transakcji", key="commodity_date")
         quantity = st.number_input("Ilość (oz, do 8 miejsc po przecinku)", min_value=0.0, step=0.00000001,
                                    format="%.8f", key="commodity_qty")
-        cols = st.columns(2)
-        price = cols[0].number_input("Cena za 1 oz (z platformy)", min_value=0.0, step=0.01, format="%.4f",
-                                     key="commodity_price")
-        currency = cols[1].text_input("Waluta", value="PLN", key="commodity_ccy")
-        fee = st.number_input("Opłata", min_value=0.0, step=0.01, format="%.2f", key="commodity_fee")
-        total = st.number_input(
-            "Łączny koszt (cała kwota, która zeszła z konta; puste = ilość × cena + opłata)",
-            min_value=0.0, step=0.01, format="%.2f", key="commodity_total",
-        )
+        price = fee = total = 0.0
+        received_value = None
+        if bonus:
+            currency = st.text_input("Waluta", value="PLN", key="commodity_ccy")
+            received_value = _render_bonus_fields("commodity")
+        else:
+            cols = st.columns(2)
+            price = cols[0].number_input("Cena za 1 oz (z platformy)", min_value=0.0, step=0.01, format="%.4f",
+                                         key="commodity_price")
+            currency = cols[1].text_input("Waluta", value="PLN", key="commodity_ccy")
+            fee = st.number_input("Opłata", min_value=0.0, step=0.01, format="%.2f", key="commodity_fee")
+            total = st.number_input(
+                "Łączny koszt (cała kwota, która zeszła z konta; puste = ilość × cena + opłata)",
+                min_value=0.0, step=0.01, format="%.2f", key="commodity_total",
+            )
         fx_rate = st.number_input(
             "Kurs (opcjonalnie, waluta inna niż PLN): ile PLN za 1 jednostkę waluty", min_value=0.0, step=0.0001,
             format="%.4f", key="commodity_fx",
@@ -2533,13 +2576,13 @@ def _render_new_commodity_form(portfolio_conn, user: dict) -> None:
             "Opłata platformy przy sprzedaży % (opcjonalnie — do kwoty możliwej do uzyskania)",
             min_value=0.0, max_value=99.0, step=0.01, format="%.2f", key="commodity_sale_fee",
         )
-        note = st.text_input("Notatka (opcjonalnie)", key="commodity_note")
+        note = st.text_input("Notatka (opcjonalnie, np. „prezent”)", key="commodity_note")
         if st.form_submit_button("Zapisz"):
-            final_total = total if total > 0 else quantity * price + fee
-            errors = _purchase_errors(quantity, currency, final_total)
-            if price <= 0:
+            final_total = 0.0 if bonus else (total if total > 0 else quantity * price + fee)
+            errors = _purchase_errors(quantity, currency, 1.0 if bonus else final_total)
+            if not bonus and price <= 0:
                 errors.append("Cena za 1 oz musi być większa od zera.")
-            if not errors and total > 0:
+            if not bonus and not errors and total > 0:
                 mismatch = commodity_cost_error(quantity, price, fee, total)
                 if mismatch:
                     errors.append(mismatch)
@@ -2550,16 +2593,19 @@ def _render_new_commodity_form(portfolio_conn, user: dict) -> None:
                     portfolio_conn, user, symbol=symbol, broker=broker, purchase_date=purchase_date,
                     quantity=quantity, price=price, currency=currency.strip().upper(), fee=fee,
                     total=round(final_total, 2), fx_rate=fx_rate, sale_fee_pct=sale_fee or None, note=note,
+                    acquisition_type=acquisition_type, received_value=received_value,
                 )
-                st.toast(f"Zapisano zakup {symbol}.")
+                st.toast(f"Zapisano {'bonus' if bonus else 'zakup'} {symbol}.")
                 st.rerun()
 
 
 def _save_commodity_purchase(
     portfolio_conn, user: dict, *, symbol: str, broker: str, purchase_date, quantity: float, price: float,
     currency: str, fee: float, total: float, fx_rate: float, sale_fee_pct: float | None, note: str,
+    acquisition_type: str = "BUY", received_value: float | None = None,
 ) -> None:
     metal = COMMODITY_SYMBOLS[symbol]
+    bonus = acquisition_type == "BONUS"
     existing = [
         p for p in get_positions_for_user(portfolio_conn, user["user_id"])
         if asset_class_of(p) == COMMODITY and (dict(p).get("price_symbol") or p["ticker"]) == symbol
@@ -2579,9 +2625,10 @@ def _save_commodity_purchase(
     if sale_fee_pct is not None:
         update_position_fields(portfolio_conn, position_id, sale_fee_pct=sale_fee_pct)
     transaction_id = insert_purchase_transaction(
-        portfolio_conn, position_id=position_id, broker=broker, acquisition_type="BUY",
-        purchase_date=str(purchase_date), shares=quantity, total_invested=total, currency=currency,
-        price_per_share=price, fees=fee, note=(note.strip() or None), fee_status=FEES_KNOWN,
+        portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
+        purchase_date=str(purchase_date), shares=quantity, total_invested=0.0 if bonus else total, currency=currency,
+        price_per_share=None if bonus else price, fees=None if bonus else fee, note=(note.strip() or None),
+        fee_status=None if bonus else FEES_KNOWN, received_value=received_value if bonus else None,
     )
     if fx_rate and currency != "PLN":
         set_transaction_fx_rate(portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate)
@@ -2608,20 +2655,15 @@ def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
             name = quote.get("name") or symbol
             st.success(f"FMP: **{name}** — cena {quote['price']:,.2f} {symbol[-3:]}.")
             confirmed = st.checkbox("Tak, to właściwe aktywo", key="crypto_confirm")
-    with st.form("new_crypto_form", clear_on_submit=True):
+    acquisition_type = _render_acquisition_type_picker("crypto_acq")
+    with st.form(f"new_crypto_{acquisition_type}_form", clear_on_submit=True):
         storage = st.text_input("Gdzie przechowywane (giełda/portfel, opcjonalnie)", key="crypto_storage")
-        broker, purchase_date, quantity, currency, amount_fields, fx_rate, note = _render_purchase_fields(
-            "crypto", quantity_label="Ilość (do 8 miejsc po przecinku)",
+        broker, purchase_date, quantity, currency, amount_fields, received_value, fx_rate, note = _render_purchase_fields(
+            "crypto", quantity_label="Ilość (do 8 miejsc po przecinku)", acquisition_type=acquisition_type,
         )
         if st.form_submit_button("Zapisz"):
-            total, fees, fee_status = 0.0, None, None
-            try:
-                total, fees, fee_status = _resolve_buy(amount_fields)
-            except AmountError as exc:
-                errors_amount = [str(exc)]
-            else:
-                errors_amount = []
-            errors = errors_amount + _purchase_errors(quantity, currency, total or 1.0)
+            total, fees, fee_status, errors = _new_asset_amounts(amount_fields)
+            errors += _purchase_errors(quantity, currency, total or 1.0)
             if not confirmed:
                 errors.append("Najpierw sprawdź parę notowania i potwierdź aktywo.")
             for error in errors:
@@ -2633,6 +2675,7 @@ def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
                             "quote_currency": symbol[-3:], "storage_location": storage.strip() or None},
                     broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
                     total=total, fees=fees, fx_rate=fx_rate, note=note, fee_status=fee_status,
+                    acquisition_type=acquisition_type, received_value=received_value,
                 )
                 st.session_state.pop("crypto_lookup", None)
                 st.toast("Zapisano pozycję.")

@@ -392,6 +392,7 @@ def apply_transaction_change(
                 purchase_date=new_row["purchase_date"], shares=new_row["shares"], total_invested=total,
                 currency=new_row["currency"], price_per_share=(total / new_row["shares"]) if new_type == "BUY" else None,
                 fees=new_row.get("fees"), note=note or None, fee_status=new_row.get("fee_status"),
+                received_value=new_row.get("received_value") if new_type == "BONUS" else None,
             )
             new_kind, table = "PURCHASE", "zakup"
         else:

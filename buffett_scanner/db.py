@@ -805,6 +805,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("sale_transactions", "fx_rate_actual", "REAL"),
     ("purchase_transactions", "fee_status", "TEXT"),  # patrz pg_store.PG_COLUMN_MIGRATIONS
     ("sale_transactions", "fee_status", "TEXT"),
+    ("purchase_transactions", "received_value", "REAL"),  # BONUS, informacyjnie -- patrz pg_store
 )
 
 # Faza 11 -- nowe tabele portfela (patrz `pg_store.PG_NEW_TABLES`).
@@ -1994,6 +1995,7 @@ def insert_purchase_transaction(
     fees: float | None = None,
     note: str | None = None,
     fee_status: str | None = None,
+    received_value: float | None = None,
 ) -> int:
     """`acquisition_type='BONUS'` -- wołający MUSI przekazać
     `total_invested=0` (Decyzja właścicielki, Faza 7 pkt 3: "nigdy nie
@@ -2004,12 +2006,12 @@ def insert_purchase_transaction(
         """
         INSERT INTO purchase_transactions (
             position_id, broker, acquisition_type, purchase_date, shares,
-            price_per_share, total_invested, currency, fees, note, fee_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            price_per_share, total_invested, currency, fees, note, fee_status, received_value
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             position_id, broker, acquisition_type, purchase_date, shares,
-            price_per_share, total_invested, currency, fees, note, fee_status,
+            price_per_share, total_invested, currency, fees, note, fee_status, received_value,
         ),
     )
     return cur.lastrowid

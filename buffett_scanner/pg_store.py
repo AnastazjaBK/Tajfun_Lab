@@ -189,6 +189,9 @@ PG_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # nieznana; NULL = wpis sprzed tej zmiany (nic nie zakładamy).
     ("purchase_transactions", "fee_status", "TEXT"),
     ("sale_transactions", "fee_status", "TEXT"),
+    # BONUS: wartość otrzymanych jednostek w dniu otrzymania (waluta
+    # transakcji) -- WYŁĄCZNIE informacyjnie, nigdy koszt nabycia.
+    ("purchase_transactions", "received_value", "DOUBLE PRECISION"),
 )
 
 _PG_NOW = "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
@@ -651,15 +654,18 @@ def insert_purchase_transaction(
     conn, *, position_id: int, broker: str, acquisition_type: str, purchase_date: str,
     shares: float, total_invested: float, currency: str,
     price_per_share: float | None = None, fees: float | None = None, note: str | None = None,
-    fee_status: str | None = None,
+    fee_status: str | None = None, received_value: float | None = None,
 ) -> int:
     values = {
         "position_id": position_id, "broker": broker, "acquisition_type": acquisition_type,
         "purchase_date": purchase_date, "shares": shares, "price_per_share": price_per_share,
         "total_invested": total_invested, "currency": currency, "fees": fees, "note": note,
     }
-    if fee_status is not None:  # kolumna z 2026-10-19 -- bez niej zapis działa też na starszym schemacie
+    # Kolumny z 2026-10-19 -- pominięte, gdy puste, żeby zapis działał też na starszym schemacie.
+    if fee_status is not None:
         values["fee_status"] = fee_status
+    if received_value is not None:
+        values["received_value"] = received_value
     return _insert_returning(conn, "purchase_transactions", values, "transaction_id")
 
 
