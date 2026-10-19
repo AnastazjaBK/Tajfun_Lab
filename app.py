@@ -133,13 +133,18 @@ from buffett_scanner.ui.price_changes import (
     periods_affected,
 )
 from buffett_scanner.ui.portfolio import (
-    compute_broker_currency_subpositions,
     compute_portfolio_bar_summary,
     compute_portfolio_pln_summary,
+    find_negative_holding,
+    replace_transaction,
+    retype_defaults,
+    transaction_type,
 )
 from buffett_scanner.ui.market_data import EODHD_DAILY_BUDGET, MarketData
 from buffett_scanner.ui.pricing import FxRates, convert
 from buffett_scanner.ui.queries import (
+    TransactionChangeError,
+    apply_transaction_change,
     get_brokers_in_use_for_user,
     get_candidate_detail,
     get_latest_live_scan_run,
@@ -185,6 +190,8 @@ _BROKER_OPTIONS = ("TRADE_REPUBLIC", "REVOLUT", "CASHIFY", "GOLD_SAVER", "MENNIC
 # Sekcja 10 specyfikacji -- istniejący enum `purchase_transactions.
 # acquisition_type`.
 _ACQUISITION_TYPE_OPTIONS = ("BUY", "BONUS")
+_TRANSACTION_TYPES = ("BUY", "SELL", "BONUS")
+_TRANSACTION_TYPE_LABELS = {"BUY": "Zakup", "SELL": "Sprzedaż", "BONUS": "Bonus (bezpłatne jednostki)"}
 
 _VALUATION_SCENARIO_LABELS = (
     ("bear", "Pesymistyczny (BEAR)"),
@@ -1234,6 +1241,8 @@ def _position_forms_fragment(full_run_conn, position: dict, summary) -> None:
         else:
             with st.expander("Dywidendy otrzymane"):
                 _render_dividend_register(portfolio_conn, position)
+        with st.expander("Historia i edycja transakcji (zmiana typu: zakup / sprzedaż / bonus)"):
+            _render_transaction_editor(portfolio_conn, position)
         with st.expander("Popraw dane / anuluj błędny wpis"):
             _render_instrument_correction(portfolio_conn, position)
             st.markdown("---")
@@ -1496,6 +1505,140 @@ def _describe_transaction(kind: str, row) -> str:
     )
 
 
+def _negative_holding_message(negative: dict, what: str) -> str:
+    return (
+        f"{what}: {negative['date']} na {broker_label(negative['broker'])} ({negative['currency']}) "
+        f"sprzedaż {_format_shares(negative['sold'])} jedn., a w tym dniu posiadane były tylko "
+        f"{_format_shares(negative['held'])}. Zapis zablokowany — dane nie zostały zmienione. "
+        "Sprawdź datę, liczbę jednostek, platformę i walutę."
+    )
+
+
+def _render_transaction_editor(portfolio_conn, position: dict) -> None:
+    """Historia transakcji pozycji i edycja jednego wpisu, w tym zmiana
+    typu (zakup <-> sprzedaż, -> bonus). Zapis = nowy wpis właściwego typu
+    + anulowanie starego z powodem (istniejący mechanizm, sekcja 11 design
+    review: nic nie jest kasowane ani nadpisywane). Przed zapisem cała oś
+    czasu jest sprawdzana -- stan jednostek nigdy nie może spaść poniżej zera."""
+    position_id = position["position_id"]
+    purchases = [dict(r) for r in get_purchase_transactions(portfolio_conn, position_id)]
+    sales = [dict(r) for r in get_sale_transactions(portfolio_conn, position_id)]
+    entries = sorted(
+        [("PURCHASE", r) for r in purchases] + [("SALE", r) for r in sales],
+        key=lambda e: (e[1]["sale_date"] if e[0] == "SALE" else e[1]["purchase_date"], e[0] == "SALE"),
+    )
+    if not entries:
+        st.info("Brak aktywnych transakcji.")
+        return
+    history = []
+    for kind, row in entries:
+        tx_type = transaction_type(kind, row)
+        history.append({
+            "Data": row["sale_date"] if kind == "SALE" else row["purchase_date"],
+            "Typ": _TRANSACTION_TYPE_LABELS[tx_type].split(" (")[0],
+            "Platforma": broker_label(row["broker"]),
+            "Ilość": _format_shares(row["shares"]),
+            "Kwota / cena": (
+                f"{row['sale_price']:.4f} {row['currency']}/jedn." if kind == "SALE"
+                else f"{row['total_invested']:.2f} {row['currency']}"
+            ),
+            "Opłaty": f"{row['fees']:.2f}" if row.get("fees") else "—",
+        })
+    st.dataframe(history, hide_index=True, use_container_width=True)
+    st.caption("Kwota przy zakupie = cała kwota, która zeszła z konta; przy sprzedaży — cena za jednostkę.")
+
+    st.markdown("###### Edytuj transakcję")
+    index = st.selectbox(
+        "Transakcja", range(len(entries)), format_func=lambda i: _describe_transaction(*entries[i]),
+        key=f"edit_tx_{position_id}",
+    )
+    kind, row = entries[index]
+    current_type = transaction_type(kind, row)
+    new_type = st.radio(
+        "Typ po zmianie", _TRANSACTION_TYPES, index=_TRANSACTION_TYPES.index(current_type),
+        format_func=_TRANSACTION_TYPE_LABELS.get, horizontal=True, key=f"edit_type_{position_id}_{kind}_{row['transaction_id']}",
+    )
+    defaults = retype_defaults(kind, row, new_type)
+    if new_type != current_type:
+        st.caption(
+            f"Zmiana: {_TRANSACTION_TYPE_LABELS[current_type]} → {_TRANSACTION_TYPE_LABELS[new_type]}. "
+            "Pola wypełniono danymi z obecnego wpisu — sprawdź je z potwierdzeniem transakcji."
+            + (" Cena sprzedaży wyliczona jako (kwota + opłaty) / liczba jednostek."
+               if new_type == "SELL" and kind == "PURCHASE" else "")
+        )
+    key = f"edit_{kind}_{row['transaction_id']}_{new_type}"
+    with st.form(f"{key}_form"):
+        broker = st.selectbox(
+            "Platforma", _BROKER_OPTIONS, format_func=broker_label, key=f"{key}_broker",
+            index=_BROKER_OPTIONS.index(defaults["broker"]) if defaults["broker"] in _BROKER_OPTIONS else 0,
+        )
+        tx_date = st.date_input("Data transakcji", value=dt.date.fromisoformat(str(defaults["date"])[:10]),
+                                key=f"{key}_date")
+        shares = st.number_input("Liczba jednostek", min_value=0.0, value=defaults["shares"], step=0.00000001,
+                                 format="%.8f", key=f"{key}_shares")
+        currency = st.text_input("Waluta", value=defaults["currency"], key=f"{key}_ccy")
+        total_invested = sale_price = fees = 0.0
+        if new_type == "BUY":
+            total_invested = st.number_input(
+                "Kwota zakupu (cała kwota, która zeszła z konta)", min_value=0.0,
+                value=float(defaults["total_invested"]), step=0.01, format="%.2f", key=f"{key}_total",
+            )
+            fees = st.number_input("Opłaty (informacyjnie, już w kwocie)", min_value=0.0,
+                                   value=float(defaults["fees"]), step=0.01, format="%.2f", key=f"{key}_fees")
+        elif new_type == "SELL":
+            sale_price = st.number_input("Cena sprzedaży za jednostkę", min_value=0.0,
+                                         value=float(defaults["sale_price"]), step=0.0001, format="%.4f",
+                                         key=f"{key}_price")
+            fees = st.number_input("Opłaty sprzedaży (odejmowane od przychodu)", min_value=0.0,
+                                   value=float(defaults["fees"]), step=0.01, format="%.2f", key=f"{key}_fees")
+        else:
+            st.caption("Bonus: bezpłatne jednostki — koszt 0.")
+        fx_rate = st.number_input(
+            "Kurs brokera (opcjonalnie, waluta inna niż PLN): ile PLN za 1 jednostkę waluty", min_value=0.0,
+            value=float(defaults["fx_rate_actual"]), step=0.0001, format="%.4f", key=f"{key}_fx",
+        )
+        note = st.text_input("Notatka", value=defaults["note"], key=f"{key}_note")
+        if st.form_submit_button("Zapisz zmianę"):
+            currency = currency.strip()
+            errors = []
+            if shares <= 0:
+                errors.append("Liczba jednostek musi być większa od zera.")
+            if not currency:
+                errors.append("Waluta jest wymagana.")
+            if new_type == "BUY" and total_invested <= 0:
+                errors.append("Kwota zakupu musi być większa od zera (bezpłatne jednostki to „Bonus”).")
+            if new_type == "SELL" and sale_price <= 0:
+                errors.append("Cena sprzedaży musi być większa od zera.")
+            new_row = {
+                "transaction_id": None, "broker": broker, "currency": currency, "shares": shares,
+                "purchase_date": str(tx_date), "sale_date": str(tx_date),
+                "acquisition_type": new_type if new_type != "SELL" else None,
+                "total_invested": total_invested if new_type == "BUY" else 0.0,
+                "sale_price": sale_price, "fees": fees or None,
+            }
+            if not errors:
+                negative = find_negative_holding(*replace_transaction(
+                    purchases, sales, kind=kind, transaction_id=row["transaction_id"], new_type=new_type,
+                    new_row=new_row,
+                ))
+                if negative:
+                    errors.append(_negative_holding_message(negative, "Po tej zmianie"))
+            for error in errors:
+                st.error(error)
+            if not errors:
+                try:
+                    apply_transaction_change(
+                        portfolio_conn, position_id, kind=kind, old_id=row["transaction_id"],
+                        current_type=current_type, new_type=new_type, new_row=new_row, fx_rate=fx_rate,
+                        note=note.strip(),
+                    )
+                except TransactionChangeError as exc:
+                    st.error(f"Zapis zablokowany — dane nie zostały zmienione. {exc}")
+                else:
+                    st.toast(f"Zapisano: {_TRANSACTION_TYPE_LABELS[new_type]}.")
+                    st.rerun()
+
+
 def _render_transaction_voiding(portfolio_conn, position: dict) -> None:
     """Faza 9 -- anulowanie błędnego wpisu bez kasowania: wiersz zostaje
     w bazie z `voided_at` (audit trail, sekcja 11 design review) i
@@ -1563,17 +1706,11 @@ def _render_transaction_voiding(portfolio_conn, position: dict) -> None:
             kind, row = entries[index]
             remaining_purchases = [r for r in purchases if not (kind == "PURCHASE" and r is row)]
             remaining_sales = [r for r in sales if not (kind == "SALE" and r is row)]
-            negative = [
-                sub for sub in compute_broker_currency_subpositions(remaining_purchases, remaining_sales)
-                if sub.shares_held < -1e-9
-            ]
+            negative = find_negative_holding(remaining_purchases, remaining_sales)
             if not sure:
                 st.error("Zaznacz potwierdzenie, aby anulować transakcję.")
             elif negative:
-                st.error(
-                    "Po anulowaniu tego zakupu sprzedaże przekroczyłyby posiadane akcje "
-                    f"({broker_label(negative[0].broker)}, {negative[0].currency}). Najpierw anuluj sprzedaż."
-                )
+                st.error(_negative_holding_message(negative, "Po anulowaniu tego zakupu"))
             else:
                 void_fn = void_purchase_transaction if kind == "PURCHASE" else void_sale_transaction
                 void_fn(portfolio_conn, row["transaction_id"], reason.strip() or None)
@@ -1785,12 +1922,13 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
 def _render_existing_position_transaction_form(portfolio_conn, position: dict) -> None:
     position_id = position["position_id"]
     st.markdown(f"##### {position['ticker']} — {position['company_name']}")
-    kind = st.radio(
-        "Typ transakcji", ["Zakup/Bonus", "Sprzedaż"], key=f"tx_kind_{position_id}", horizontal=True,
+    new_type = st.radio(
+        "Typ transakcji", _TRANSACTION_TYPES, format_func=_TRANSACTION_TYPE_LABELS.get,
+        key=f"tx_type_{position_id}", horizontal=True,
     )
 
-    if kind == "Zakup/Bonus":
-        acquisition_type = _render_acquisition_type_picker(f"ep_acq_type_{position_id}")
+    if new_type in ("BUY", "BONUS"):
+        acquisition_type = new_type
         with st.form(f"purchase_form_{position_id}", clear_on_submit=True):
             broker = st.selectbox("Platforma", _BROKER_OPTIONS, format_func=broker_label, key=f"ep_broker_{position_id}")
             purchase_date = st.date_input("Data transakcji", key=f"ep_date_{position_id}")
@@ -1851,10 +1989,10 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             broker = st.selectbox("Platforma", _BROKER_OPTIONS, format_func=broker_label, key=f"es_broker_{position_id}")
             sale_date = st.date_input("Data sprzedaży", key=f"es_date_{position_id}")
             shares = st.number_input(
-                "Liczba sprzedanych akcji", min_value=0.0, step=0.00000001, format="%.8f", key=f"es_shares_{position_id}",
+                "Liczba sprzedanych jednostek", min_value=0.0, step=0.00000001, format="%.8f", key=f"es_shares_{position_id}",
             )
             sale_price = st.number_input(
-                "Cena sprzedaży za akcję", min_value=0.0, step=0.01, format="%.2f", key=f"es_price_{position_id}",
+                "Cena sprzedaży za jednostkę", min_value=0.0, step=0.0001, format="%.4f", key=f"es_price_{position_id}",
             )
             currency = st.text_input(
                 "Waluta transakcji", value=position["instrument_currency"] or "", key=f"es_currency_{position_id}",
@@ -1873,7 +2011,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             if submitted:
                 errors = []
                 if shares <= 0:
-                    errors.append("Liczba sprzedanych akcji musi być większa od zera.")
+                    errors.append("Liczba sprzedanych jednostek musi być większa od zera.")
                 if sale_price <= 0:
                     errors.append("Cena sprzedaży musi być większa od zera.")
                 if not currency.strip():
@@ -1887,20 +2025,14 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                     # cicho tworzyła "-4 akcje" w tabeli. Sprawdzane TUTAJ
                     # (nie w ui/portfolio.py, które poprawnie liczy to, co
                     # dostanie) -- to warstwa walidacji formularza.
-                    existing_subpositions = {
-                        (s.broker, s.currency): s.shares_held
-                        for s in compute_broker_currency_subpositions(
-                            get_purchase_transactions(portfolio_conn, position_id),
-                            get_sale_transactions(portfolio_conn, position_id),
-                        )
-                    }
-                    held = existing_subpositions.get((broker, currency.strip()), 0.0)
-                    if shares > held:
-                        errors.append(
-                            f"Na {broker_label(broker)} w walucie {currency.strip()} posiadasz "
-                            f"{held:g} akcji — nie można sprzedać {shares:g}. Sprawdź, czy wybrałaś/eś "
-                            "właściwego brokera i walutę."
-                        )
+                    negative = find_negative_holding(
+                        get_purchase_transactions(portfolio_conn, position_id),
+                        [*get_sale_transactions(portfolio_conn, position_id),
+                         {"sale_date": str(sale_date), "broker": broker, "currency": currency.strip(),
+                          "shares": shares}],
+                    )
+                    if negative:
+                        errors.append(_negative_holding_message(negative, "Ta sprzedaż"))
                 for error in errors:
                     st.error(error)
                 if not errors:
@@ -2356,6 +2488,7 @@ def _render_add_transaction_tab(portfolio_conn, user: dict) -> None:
     choice = st.selectbox("Pozycja", options, key="add_tx_position_choice")
 
     if choice == "+ Nowa pozycja":
+        st.caption("Sprzedaż albo bonus do posiadanej pozycji: wybierz tę pozycję w polu „Pozycja” powyżej.")
         kind = st.radio("Rodzaj aktywa", _NEW_ASSET_KINDS, horizontal=True, key="new_asset_kind")
         if kind == _NEW_ASSET_KINDS[0]:
             _render_new_position_form(portfolio_conn, user)

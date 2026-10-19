@@ -484,6 +484,41 @@ def test_batched_reads_match_per_position_queries(conn):
 
 
 @pytest.mark.integration
+def test_change_buy_to_sell_on_postgres(conn):
+    from buffett_scanner.ui.queries import TransactionChangeError, apply_transaction_change
+
+    uid = pg_store.create_user(conn, "Anastazja")
+    pid = pg_store.insert_position(conn, user_id=uid, ticker="KO", company_name="Coca-Cola")
+    pg_store.insert_purchase_transaction(
+        conn, position_id=pid, broker="REVOLUT", acquisition_type="BUY", purchase_date="2026-01-10",
+        shares=10.0, total_invested=1000.0, currency="PLN",
+    )
+    wrong = pg_store.insert_purchase_transaction(
+        conn, position_id=pid, broker="REVOLUT", acquisition_type="BUY", purchase_date="2026-03-01",
+        shares=10.0, total_invested=1200.0, currency="PLN", fees=2.0,
+    )
+    conn.commit()
+    memo = pg_store.MemoizedConnection(conn)
+    with pytest.raises(TransactionChangeError):
+        apply_transaction_change(
+            memo, pid, kind="PURCHASE", old_id=wrong, current_type="BUY", new_type="SELL", store=pg_store,
+            new_row={"broker": "REVOLUT", "currency": "PLN", "shares": 11.0, "sale_date": "2026-03-01",
+                     "sale_price": 120.0, "fees": None},
+        )
+    new_id = apply_transaction_change(
+        memo, pid, kind="PURCHASE", old_id=wrong, current_type="BUY", new_type="SELL", store=pg_store,
+        new_row={"broker": "REVOLUT", "currency": "PLN", "shares": 10.0, "sale_date": "2026-03-01",
+                 "sale_price": 120.2, "fees": 2.0},
+    )
+    assert [r["transaction_id"] for r in pg_store.get_sale_transactions(conn, pid)] == [new_id]
+    assert len(pg_store.get_purchase_transactions(conn, pid)) == 1
+    with conn.cursor() as cur:
+        cur.execute("SELECT voided_at, void_reason FROM purchase_transactions WHERE transaction_id = %s", (wrong,))
+        old = cur.fetchone()
+    assert old["voided_at"] is not None and "Zakup -> Sprzedaż" in old["void_reason"]
+
+
+@pytest.mark.integration
 def test_phase11_crud(conn):
     uid = pg_store.create_user(conn, "Anastazja")
     pid = pg_store.insert_position(conn, user_id=uid, ticker="GSK.L", company_name="GSK plc")

@@ -119,12 +119,7 @@ def compute_broker_currency_subpositions(
             return None
         return pln_rate_fn(currency, date, actual)
 
-    events = []
-    for p in purchases:
-        events.append((p["purchase_date"], 0, "PURCHASE", p))
-    for s in sales:
-        events.append((s["sale_date"], 1, "SALE", s))
-    events.sort(key=lambda e: (e[0], e[1]))
+    events = _chronological_events(purchases, sales)
 
     state: dict[tuple[str, str], dict] = {}
     for date, _order, kind, row in events:
@@ -177,6 +172,84 @@ def compute_broker_currency_subpositions(
             realized_pl=group["realized"], realized_pl_pln=group["realized_pln"],
         ))
     return result
+
+
+def _chronological_events(purchases: list, sales: list) -> list:
+    """Ta sama kolejność co w `compute_broker_currency_subpositions`:
+    data, a w tym samym dniu zakupy przed sprzedażami."""
+    events = [(p["purchase_date"], 0, "PURCHASE", p) for p in purchases]
+    events += [(s["sale_date"], 1, "SALE", s) for s in sales]
+    events.sort(key=lambda e: (e[0], e[1]))
+    return events
+
+
+def find_negative_holding(purchases: list, sales: list, *, tolerance: float = 1e-9) -> dict | None:
+    """Pierwsza sprzedaż (chronologicznie), po której subpozycja (broker,
+    waluta) spadłaby poniżej zera -- albo None. Sprawdza CAŁĄ oś czasu,
+    nie tylko stan końcowy: sprzedaż z wcześniejszą datą niż zakup jest
+    błędem, nawet jeśli na koniec liczba jednostek się zgadza."""
+    held: dict[tuple[str, str], float] = {}
+    for date, _order, kind, row in _chronological_events(purchases, sales):
+        key = (row["broker"], row["currency"])
+        if kind == "PURCHASE":
+            held[key] = held.get(key, 0.0) + row["shares"]
+            continue
+        available = held.get(key, 0.0)
+        if row["shares"] > available + tolerance:
+            return {"broker": key[0], "currency": key[1], "date": date, "held": available, "sold": row["shares"]}
+        held[key] = available - row["shares"]
+    return None
+
+
+# Typy transakcji w interfejsie -> tabela, w której żyje wiersz.
+TRANSACTION_TABLE = {"BUY": "PURCHASE", "BONUS": "PURCHASE", "SELL": "SALE"}
+
+
+def transaction_type(kind: str, row) -> str:
+    return "SELL" if kind == "SALE" else row["acquisition_type"]
+
+
+def retype_defaults(kind: str, row, new_type: str) -> dict:
+    """Wartości startowe formularza zmiany typu: wszystko, co nadal ma
+    zastosowanie (data, platforma, liczba jednostek, waluta, opłaty,
+    notatka, kurs brokera), plus kwoty przeliczone tak, żeby nie zgubić
+    informacji -- do sprawdzenia i poprawienia przez użytkownika.
+    Zakup -> sprzedaż: cena = (kwota + opłaty) / liczba, bo kwota zakupu
+    to "cała kwota z konta", a przychód ze sprzedaży = liczba x cena -
+    opłaty. Sprzedaż -> zakup: kwota = liczba x cena + opłaty."""
+    shares = float(row["shares"])
+    fees = _field(row, "fees") or 0.0
+    defaults = {
+        "date": row["sale_date"] if kind == "SALE" else row["purchase_date"],
+        "broker": row["broker"], "shares": shares, "currency": row["currency"],
+        "fees": fees, "note": _field(row, "note") or "", "fx_rate_actual": _field(row, "fx_rate_actual") or 0.0,
+        "total_invested": 0.0, "sale_price": 0.0,
+    }
+    if kind == "SALE":
+        gross = shares * float(row["sale_price"])
+        defaults["total_invested"] = gross + fees
+        defaults["sale_price"] = float(row["sale_price"])
+    else:
+        total = float(row["total_invested"] or 0.0)
+        defaults["total_invested"] = total
+        defaults["sale_price"] = (total + fees) / shares if shares > 0 and total > 0 else 0.0
+    if new_type == "BONUS":
+        defaults["total_invested"] = 0.0
+        defaults["fees"] = 0.0
+    return defaults
+
+
+def replace_transaction(purchases: list, sales: list, *, kind: str, transaction_id: int,
+                        new_type: str, new_row: dict) -> tuple[list, list]:
+    """Hipotetyczne listy transakcji po zastąpieniu jednego wpisu nowym
+    (innego albo tego samego typu) -- do walidacji PRZED zapisem."""
+    purchases = [p for p in purchases if not (kind == "PURCHASE" and p["transaction_id"] == transaction_id)]
+    sales = [s for s in sales if not (kind == "SALE" and s["transaction_id"] == transaction_id)]
+    if TRANSACTION_TABLE[new_type] == "PURCHASE":
+        purchases.append(new_row)
+    else:
+        sales.append(new_row)
+    return purchases, sales
 
 
 def compute_position_summary(

@@ -21,6 +21,7 @@ from dataclasses import replace
 
 from buffett_scanner.analysis_schema import AnalysisOutput
 from buffett_scanner.config import load_config
+from buffett_scanner import portfolio_backend
 from buffett_scanner.db import (
     get_analysis,
     get_analysis_sources,
@@ -34,7 +35,13 @@ from buffett_scanner.portfolio_backend import (
     get_sale_transactions,
 )
 from buffett_scanner.scanner import PriceBar, compute_price_changes
-from buffett_scanner.ui.portfolio import PositionSummary, compute_position_summary
+from buffett_scanner.ui.portfolio import (
+    TRANSACTION_TABLE,
+    PositionSummary,
+    compute_position_summary,
+    find_negative_holding,
+    replace_transaction,
+)
 from buffett_scanner.ui.pricing import FxRates, Quote
 from buffett_scanner.valuation import compute_valuation
 
@@ -342,3 +349,68 @@ def get_candidate_detail(scanner_conn: sqlite3.Connection, run_id: str, cik: str
         "analysis": analysis,
         "analysis_sources": [s for s in analysis_sources if s.verified],
     }
+
+
+class TransactionChangeError(ValueError):
+    """Zmiana zablokowana -- stan jednostek spadłby poniżej zera."""
+
+
+_TYPE_LABELS = {"BUY": "Zakup", "SELL": "Sprzedaż", "BONUS": "Bonus"}
+
+
+def apply_transaction_change(
+    conn, position_id: int, *, kind: str, old_id: int, current_type: str, new_type: str, new_row: dict,
+    fx_rate: float = 0.0, note: str = "", store=portfolio_backend,
+) -> int:
+    """Edycja jednego wpisu, w tym zmiana typu (BUY/SELL/BONUS), w ramach
+    istniejącego mechanizmu korekt: nowy wpis właściwego typu + anulowanie
+    starego z powodem wskazującym nowy wpis. Nic nie jest kasowane ani
+    nadpisywane. Przed zapisem cała oś czasu pozycji jest sprawdzana
+    ponownie (dane z bazy, nie z formularza) -- ujemny stan jednostek
+    blokuje zapis. Błąd w trakcie -> rollback. Zwraca id nowego wpisu.
+
+    `new_row`: broker, currency, shares, purchase_date/sale_date,
+    total_invested (BUY), sale_price (SELL), fees."""
+    purchases = [dict(r) for r in store.get_purchase_transactions(conn, position_id)]
+    sales = [dict(r) for r in store.get_sale_transactions(conn, position_id)]
+    active = purchases if kind == "PURCHASE" else sales
+    if not any(r["transaction_id"] == old_id for r in active):
+        raise TransactionChangeError("Ten wpis nie jest już aktywny (został zmieniony albo anulowany).")
+    negative = find_negative_holding(*replace_transaction(
+        purchases, sales, kind=kind, transaction_id=old_id, new_type=new_type, new_row=new_row,
+    ))
+    if negative:
+        raise TransactionChangeError(
+            f"{negative['date']} ({negative['broker']}, {negative['currency']}): sprzedaż {negative['sold']:g}, "
+            f"posiadane {negative['held']:g}."
+        )
+    try:
+        if TRANSACTION_TABLE[new_type] == "PURCHASE":
+            total = new_row["total_invested"] if new_type == "BUY" else 0.0
+            new_id = store.insert_purchase_transaction(
+                conn, position_id=position_id, broker=new_row["broker"], acquisition_type=new_type,
+                purchase_date=new_row["purchase_date"], shares=new_row["shares"], total_invested=total,
+                currency=new_row["currency"], price_per_share=(total / new_row["shares"]) if new_type == "BUY" else None,
+                fees=new_row.get("fees") or None, note=note or None,
+            )
+            new_kind, table = "PURCHASE", "zakup"
+        else:
+            new_id = store.insert_sale_transaction(
+                conn, position_id=position_id, broker=new_row["broker"], sale_date=new_row["sale_date"],
+                shares=new_row["shares"], sale_price=new_row["sale_price"], currency=new_row["currency"],
+                fees=new_row.get("fees") or None, note=note or None,
+            )
+            new_kind, table = "SALE", "sprzedaż"
+        if fx_rate and str(new_row["currency"]).upper() != "PLN":
+            store.set_transaction_fx_rate(conn, kind=new_kind, transaction_id=new_id, fx_rate_actual=fx_rate)
+        reason = (
+            f"Zmiana typu: {_TYPE_LABELS[current_type]} -> {_TYPE_LABELS[new_type]} (nowy wpis: {table} #{new_id})"
+            if new_type != current_type else f"Poprawka danych (nowy wpis: {table} #{new_id})"
+        )
+        void = store.void_purchase_transaction if kind == "PURCHASE" else store.void_sale_transaction
+        void(conn, old_id, reason)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return new_id
