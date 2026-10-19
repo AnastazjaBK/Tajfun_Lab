@@ -436,6 +436,53 @@ def test_memoized_connection_repeats_selects_from_memory_and_sees_own_writes(con
 
 
 @pytest.mark.integration
+def test_batched_reads_match_per_position_queries(conn):
+    """Jedno zapytanie na tabelę (MemoizedConnection) zwraca dla każdej
+    pozycji dokładnie to samo, co dotychczasowe zapytanie per pozycja."""
+    uid = pg_store.create_user(conn, "Anastazja")
+    pids = [pg_store.insert_position(conn, user_id=uid, ticker=t, company_name=t) for t in ("KO", "GSK.L", "AAPL")]
+    for i, pid in enumerate(pids[:2]):
+        for day in ("2026-10-03", "2026-10-01", "2026-10-03"):
+            pg_store.insert_purchase_transaction(
+                conn, position_id=pid, broker="TRADE_REPUBLIC", acquisition_type="BUY",
+                purchase_date=day, shares=1.0 + i, total_invested=10.0, currency="PLN",
+            )
+        pg_store.insert_sale_transaction(
+            conn, position_id=pid, broker="TRADE_REPUBLIC", sale_date="2026-10-10", shares=0.5,
+            sale_price=11.0, currency="PLN",
+        )
+        pg_store.insert_holding_user_action(conn, position_id=pid, action="HOLD")
+        pg_store.insert_holding_user_action(conn, position_id=pid, action="REVIEW_LATER")
+        rid = pg_store.insert_dividend_receipt(
+            conn, position_id=pid, broker="TRADE_REPUBLIC", pay_date="2026-10-08", gross_amount=1.0, currency="PLN",
+        )
+        pg_store.insert_dividend_receipt(
+            conn, position_id=pid, broker="TRADE_REPUBLIC", pay_date="2026-09-08", gross_amount=2.0, currency="PLN",
+        )
+        pg_store.void_dividend_receipt(conn, rid)
+    voided = pg_store.get_purchase_transactions(conn, pids[0])[0]["transaction_id"]
+    pg_store.void_purchase_transaction(conn, voided)
+    pg_store.insert_purchase_thesis(conn, position_id=pids[1], snapshot_json="{}")
+    conn.commit()
+
+    memo = pg_store.MemoizedConnection(conn)
+    getters = (
+        pg_store.get_purchase_transactions, pg_store.get_sale_transactions, pg_store.get_purchase_thesis,
+        pg_store.get_latest_holding_user_action, pg_store.get_dividend_receipts,
+    )
+    for pid in pids:
+        for getter in getters:
+            expected = getter(conn, pid)
+            expected = [dict(r) for r in expected] if isinstance(expected, list) else (
+                dict(expected) if expected is not None else None)
+            assert getter(memo, pid) == expected, (getter.__name__, pid)
+    assert memo.batch  # odczyty szły jednym zapytaniem na tabelę
+    pg_store.insert_holding_user_action(memo, position_id=pids[2], action="HOLD")
+    assert pg_store.get_latest_holding_user_action(memo, pids[2])["action"] == "HOLD"  # zapis czyści
+    memo.commit()
+
+
+@pytest.mark.integration
 def test_phase11_crud(conn):
     uid = pg_store.create_user(conn, "Anastazja")
     pid = pg_store.insert_position(conn, user_id=uid, ticker="GSK.L", company_name="GSK plc")

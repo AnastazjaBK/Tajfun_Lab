@@ -38,6 +38,7 @@ między rerunami, patrz `ui/scanner_snapshot.py`).
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
@@ -47,6 +48,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 import streamlit as st
+from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from buffett_scanner import portfolio_backend
 from buffett_scanner.db import get_fundamentals_periods, init_db
@@ -187,6 +189,7 @@ _VALUATION_SCENARIO_LABELS = (
 )
 
 DB_PATH = os.environ.get("BUFFETT_SCANNER_DB", "buffett_scanner.db")
+_MISSING = object()
 
 # Faza 8 "Hostowany V0" -- tylko w trybie `portfolio_backend.is_hosted()`.
 SNAPSHOT_REPO_OWNER = os.environ.get("SNAPSHOT_REPO_OWNER", "AnastazjaBK")
@@ -1202,16 +1205,24 @@ def _render_position_card(portfolio_conn, position: dict, summary) -> None:
             st.rerun()
 
     st.markdown("---")
-    if asset_class_of(position) in PHYSICAL:
-        with st.expander("Wycena ręczna i cena odkupu", expanded=True):
-            _render_manual_valuations(portfolio_conn, position, summary)
-    else:
-        with st.expander("Dywidendy otrzymane"):
-            _render_dividend_register(portfolio_conn, position)
-    with st.expander("Popraw dane / anuluj błędny wpis"):
-        _render_instrument_correction(portfolio_conn, position)
-        st.markdown("---")
-        _render_transaction_voiding(portfolio_conn, position)
+    _position_forms_fragment(portfolio_conn, position, summary)
+
+
+@st.fragment
+def _position_forms_fragment(full_run_conn, position: dict, summary) -> None:
+    """Formularze karty pozycji: wybory w nich odświeżają tylko ten
+    fragment; zapis woła `st.rerun()` = pełne odświeżenie."""
+    with _fragment_portfolio_conn(full_run_conn) as portfolio_conn:
+        if asset_class_of(position) in PHYSICAL:
+            with st.expander("Wycena ręczna i cena odkupu", expanded=True):
+                _render_manual_valuations(portfolio_conn, position, summary)
+        else:
+            with st.expander("Dywidendy otrzymane"):
+                _render_dividend_register(portfolio_conn, position)
+        with st.expander("Popraw dane / anuluj błędny wpis"):
+            _render_instrument_correction(portfolio_conn, position)
+            st.markdown("---")
+            _render_transaction_voiding(portfolio_conn, position)
 
 
 def _render_manual_valuations(portfolio_conn, position: dict, summary) -> None:
@@ -2109,19 +2120,33 @@ def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
                 st.rerun()
 
 
+@contextlib.contextmanager
+def _fragment_portfolio_conn(full_run_conn):
+    """Połączenie dla fragmentu. W pełnym przebiegu -- to samo co reszta
+    strony (bez dodatkowego łączenia). Gdy odświeża się SAM fragment --
+    nowe połączenie: to z pełnego przebiegu mogło już wygasnąć
+    (Supabase) albo należy do innego wątku (SQLite). Gdyby Streamlit
+    zmienił wewnętrzne API, wybierana jest bezpieczna opcja (nowe)."""
+    ctx = get_script_run_ctx()
+    fragment_ids = getattr(ctx, "fragment_ids_this_run", _MISSING) if ctx is not None else _MISSING
+    if fragment_ids is not _MISSING and not fragment_ids:
+        yield full_run_conn
+        return
+    conn = _open_portfolio_conn()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 @st.fragment
-def _add_transaction_fragment(user: dict) -> None:
+def _add_transaction_fragment(full_run_conn, user: dict) -> None:
     """Wybory w "+ Dodaj transakcję" (tryb, pozycja, rodzaj aktywa, wzór
     do skopiowania) odświeżają TYLKO ten fragment, nie całą aplikację
     (portfel + 20 kart spółek). Zapis woła `st.rerun()` = pełne
-    odświeżenie, więc portfel od razu pokazuje nową transakcję.
-    Własne połączenie: to z pełnego przebiegu mogło już wygasnąć
-    (Supabase) albo należy do innego wątku (SQLite)."""
-    conn = _open_portfolio_conn()
-    try:
+    odświeżenie, więc portfel od razu pokazuje nową transakcję."""
+    with _fragment_portfolio_conn(full_run_conn) as conn:
         _render_add_transaction_tab(conn, user)
-    finally:
-        conn.close()
 
 
 def _render_add_transaction_tab(portfolio_conn, user: dict) -> None:
@@ -2198,7 +2223,7 @@ def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
         )
 
     with inner_tabs[1]:
-        _add_transaction_fragment(user)
+        _add_transaction_fragment(portfolio_conn, user)
 
     for tab, (position, summary) in zip(inner_tabs[2:], positions_with_summaries):
         with tab:

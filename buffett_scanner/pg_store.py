@@ -368,12 +368,14 @@ class MemoizedConnection:
     def __init__(self, raw):
         self.raw = raw
         self.memo: dict = {}
+        self.batch: dict = {}  # patrz `_by_position`
 
     def cursor(self) -> _MemoCursor:
         return _MemoCursor(self)
 
     def clear_memo(self) -> None:
         self.memo.clear()
+        self.batch.clear()
 
     def commit(self) -> None:
         self.clear_memo()
@@ -476,6 +478,25 @@ def init_schema(conn) -> None:
             cur.execute(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS "{constraint}"')
             cur.execute(f"ALTER TABLE {table} ADD CONSTRAINT {table}_broker_check CHECK (broker IN ({allowed}))")
     conn.commit()
+
+
+def _by_position(conn, position_id: int, name: str, sql: str) -> list | None:
+    """Na `MemoizedConnection`: JEDNO zapytanie o całą tabelę (dane
+    portfela to dziesiątki wierszy), wiersze pogrupowane po pozycji --
+    zamiast osobnego zapytania dla każdej pozycji. Na zwykłym połączeniu
+    None (wołający pyta jak dotąd o jedną pozycję)."""
+    batch = getattr(conn, "batch", None)
+    if not isinstance(batch, dict):
+        return None
+    if name not in batch:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+        grouped: dict[int, list] = {}
+        for row in rows:
+            grouped.setdefault(row["position_id"], []).append(row)
+        batch[name] = grouped
+    return [dict(row) for row in batch[name].get(position_id, [])]
 
 
 _SCHEMA_READY: list[bool] = []
@@ -631,6 +652,12 @@ def insert_purchase_transaction(
 
 
 def get_purchase_transactions(conn, position_id: int) -> list:
+    rows = _by_position(conn, position_id, "purchase_transactions", """
+        SELECT * FROM purchase_transactions WHERE voided_at IS NULL AND superseded_by IS NULL
+        ORDER BY purchase_date, transaction_id
+    """)
+    if rows is not None:
+        return rows
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -669,6 +696,12 @@ def insert_sale_transaction(
 
 
 def get_sale_transactions(conn, position_id: int) -> list:
+    rows = _by_position(conn, position_id, "sale_transactions", """
+        SELECT * FROM sale_transactions WHERE voided_at IS NULL AND superseded_by IS NULL
+        ORDER BY sale_date, transaction_id
+    """)
+    if rows is not None:
+        return rows
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -708,6 +741,9 @@ def insert_purchase_thesis(
 
 
 def get_purchase_thesis(conn, position_id: int):
+    rows = _by_position(conn, position_id, "purchase_thesis", "SELECT * FROM purchase_thesis")
+    if rows is not None:
+        return rows[0] if rows else None
     with conn.cursor() as cur:
         cur.execute("SELECT * FROM purchase_thesis WHERE position_id = %s", (position_id,))
         return cur.fetchone()
@@ -724,6 +760,11 @@ def insert_holding_user_action(conn, *, position_id: int, action: str, note: str
 
 
 def get_latest_holding_user_action(conn, position_id: int):
+    rows = _by_position(conn, position_id, "holding_user_actions", """
+        SELECT DISTINCT ON (position_id) * FROM holding_user_actions ORDER BY position_id, action_id DESC
+    """)
+    if rows is not None:
+        return rows[0] if rows else None
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -803,6 +844,11 @@ def insert_dividend_receipt(
 
 
 def get_dividend_receipts(conn, position_id: int) -> list:
+    rows = _by_position(conn, position_id, "dividend_receipts", """
+        SELECT * FROM dividend_receipts WHERE voided_at IS NULL ORDER BY pay_date, receipt_id
+    """)
+    if rows is not None:
+        return rows
     with conn.cursor() as cur:
         cur.execute(
             "SELECT * FROM dividend_receipts WHERE position_id = %s AND voided_at IS NULL ORDER BY pay_date",
