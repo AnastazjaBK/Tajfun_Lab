@@ -204,3 +204,29 @@ def test_crypto_quote(conn):
     position = conn.execute("SELECT * FROM positions WHERE position_id = ?", (pid,)).fetchone()
     quote = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=FakeFMP, now_fn=Clock()).quote_for_position(position)
     assert (quote.price, quote.currency) == (81543.5, "USD")
+
+
+# --- 2026-10-19: pamięć procesu przed cache w bazie (szybkość aplikacji) ---
+
+
+def test_memory_layer_serves_fresh_entries_without_database_and_respects_data_ttl(conn, tmp_path):
+    memory, clock, fake = {}, Clock(), FakeEODHD()
+    MarketData(conn, eodhd_factory=lambda: fake, fmp_factory=lambda: None, now_fn=clock, memory=memory).eodhd_eod("GSK.LSE")
+    empty_db = init_db(tmp_path / "other.db")  # brak wpisu w bazie -> trafienie musi pochodzić z pamięci
+    second = MarketData(empty_db, eodhd_factory=lambda: fake, fmp_factory=lambda: None, now_fn=clock, memory=memory)
+    assert second.eodhd_eod("GSK.LSE").value[-1]["close"] == 1862.5
+    assert fake.calls == [("eod", "GSK.LSE")]
+    clock.now += dt.timedelta(minutes=11)  # po MEMORY_TTL_S -> znowu baza (tu pusta) -> dostawca
+    second.eodhd_eod("GSK.LSE")
+    assert fake.calls == [("eod", "GSK.LSE"), ("eod", "GSK.LSE")]
+
+
+def test_memory_layer_remembers_failure_only_for_backoff_window(conn):
+    memory, clock, failing = {}, Clock(), FakeEODHD(fail=True)
+    market = MarketData(conn, eodhd_factory=lambda: failing, fmp_factory=lambda: None, now_fn=clock, memory=memory)
+    assert market.eodhd_eod("SU.PA") is None
+    assert market.eodhd_eod("SU.PA") is None
+    assert len(failing.calls) == 1
+    clock.now += dt.timedelta(minutes=16)  # po oknie backoff (15 min) -> nowa próba
+    market.eodhd_eod("SU.PA")
+    assert len(failing.calls) == 2

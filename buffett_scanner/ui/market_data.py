@@ -82,6 +82,12 @@ class Cached:
     stale: bool
 
 
+# Pamięć procesu (patrz `MarketData.__init__`): 10 min; wpis z pamięci
+# i tak musi mieścić się w TTL danych, więc świeżość danych się nie zmienia.
+MEMORY_TTL_S = 10 * 60
+MEMORY_MAX_ENTRIES = 400
+
+
 def _utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc).replace(tzinfo=None, microsecond=0)
 
@@ -104,8 +110,12 @@ class MarketData:
         eodhd_factory: Callable[[], EODHDClient] | None = None,
         http_get=httpx.get,
         now_fn: Callable[[], dt.datetime] = _utcnow,
+        memory: dict | None = None,
     ):
         self._conn = conn
+        # Pamięć procesu przed cache w bazie (app.py: jedna na serwer).
+        # Wpis żyje najwyżej MEMORY_TTL_S i nigdy dłużej niż TTL danych.
+        self._memory = memory
         self._fmp_factory = fmp_factory or _default_fmp_factory
         self._eodhd_factory = eodhd_factory or _default_eodhd_factory
         self._http_get = http_get
@@ -117,18 +127,37 @@ class MarketData:
         put_cache_entry(self._conn, key, json.dumps(value), self._now().strftime("%Y-%m-%d %H:%M:%S"))
         self._conn.commit()
 
+    def _remember(self, key: str, now: dt.datetime, until: dt.datetime, row, stale: bool) -> None:
+        """Zapamiętuje wynik `_cached` do `until` (najwyżej MEMORY_TTL_S):
+        świeży wpis -- nie dłużej niż jego TTL; nieudane pobranie -- nie
+        dłużej niż okno backoff (wtedy i tak nie pytamy dostawcy)."""
+        if self._memory is None:
+            return
+        if len(self._memory) > MEMORY_MAX_ENTRIES:
+            for k in [k for k, v in list(self._memory.items()) if v[0] <= now]:  # list(): inne sesje piszą równolegle
+                self._memory.pop(k, None)
+        until = min(until, now + dt.timedelta(seconds=MEMORY_TTL_S))
+        payload = None if row is None else (row[0], row[1])
+        self._memory[key] = (until, payload, stale)
+
     def _cached(self, key: str, ttl_s: int | None, fetch: Callable[[], object]) -> Cached | None:
         now = self._now()
+        hit = self._memory.get(key) if self._memory is not None else None
+        if hit is not None and now < hit[0]:
+            _, payload, stale = hit
+            return None if payload is None else Cached(json.loads(payload[0]), payload[1], stale)
+        far = now + dt.timedelta(seconds=MEMORY_TTL_S)
         row = get_cache_entry(self._conn, key)
         if row is not None:
             fetched = _parse_ts(row["fetched_at"])
             fresh = ttl_s is None or (fetched is not None and (now - fetched).total_seconds() < ttl_s)
             if fresh:
+                until = far if ttl_s is None else fetched + dt.timedelta(seconds=ttl_s)
+                self._remember(key, now, until, (row["payload"], row["fetched_at"]), False)
                 return Cached(json.loads(row["payload"]), row["fetched_at"], False)
         failure = get_cache_entry(self._conn, f"fail:{key}")
-        recently_failed = failure is not None and (
-            (now - (_parse_ts(failure["fetched_at"]) or now)).total_seconds() < FAILURE_BACKOFF_S
-        )
+        failed_at = (_parse_ts(failure["fetched_at"]) or now) if failure is not None else None
+        recently_failed = failed_at is not None and (now - failed_at).total_seconds() < FAILURE_BACKOFF_S
         value = None
         if not recently_failed:
             try:
@@ -137,9 +166,15 @@ class MarketData:
                 value = None
             if value is None:
                 self._put(f"fail:{key}", True)
+                failed_at = now
         if value is not None:
             self._put(key, value)
-            return Cached(value, now.strftime("%Y-%m-%d %H:%M:%S"), False)
+            stamp = now.strftime("%Y-%m-%d %H:%M:%S")
+            until = far if ttl_s is None else now + dt.timedelta(seconds=ttl_s)
+            self._remember(key, now, until, (json.dumps(value), stamp), False)
+            return Cached(value, stamp, False)
+        stale_row = None if row is None else (row["payload"], row["fetched_at"])
+        self._remember(key, now, failed_at + dt.timedelta(seconds=FAILURE_BACKOFF_S), stale_row, True)
         if row is not None:
             return Cached(json.loads(row["payload"]), row["fetched_at"], True)
         return None

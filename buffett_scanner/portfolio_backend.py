@@ -111,9 +111,9 @@ def connect_portfolio(sqlite_db_path: str | None = None):
     czytelny komunikat, NIGDY nie próbuje automatycznie tworzyć/
     naprawiać bazy (Decyzja właścicielki pkt 3)."""
     if HOSTED:
-        from buffett_scanner.pg_store import connect, init_schema
+        from buffett_scanner.pg_store import MemoizedConnection, connect, ensure_schema
         conn = connect()
-        init_schema(conn)
-        return conn
+        ensure_schema(conn)
+        return MemoizedConnection(conn)
     from buffett_scanner.db import init_db
     return init_db(sqlite_db_path)

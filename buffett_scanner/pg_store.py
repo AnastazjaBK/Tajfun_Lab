@@ -317,6 +317,79 @@ def connect(database_url: str | None = None):
     return conn
 
 
+class _MemoCursor:
+    """Kursor `MemoizedConnection`: SELECT-y z pamięci połączenia,
+    każde inne polecenie czyści pamięć i idzie do bazy."""
+
+    def __init__(self, owner: "MemoizedConnection"):
+        self._owner = owner
+        self._cur = owner.raw.cursor()
+        self._rows: list | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self._cur.close()
+
+    def execute(self, query, params=None) -> None:
+        if not str(query).lstrip()[:6].upper() == "SELECT":
+            self._owner.clear_memo()
+            self._rows = None
+            self._cur.execute(query, params)
+            return
+        key = (str(query), repr(params))
+        rows = self._owner.memo.get(key)
+        if rows is None:
+            self._cur.execute(query, params)
+            rows = self._cur.fetchall()
+            self._owner.memo[key] = rows
+        self._rows = [dict(r) for r in rows]  # kopie -- wołający może modyfikować
+
+    def fetchone(self):
+        if self._rows is None:
+            return self._cur.fetchone()
+        return self._rows.pop(0) if self._rows else None
+
+    def fetchall(self) -> list:
+        if self._rows is None:
+            return self._cur.fetchall()
+        rows, self._rows = self._rows, []
+        return rows
+
+
+class MemoizedConnection:
+    """Połączenie na JEDEN przebieg skryptu Streamlit: identyczne SELECT-y
+    (te same zapytanie i parametry) trafiają do Supabase tylko raz.
+    Każdy zapis, commit i rollback czyści pamięć -- odczyt po zapisie
+    zawsze widzi nowe dane. Pomiar 2026-10-19: 195 zapytań na kliknięcie,
+    z czego 73 były powtórzeniami."""
+
+    def __init__(self, raw):
+        self.raw = raw
+        self.memo: dict = {}
+
+    def cursor(self) -> _MemoCursor:
+        return _MemoCursor(self)
+
+    def clear_memo(self) -> None:
+        self.memo.clear()
+
+    def commit(self) -> None:
+        self.clear_memo()
+        self.raw.commit()
+
+    def rollback(self) -> None:
+        self.clear_memo()
+        self.raw.rollback()
+
+    def close(self) -> None:
+        self.raw.close()
+
+    def __getattr__(self, name):
+        return getattr(self.raw, name)
+
+
 def _existing_schema(cur) -> tuple[set[str], set[tuple[str, str]]]:
     cur.execute(
         "SELECT table_name, column_name FROM information_schema.columns "
@@ -403,6 +476,17 @@ def init_schema(conn) -> None:
             cur.execute(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS "{constraint}"')
             cur.execute(f"ALTER TABLE {table} ADD CONSTRAINT {table}_broker_check CHECK (broker IN ({allowed}))")
     conn.commit()
+
+
+_SCHEMA_READY: list[bool] = []
+
+
+def ensure_schema(conn) -> None:
+    """`init_schema` raz na proces. Flaga żyje w TYM module: nowa wersja
+    pliku (nowe migracje) = ponowny import = migracja znowu sprawdzona."""
+    if not _SCHEMA_READY:
+        init_schema(conn)
+        _SCHEMA_READY.append(True)
 
 
 # ---------------------------------------------------------------------------

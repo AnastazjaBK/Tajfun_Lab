@@ -399,6 +399,43 @@ def test_broker_list_migration_keeps_rows_and_accepts_new_platforms(conn):
 
 
 @pytest.mark.integration
+def test_memoized_connection_repeats_selects_from_memory_and_sees_own_writes(conn):
+    statements = []
+
+    class CountingRaw:
+        def cursor(self):
+            cur = conn.cursor()
+
+            class Proxy:
+                def execute(self, q, p=None):
+                    statements.append(q)
+                    return cur.execute(q, p)
+
+                def __getattr__(self, name):
+                    return getattr(cur, name)
+
+            return Proxy()
+
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+    memo = pg_store.MemoizedConnection(CountingRaw())
+    uid = pg_store.create_user(memo, "Anastazja")
+    statements.clear()
+    assert pg_store.get_positions_for_user(memo, uid) == []
+    assert pg_store.get_positions_for_user(memo, uid) == []
+    assert len(statements) == 1
+    pg_store.insert_position(memo, user_id=uid, ticker="KO", company_name="Coca-Cola")
+    [position] = pg_store.get_positions_for_user(memo, uid)  # zapis wyczyścił pamięć
+    assert position["ticker"] == "KO"
+    assert len(statements) == 3
+    position["ticker"] = "zmienione"  # kopia -- pamięć bez zmian
+    assert pg_store.get_positions_for_user(memo, uid)[0]["ticker"] == "KO"
+    assert len(statements) == 3
+    memo.commit()
+
+
+@pytest.mark.integration
 def test_phase11_crud(conn):
     uid = pg_store.create_user(conn, "Anastazja")
     pid = pg_store.insert_position(conn, user_id=uid, ticker="GSK.L", company_name="GSK plc")

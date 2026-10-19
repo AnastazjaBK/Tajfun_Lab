@@ -63,7 +63,8 @@ from buffett_scanner.pg_store import BackupVerificationError, PgStoreUnavailable
 from buffett_scanner.portfolio_backend import (
     create_user,
     get_latest_holding_user_action,
-    get_latest_user_decision,
+    get_latest_user_decisions_for_user,
+    get_positions_for_user,
     get_purchase_thesis,
     get_purchase_transactions,
     get_sale_transactions,
@@ -204,10 +205,18 @@ _PL_LOSS_CSS = "color: #e5534b; font-weight: 600"
 _ASSET_CLASS_LABELS = {c: ASSET_CLASS_LABELS[c] for c in EXCHANGE_TRADED}
 
 
+@st.cache_resource
+def _market_memory() -> dict:
+    """Jedna pamięć cen na serwer (wszystkie sesje) -- patrz
+    `MarketData.__init__`. Bez niej każde kliknięcie czytało ~80 wpisów
+    cache z Supabase (pomiar 2026-10-19)."""
+    return {}
+
+
 def _market(portfolio_conn) -> MarketData:
     """Ceny, historia, dywidendy i kursy NBP przez wspólny cache w bazie
     portfela (Faza 11) -- jeden obiekt na przebieg skryptu."""
-    return MarketData(portfolio_conn)
+    return MarketData(portfolio_conn, memory=_market_memory())
 
 
 def _format_currency_dict(values: dict[str, float]) -> str:
@@ -831,7 +840,8 @@ def _render_decision_buttons(portfolio_conn, *, user_id: int, cik: str) -> None:
     """Sekcja 16 specyfikacji: decyzja jest USER-SPECIFIC (`user_decisions`,
     append-only) -- Anastazja i mąż mogą mieć RÓŻNY status dla tej samej
     spółki, kliknięcie jednego usera nigdy nie zmienia SHARED analizy."""
-    current = get_latest_user_decision(portfolio_conn, user_id=user_id, cik=cik)
+    # Jedno zapytanie dla wszystkich kart (pamięć połączenia), nie 20.
+    current = get_latest_user_decisions_for_user(portfolio_conn, user_id).get(cik)
     if current is not None:
         st.caption(f"Twoja ostatnia decyzja: **{decision_status_label(current['status'])}**")
 
@@ -2099,13 +2109,27 @@ def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
                 st.rerun()
 
 
-def _render_add_transaction_tab(portfolio_conn, scanner_conn, user: dict) -> None:
+@st.fragment
+def _add_transaction_fragment(user: dict) -> None:
+    """Wybory w "+ Dodaj transakcję" (tryb, pozycja, rodzaj aktywa, wzór
+    do skopiowania) odświeżają TYLKO ten fragment, nie całą aplikację
+    (portfel + 20 kart spółek). Zapis woła `st.rerun()` = pełne
+    odświeżenie, więc portfel od razu pokazuje nową transakcję.
+    Własne połączenie: to z pełnego przebiegu mogło już wygasnąć
+    (Supabase) albo należy do innego wątku (SQLite)."""
+    conn = _open_portfolio_conn()
+    try:
+        _render_add_transaction_tab(conn, user)
+    finally:
+        conn.close()
+
+
+def _render_add_transaction_tab(portfolio_conn, user: dict) -> None:
     """Sekcja 11 specyfikacji -- formularz "Dodaj transakcję". Jedna
     `position_id` może mieć transakcje na wielu brokerach (sekcja 7) --
     wybór "istniejąca pozycja" NIGDY nie tworzy drugiej, równoległej
     pozycji dla tego samego instrumentu."""
-    positions_with_summaries = get_user_positions_with_summaries(portfolio_conn, scanner_conn, user["user_id"])
-    positions = [dict(p) for p, _ in positions_with_summaries]
+    positions = [dict(p) for p in get_positions_for_user(portfolio_conn, user["user_id"])]
 
     mode = st.radio("Co chcesz zrobić?", _ADD_MODES, horizontal=True, key="add_tx_mode")
     if mode == _ADD_MODES[1]:
@@ -2174,7 +2198,7 @@ def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
         )
 
     with inner_tabs[1]:
-        _render_add_transaction_tab(portfolio_conn, scanner_conn, user)
+        _add_transaction_fragment(user)
 
     for tab, (position, summary) in zip(inner_tabs[2:], positions_with_summaries):
         with tab:
@@ -2209,6 +2233,48 @@ def _render_backup_section(portfolio_conn) -> None:
             )
 
 
+def _open_portfolio_conn():
+    """Połączenie z bazą portfela; przy błędzie czytelny komunikat i
+    `st.stop()` (Decyzja właścicielki pkt 3), nigdy traceback."""
+    if not portfolio_backend.is_hosted():
+        # `init_db` (nie `connect`) -- `CREATE TABLE IF NOT EXISTS` +
+        # migracje kolumn idempotentne, ten sam wzorzec co KAŻDE
+        # wywołanie w cli.py. Realny błąd znaleziony przy weryfikacji
+        # "czy aplikacja startuje bez błędów" (Faza 7): plain `connect()`
+        # na zupełnie świeżym pliku DB wywalał `OperationalError: no
+        # such table: users` -- `init_db` naprawia to bez ryzyka dla
+        # istniejących danych.
+        return init_db(DB_PATH)
+
+    try:
+        portfolio_conn = portfolio_backend.connect_portfolio()
+    except BackupVerificationError as exc:
+        st.error(
+            f"Aktualizacja bazy wstrzymana: kopia zapasowa nie przeszła weryfikacji ({exc}). "
+            "Dane nie zostały zmienione."
+        )
+        st.stop()
+    except PgStoreUnavailableError as exc:
+        st.error(
+            f"Baza portfela (Supabase) jest chwilowo niedostępna: {exc}\n\n"
+            "Jeśli to darmowy, nieużywany od tygodnia projekt Supabase — wznów go ręcznie "
+            "w dashboardzie Supabase i odśwież tę stronę."
+        )
+        st.stop()
+    return portfolio_conn
+
+
+@st.cache_resource(ttl=600, show_spinner=False)
+def _snapshot_path():
+    """Wskaźnik snapshotu z GitHuba + SHA256 pliku (21 MB) raz na 10 min,
+    nie przy każdym kliknięciu. Nowy skan pojawi się najwyżej 10 min
+    po publikacji. Błąd (`SnapshotUnavailableError`) nie jest pamiętany."""
+    snapshot_path, _pointer = ensure_local_snapshot(
+        SNAPSHOT_REPO_OWNER, SNAPSHOT_REPO_NAME, cache_dir=SNAPSHOT_CACHE_DIR,
+    )
+    return snapshot_path
+
+
 def _connect_backends() -> tuple[object, object] | None:
     """Faza 8 Etap D -- zwraca `(portfolio_conn, scanner_conn)` albo
     `None`, gdy któryś backend jest niedostępny (w tym wypadku ta
@@ -2226,39 +2292,12 @@ def _connect_backends() -> tuple[object, object] | None:
     zweryfikowany (SHA256) z GitHub Release, otwarty READ-ONLY
     (`file:...?mode=ro`) -- hostowana appka nigdy nie zapisuje do
     danych scannera."""
+    portfolio_conn = _open_portfolio_conn()
     if not portfolio_backend.is_hosted():
-        # `init_db` (nie `connect`) -- `CREATE TABLE IF NOT EXISTS` +
-        # migracje kolumn idempotentne, ten sam wzorzec co KAŻDE
-        # wywołanie w cli.py. Realny błąd znaleziony przy weryfikacji
-        # "czy aplikacja startuje bez błędów" (Faza 7): plain `connect()`
-        # na zupełnie świeżym pliku DB wywalał `OperationalError: no
-        # such table: users` -- `init_db` naprawia to bez ryzyka dla
-        # istniejących danych.
-        conn = init_db(DB_PATH)
-        return conn, conn
+        return portfolio_conn, portfolio_conn
 
     try:
-        portfolio_conn = portfolio_backend.connect_portfolio()
-    except BackupVerificationError as exc:
-        st.error(
-            f"Aktualizacja bazy wstrzymana: kopia zapasowa nie przeszła weryfikacji ({exc}). "
-            "Dane nie zostały zmienione."
-        )
-        st.stop()
-        return None
-    except PgStoreUnavailableError as exc:
-        st.error(
-            f"Baza portfela (Supabase) jest chwilowo niedostępna: {exc}\n\n"
-            "Jeśli to darmowy, nieużywany od tygodnia projekt Supabase — wznów go ręcznie "
-            "w dashboardzie Supabase i odśwież tę stronę."
-        )
-        st.stop()
-        return None
-
-    try:
-        snapshot_path, _pointer = ensure_local_snapshot(
-            SNAPSHOT_REPO_OWNER, SNAPSHOT_REPO_NAME, cache_dir=SNAPSHOT_CACHE_DIR,
-        )
+        snapshot_path = _snapshot_path()
     except SnapshotUnavailableError as exc:
         st.error(f"Dane scannera są chwilowo niedostępne: {exc}")
         st.stop()
