@@ -230,3 +230,35 @@ def test_memory_layer_remembers_failure_only_for_backoff_window(conn):
     clock.now += dt.timedelta(minutes=16)  # po oknie backoff (15 min) -> nowa próba
     market.eodhd_eod("SU.PA")
     assert len(failing.calls) == 2
+
+
+def _commodity_position(conn, symbol, metal):
+    uid = create_user(conn, "A")
+    pid = insert_position(conn, user_id=uid, ticker=symbol, company_name=symbol, instrument_confirmed=True)
+    update_position_fields(conn, pid, asset_class="COMMODITY", metal=metal, price_symbol=symbol,
+                           unit_weight=1.0, weight_unit="OZT", sale_fee_pct=1.5)
+    conn.commit()
+    return conn.execute("SELECT * FROM positions WHERE position_id = ?", (pid,)).fetchone()
+
+
+def test_platform_gold_xau_is_priced_per_troy_ounce_from_nbp(conn):
+    position = _commodity_position(conn, "XAU", "GOLD")
+    market = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=lambda: None, now_fn=Clock(),
+                        http_get=lambda url, **kw: FakeResp([{"data": "2026-10-16", "cena": 519.85}]))
+    quote = market.quote_for_position(position)
+    assert (quote.currency, quote.source, quote.as_of) == ("PLN", "NBP (cena złota)", "2026-10-16")
+    assert quote.price == pytest.approx(31.1034768 * 519.85)
+
+
+def test_platform_silver_xag_uses_fmp_price_per_ounce_and_falls_back_to_manual(conn):
+    position = _commodity_position(conn, "XAG", "SILVER")
+    no_fmp = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=lambda: None, now_fn=Clock())
+    assert no_fmp.quote_for_position(position) is None  # brak ceny -> N/A, nie zgadujemy
+    insert_manual_valuation(conn, position_id=position["position_id"], kind="MARKET", price_per_unit=210.0,
+                            currency="PLN", valuation_date="2026-10-17")
+    conn.commit()
+    assert no_fmp.quote_for_position(position).source == "wycena ręczna"
+    clock = Clock()
+    clock.now += dt.timedelta(minutes=16)  # po oknie backoff nieudanej próby
+    quote = MarketData(conn, eodhd_factory=lambda: None, fmp_factory=FakeFMP, now_fn=clock).quote_for_position(position)
+    assert (quote.price, quote.currency, quote.source) == (57.305, "USD", "FMP (kontrakt na srebro)")

@@ -10,6 +10,12 @@ próba x cena czystego metalu. Wartość spot NIE jest ceną odkupu -- tę
 wpisuje się ręcznie (dealer, spread, premia). Moneta kolekcjonerska nie
 jest wyceniana po spot (tylko wycena ręczna).
 
+Metal na platformie (COMMODITY, np. XAG/XAU w Revolut): `shares` = uncje
+trojańskie czystego metalu, których nie przechowuje się samodzielnie.
+Wartość rynkowa = uncje x cena spot. Kwota możliwa do uzyskania przy
+sprzedaży jest niższa o opłatę platformy -- pokazywana OBOK wartości
+rynkowej (`realizable_value_pln`), nigdy zamiast niej.
+
 ETC/ETN/ETF na metale to papiery wyceniane rynkowo, NIE gramy metalu na
 własność -- w ekspozycji pokazywane osobno ("giełdowe"), bez przeliczania
 na gramy, więc bez podwójnego liczenia.
@@ -21,12 +27,16 @@ TROY_OUNCE_G = 31.1034768
 
 STOCK, ETF, ETC, ETN = "STOCK", "ETF", "ETC", "ETN"
 PHYSICAL_GOLD, PHYSICAL_SILVER, CRYPTO = "PHYSICAL_GOLD", "PHYSICAL_SILVER", "CRYPTO"
+COMMODITY = "COMMODITY"
+# Symbol platformy -> metal; ilość zawsze w uncjach trojańskich.
+COMMODITY_SYMBOLS = {"XAU": "GOLD", "XAG": "SILVER"}
 EXCHANGE_TRADED = (STOCK, ETF, ETC, ETN)
 PHYSICAL = (PHYSICAL_GOLD, PHYSICAL_SILVER)
 
 ASSET_CLASS_LABELS = {
     STOCK: "Akcja", ETF: "ETF", ETC: "ETC (np. złoto/srebro giełdowe)", ETN: "ETN",
     PHYSICAL_GOLD: "Złoto fizyczne", PHYSICAL_SILVER: "Srebro fizyczne", CRYPTO: "Kryptowaluta",
+    COMMODITY: "Metal na platformie (np. Revolut)",
 }
 METAL_LABELS = {"GOLD": "złoto", "SILVER": "srebro"}
 EXPOSURE_LABELS = {
@@ -74,11 +84,12 @@ def metal_of(position) -> str | None:
 
 def exposure_summary(positions_with_summaries: list) -> dict:
     """Wartość (PLN, dziś) według klasy aktywów i ekspozycja na metale:
-    {"by_class": {klasa: PLN}, "metals": {"GOLD": {"physical", "exchange"},
-    "SILVER": {...}}, "unpriced": [tickery bez wyceny]}. Każda pozycja liczona
-    RAZ -- fizyczne po wartości metalu, giełdowe po wartości rynkowej."""
+    {"by_class": {klasa: PLN}, "metals": {"GOLD": {"physical", "platform",
+    "exchange"}, "SILVER": {...}}, "unpriced": [tickery bez wyceny]}. Każda
+    pozycja liczona RAZ -- fizyczne i na platformie po wartości metalu,
+    giełdowe po wartości rynkowej."""
     by_class: dict[str, float] = {}
-    metals = {m: {"physical": 0.0, "exchange": 0.0} for m in METAL_LABELS}
+    metals = {m: {"physical": 0.0, "platform": 0.0, "exchange": 0.0} for m in METAL_LABELS}
     unpriced: list[str] = []
     for position, summary in positions_with_summaries:
         held = [s for s in summary.by_broker_currency if s.shares_held > 1e-12]
@@ -93,5 +104,34 @@ def exposure_summary(positions_with_summaries: list) -> dict:
         by_class[asset_class] = by_class.get(asset_class, 0.0) + value
         metal = metal_of(position)
         if metal in metals:
-            metals[metal]["physical" if asset_class in PHYSICAL else "exchange"] += value
+            bucket = "physical" if asset_class in PHYSICAL else "platform" if asset_class == COMMODITY else "exchange"
+            metals[metal][bucket] += value
     return {"by_class": by_class, "metals": metals, "unpriced": unpriced}
+
+
+def realizable_value_pln(
+    market_value_pln: float | None, *, sale_fee_pct: float | None = None, sale_price_value_pln: float | None = None,
+) -> tuple[float | None, str | None]:
+    """Kwota możliwa do uzyskania przy sprzedaży (PLN) i jej podstawa.
+    Pierwszeństwo: cena sprzedaży podana przez platformę (wpis ręczny),
+    potem wartość rynkowa minus opłata platformy w %. Bez żadnej z nich
+    -- None: opłaty nie zgadujemy."""
+    if sale_price_value_pln is not None:
+        return sale_price_value_pln, "cena sprzedaży z platformy"
+    if market_value_pln is not None and sale_fee_pct is not None and 0 <= sale_fee_pct < 100:
+        return market_value_pln * (1 - sale_fee_pct / 100), f"wartość rynkowa − opłata {sale_fee_pct:g}%"
+    return None, None
+
+
+def commodity_cost_error(quantity: float, price: float, fee: float, total: float) -> str | None:
+    """Łączny koszt musi zgadzać się z ilość x cena + opłata. Tolerancja:
+    zaokrąglenie ceny do 0,01 na każdą uncję + 0,01, ale co najmniej
+    0,5% kwoty -- wyłapuje literówki, nie zaokrąglenia platformy."""
+    expected = quantity * price + fee
+    tolerance = max(quantity * 0.005 + 0.01, total * 0.005)
+    if abs(expected - total) > tolerance:
+        return (
+            f"Ilość × cena + opłata = {expected:,.2f}, a łączny koszt to {total:,.2f}. "
+            "Sprawdź ilość, cenę i opłatę (albo zostaw łączny koszt pusty — zostanie wyliczony)."
+        )
+    return None

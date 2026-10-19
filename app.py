@@ -91,6 +91,8 @@ from buffett_scanner.portfolio_backend import (
 )
 from buffett_scanner.ui.assets import (
     ASSET_CLASS_LABELS,
+    COMMODITY,
+    COMMODITY_SYMBOLS,
     CRYPTO,
     ETC,
     ETF,
@@ -105,6 +107,8 @@ from buffett_scanner.ui.assets import (
     asset_class_of,
     exposure_summary,
     pure_grams_per_piece,
+    commodity_cost_error,
+    realizable_value_pln,
 )
 from buffett_scanner.ui.data_quality import data_quality_warning
 from buffett_scanner.ui.instrument_lookup import (
@@ -580,7 +584,7 @@ def _render_portfolio_dividends(portfolio_conn, positions_with_summaries: list, 
         all_receipts += receipts
         received = summarize_receipts(receipts, pln_rate_fn=market.pln_rate, year=today.year)
         metrics = None
-        if asset_class_of(position) in (*PHYSICAL, CRYPTO):
+        if asset_class_of(position) in (*PHYSICAL, CRYPTO, COMMODITY):
             continue
         if is_instrument_confirmed(position):
             provider = position.get("price_provider")
@@ -1026,6 +1030,9 @@ def _render_portfolio_summary_tab(
                 "Status": status_label,
                 "Uwagi": price_note,
             })
+            realizable, _basis = _realizable_for_sub(market, position, sub, fx)
+            if realizable is not None:
+                table_rows[-1]["Przy sprzedaży (PLN)"] = _format_pln(realizable)
             pl_signs.append(0 if pl is None else (1 if pl > 0 else -1 if pl < 0 else 0))
             pln_pl = sub.unrealized_pl_pln
             pln_signs.append(0 if pln_pl is None else (1 if pln_pl > 0 else -1 if pln_pl < 0 else 0))
@@ -1041,6 +1048,9 @@ def _render_portfolio_summary_tab(
     def _pln_column_css(_column):
         return [_PL_GAIN_CSS if sign > 0 else _PL_LOSS_CSS if sign < 0 else "" for sign in pln_signs]
 
+    if any("Przy sprzedaży (PLN)" in row for row in table_rows):
+        for row in table_rows:
+            row.setdefault("Przy sprzedaży (PLN)", "—")
     styled = (
         pd.DataFrame(_name_first(table_rows)).style
         .apply(_pl_column_css, subset=["Zysk/strata", "Zysk/strata %"])
@@ -1072,19 +1082,21 @@ def _render_exposure(positions_with_summaries: list) -> None:
         )
         rows = []
         for metal, parts in exposure["metals"].items():
-            if parts["physical"] or parts["exchange"]:
+            if parts["physical"] or parts["platform"] or parts["exchange"]:
                 rows.append({
                     "Metal": METAL_LABELS[metal], "Fizyczny (PLN)": round(parts["physical"], 2),
+                    "Na platformie (PLN)": round(parts["platform"], 2),
                     "Giełdowy ETF/ETC/ETN (PLN)": round(parts["exchange"], 2),
-                    "Razem (PLN)": round(parts["physical"] + parts["exchange"], 2),
+                    "Razem (PLN)": round(parts["physical"] + parts["platform"] + parts["exchange"], 2),
                 })
         if rows:
             st.dataframe(rows, hide_index=True, use_container_width=True)
             precious = sum(r["Razem (PLN)"] for r in rows)
             st.write(f"Łącznie metale szlachetne: **{precious:,.0f} PLN** ({precious / total * 100:.1f}% wycenionej części portfela).")
         st.caption(
-            "Metal fizyczny wyceniany po cenie spot czystego metalu (złoto: NBP; srebro: kontrakt FMP jako "
-            "przybliżenie) — to nie cena odkupu u dealera. Giełdowe ETF/ETC/ETN po cenie rynkowej, nie jako gramy "
+            "Metal fizyczny i metal na platformie (np. XAG/XAU w Revolut) wyceniane po cenie spot czystego metalu "
+            "(złoto: NBP; srebro: kontrakt FMP jako przybliżenie) — to nie cena odkupu u dealera ani cena "
+            "sprzedaży na platformie. Giełdowe ETF/ETC/ETN po cenie rynkowej, nie jako gramy "
             "metalu na własność; każda pozycja liczona raz."
             + (f" Bez wyceny (pominięte): {', '.join(exposure['unpriced'])}." if exposure["unpriced"] else "")
         )
@@ -1093,7 +1105,7 @@ def _render_exposure(positions_with_summaries: list) -> None:
 def _position_history(market: MarketData, position) -> tuple[list[dict], bool, str] | None:
     """Notowania pozycji od jej dostawcy ceny (tylko potwierdzony instrument)."""
     position = dict(position)
-    if not is_instrument_confirmed(position) or asset_class_of(position) in PHYSICAL:
+    if not is_instrument_confirmed(position) or asset_class_of(position) in (*PHYSICAL, COMMODITY):
         return None
     provider = position.get("price_provider")
     symbol = position.get("price_symbol") or position["ticker"]
@@ -1216,6 +1228,9 @@ def _position_forms_fragment(full_run_conn, position: dict, summary) -> None:
         if asset_class_of(position) in PHYSICAL:
             with st.expander("Wycena ręczna i cena odkupu", expanded=True):
                 _render_manual_valuations(portfolio_conn, position, summary)
+        elif asset_class_of(position) == COMMODITY:
+            with st.expander("Wartość rynkowa i kwota przy sprzedaży", expanded=True):
+                _render_commodity_sale_value(portfolio_conn, position, summary)
         else:
             with st.expander("Dywidendy otrzymane"):
                 _render_dividend_register(portfolio_conn, position)
@@ -1223,6 +1238,90 @@ def _position_forms_fragment(full_run_conn, position: dict, summary) -> None:
             _render_instrument_correction(portfolio_conn, position)
             st.markdown("---")
             _render_transaction_voiding(portfolio_conn, position)
+
+
+def _realizable_for_sub(market: MarketData, position, sub, fx) -> tuple[float | None, str | None]:
+    """Kwota przy sprzedaży (PLN) dla subpozycji metalu na platformie lub
+    metalu fizycznego: cena sprzedaży/odkupu wpisana ręcznie albo (tylko
+    platforma) wartość rynkowa minus opłata. Inne klasy -- None."""
+    position = dict(position)
+    asset_class = asset_class_of(position)
+    if asset_class not in (*PHYSICAL, COMMODITY) or sub.shares_held <= 1e-12:
+        return None, None
+    sale_price = market.manual_valuation(position, "BUYBACK")
+    sale_value_pln = (
+        convert(sale_price.price * sub.shares_held, sale_price.currency, "PLN", fx) if sale_price is not None else None
+    )
+    fee_pct = position.get("sale_fee_pct") if asset_class == COMMODITY else None
+    return realizable_value_pln(sub.current_value_pln, sale_fee_pct=fee_pct, sale_price_value_pln=sale_value_pln)
+
+
+def _render_commodity_sale_value(portfolio_conn, position: dict, summary) -> None:
+    """Metal na platformie: wartość rynkowa (spot) OBOK kwoty możliwej do
+    uzyskania przy sprzedaży -- ta jest niższa o opłatę platformy. Opłatę
+    albo cenę sprzedaży podaje właścicielka (nie zgadujemy cennika)."""
+    market = _market(portfolio_conn)
+    fx = market.nbp_table_a()
+    held = [sub for sub in summary.by_broker_currency if sub.shares_held > 1e-12]
+    values = [sub.current_value_pln for sub in held]
+    market_pln = sum(values) if values and all(v is not None for v in values) else None
+    realizable = [_realizable_for_sub(market, position, sub, fx) for sub in held]
+    st.write(f"Ilość: **{_format_shares(summary.shares_held)} oz** (uncje trojańskie czystego metalu)")
+    st.write(
+        "Wartość rynkowa (cena spot): **"
+        + (f"{market_pln:,.2f} PLN" if market_pln is not None else "brak ceny") + "**"
+    )
+    if realizable and all(r[0] is not None for r in realizable):
+        st.write(
+            f"Do uzyskania przy sprzedaży: **{sum(r[0] for r in realizable):,.2f} PLN** ({realizable[0][1]})"
+        )
+    else:
+        st.info("Kwota przy sprzedaży: brak danych — podaj opłatę platformy przy sprzedaży albo cenę sprzedaży poniżej.")
+
+    purchases = get_purchase_transactions(portfolio_conn, position["position_id"])
+    paid_fees = [
+        (tx["fees"], tx["total_invested"], tx["currency"]) for tx in purchases
+        if tx["fees"] and tx["total_invested"] > tx["fees"]
+    ]
+    if paid_fees:
+        fee, total, currency = paid_fees[-1]
+        st.caption(
+            f"Dla porównania: przy ostatnim zakupie z opłatą zapłaciłaś/eś {fee:.2f} {currency} opłaty "
+            f"= {fee / (total - fee) * 100:.2f}% wartości metalu. Opłata przy sprzedaży może być inna — sprawdź w aplikacji platformy."
+        )
+
+    with st.form(f"commodity_fee_{position['position_id']}"):
+        current_fee = position.get("sale_fee_pct")
+        fee_pct = st.number_input(
+            "Opłata platformy przy sprzedaży (%)", min_value=0.0, max_value=99.0, step=0.01, format="%.2f",
+            value=float(current_fee) if current_fee is not None else 0.0,
+        )
+        clear = st.checkbox("Nie znam opłaty (usuń zapisaną)")
+        if st.form_submit_button("Zapisz opłatę"):
+            update_position_fields(portfolio_conn, position["position_id"], sale_fee_pct=None if clear else fee_pct)
+            portfolio_conn.commit()
+            st.rerun()
+
+    sale_price = market.manual_valuation(position, "BUYBACK")
+    if sale_price is not None:
+        st.caption(f"Zapisana cena sprzedaży z platformy: {sale_price.price:,.2f} {sale_price.currency}/oz (z {sale_price.as_of}).")
+    with st.form(f"commodity_sale_price_{position['position_id']}", clear_on_submit=True):
+        st.markdown("Cena sprzedaży widoczna w aplikacji platformy (ma pierwszeństwo przed opłatą %)")
+        cols = st.columns(2)
+        price = cols[0].number_input("Cena za 1 oz", min_value=0.0, step=0.01, format="%.2f")
+        currency = cols[1].text_input("Waluta", value="PLN")
+        valuation_date = st.date_input("Data")
+        if st.form_submit_button("Zapisz cenę sprzedaży"):
+            if price <= 0 or not currency.strip():
+                st.error("Podaj cenę i walutę.")
+            else:
+                insert_manual_valuation(
+                    portfolio_conn, position_id=position["position_id"], kind="BUYBACK", price_per_unit=price,
+                    currency=currency.strip().upper(), valuation_date=str(valuation_date),
+                    note="cena sprzedaży z platformy",
+                )
+                portfolio_conn.commit()
+                st.rerun()
 
 
 def _render_manual_valuations(portfolio_conn, position: dict, summary) -> None:
@@ -1951,7 +2050,11 @@ def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) 
             st.rerun()
 
 
-_NEW_ASSET_KINDS = ("Instrument giełdowy (akcja/ETF/ETC/ETN)", "Złoto fizyczne", "Srebro fizyczne", "Kryptowaluta")
+_NEW_ASSET_KINDS = (
+    "Instrument giełdowy (akcja/ETF/ETC/ETN)", "Złoto fizyczne", "Srebro fizyczne", "Kryptowaluta",
+    "Złoto/srebro na platformie (np. Revolut)",
+)
+_COMMODITY_LABELS = {"XAG": "XAG — srebro", "XAU": "XAU — złoto"}
 
 
 def _render_fund_fields(key_prefix: str) -> dict:
@@ -2076,6 +2179,94 @@ def _render_new_physical_metal_form(portfolio_conn, user: dict, asset_class: str
                 st.rerun()
 
 
+def _render_new_commodity_form(portfolio_conn, user: dict) -> None:
+    """Metal na platformie (np. Revolut), nieprzechowywany samodzielnie.
+    Ilość w uncjach trojańskich (XAU/XAG), do 8 miejsc. Koszt nabycia =
+    łączna kwota, która zeszła z konta (z opłatą); cena z platformy
+    zapisywana w `price_per_share` (informacyjnie, jak na potwierdzeniu).
+    Kolejny zakup tego samego metalu dopisuje się do istniejącej pozycji."""
+    st.markdown("##### Złoto/srebro na platformie (np. Revolut)")
+    st.caption("Metal kupiony w aplikacji platformy, nieprzechowywany przez Ciebie. Ilość w uncjach trojańskich (oz).")
+    with st.form("new_commodity_form", clear_on_submit=True):
+        symbol = st.selectbox("Instrument", list(_COMMODITY_LABELS), format_func=_COMMODITY_LABELS.get,
+                              key="commodity_symbol")
+        broker = st.selectbox("Platforma", _BROKER_OPTIONS, index=_BROKER_OPTIONS.index("REVOLUT"),
+                              format_func=broker_label, key="commodity_broker")
+        purchase_date = st.date_input("Data transakcji", key="commodity_date")
+        quantity = st.number_input("Ilość (oz, do 8 miejsc po przecinku)", min_value=0.0, step=0.00000001,
+                                   format="%.8f", key="commodity_qty")
+        cols = st.columns(2)
+        price = cols[0].number_input("Cena za 1 oz (z platformy)", min_value=0.0, step=0.01, format="%.4f",
+                                     key="commodity_price")
+        currency = cols[1].text_input("Waluta", value="PLN", key="commodity_ccy")
+        fee = st.number_input("Opłata", min_value=0.0, step=0.01, format="%.2f", key="commodity_fee")
+        total = st.number_input(
+            "Łączny koszt (cała kwota, która zeszła z konta; puste = ilość × cena + opłata)",
+            min_value=0.0, step=0.01, format="%.2f", key="commodity_total",
+        )
+        fx_rate = st.number_input(
+            "Kurs (opcjonalnie, waluta inna niż PLN): ile PLN za 1 jednostkę waluty", min_value=0.0, step=0.0001,
+            format="%.4f", key="commodity_fx",
+        )
+        sale_fee = st.number_input(
+            "Opłata platformy przy sprzedaży % (opcjonalnie — do kwoty możliwej do uzyskania)",
+            min_value=0.0, max_value=99.0, step=0.01, format="%.2f", key="commodity_sale_fee",
+        )
+        note = st.text_input("Notatka (opcjonalnie)", key="commodity_note")
+        if st.form_submit_button("Zapisz"):
+            final_total = total if total > 0 else quantity * price + fee
+            errors = _purchase_errors(quantity, currency, final_total)
+            if price <= 0:
+                errors.append("Cena za 1 oz musi być większa od zera.")
+            if not errors and total > 0:
+                mismatch = commodity_cost_error(quantity, price, fee, total)
+                if mismatch:
+                    errors.append(mismatch)
+            for error in errors:
+                st.error(error)
+            if not errors:
+                _save_commodity_purchase(
+                    portfolio_conn, user, symbol=symbol, broker=broker, purchase_date=purchase_date,
+                    quantity=quantity, price=price, currency=currency.strip().upper(), fee=fee,
+                    total=round(final_total, 2), fx_rate=fx_rate, sale_fee_pct=sale_fee or None, note=note,
+                )
+                st.toast(f"Zapisano zakup {symbol}.")
+                st.rerun()
+
+
+def _save_commodity_purchase(
+    portfolio_conn, user: dict, *, symbol: str, broker: str, purchase_date, quantity: float, price: float,
+    currency: str, fee: float, total: float, fx_rate: float, sale_fee_pct: float | None, note: str,
+) -> None:
+    metal = COMMODITY_SYMBOLS[symbol]
+    existing = [
+        p for p in get_positions_for_user(portfolio_conn, user["user_id"])
+        if asset_class_of(p) == COMMODITY and (dict(p).get("price_symbol") or p["ticker"]) == symbol
+    ]
+    if existing:
+        position_id = existing[0]["position_id"]
+    else:
+        position_id = insert_position(
+            portfolio_conn, user_id=user["user_id"], ticker=symbol,
+            company_name=f"{'Złoto' if metal == 'GOLD' else 'Srebro'} ({symbol})",
+            instrument_currency=currency, instrument_confirmed=True,
+        )
+        update_position_fields(
+            portfolio_conn, position_id, asset_class=COMMODITY, metal=metal, price_symbol=symbol,
+            price_provider="NBP" if metal == "GOLD" else "FMP", unit_weight=1.0, weight_unit="OZT",
+        )
+    if sale_fee_pct is not None:
+        update_position_fields(portfolio_conn, position_id, sale_fee_pct=sale_fee_pct)
+    transaction_id = insert_purchase_transaction(
+        portfolio_conn, position_id=position_id, broker=broker, acquisition_type="BUY",
+        purchase_date=str(purchase_date), shares=quantity, total_invested=total, currency=currency,
+        price_per_share=price, fees=(fee or None), note=(note.strip() or None),
+    )
+    if fx_rate and currency != "PLN":
+        set_transaction_fx_rate(portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate)
+    portfolio_conn.commit()
+
+
 def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
     """Faza 11 (P4): kryptowaluta identyfikowana parą notowania FMP (np.
     BTCUSD), nie samym symbolem -- wynik trzeba potwierdzić."""
@@ -2170,6 +2361,8 @@ def _render_add_transaction_tab(portfolio_conn, user: dict) -> None:
             _render_new_position_form(portfolio_conn, user)
         elif kind == _NEW_ASSET_KINDS[3]:
             _render_new_crypto_form(portfolio_conn, user)
+        elif kind == _NEW_ASSET_KINDS[4]:
+            _render_new_commodity_form(portfolio_conn, user)
         else:
             _render_new_physical_metal_form(
                 portfolio_conn, user, PHYSICAL_GOLD if kind == _NEW_ASSET_KINDS[1] else PHYSICAL_SILVER,

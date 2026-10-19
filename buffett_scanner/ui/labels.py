@@ -47,7 +47,7 @@ BROKER_LABELS: dict[str, str] = {
     "REVOLUT": "Revolut",
     # Decyzja właścicielki 2026-10-19: platformy metali i elektroniki.
     "CASHIFY": "Cashify",
-    "GOLD_SAVER": "Gold_Saver",
+    "GOLD_SAVER": "Gold Saver",
     "MENNICA_SKARBOWA": "Mennica Skarbowa",
     "OTHER": "Inny",
 }

@@ -33,6 +33,7 @@ from buffett_scanner.providers.eodhd import EODHDClient, EODHDError
 from buffett_scanner.providers.eodhd import resolve_api_key as resolve_eodhd_key
 from buffett_scanner.providers.fmp import FMPClient, FMPError
 from buffett_scanner.ui.assets import (
+    COMMODITY,
     CRYPTO,
     PHYSICAL,
     PHYSICAL_GOLD,
@@ -463,6 +464,25 @@ class MarketData:
                     )
         return self.manual_valuation(position, "MARKET")
 
+    def _commodity_quote(self, position) -> Quote | None:
+        """Metal na platformie (XAU/XAG): cena 1 uncji trojańskiej czystego
+        metalu -- złoto z ceny NBP (PLN/g x 31,1034768 g), srebro z FMP
+        SIUSD (kontrakt terminowy jako przybliżenie spot, USD/oz). To cena
+        rynkowa, nie cena sprzedaży na platformie. Brak ceny -> wycena ręczna."""
+        metal = position["metal"] if "metal" in position.keys() else None
+        if metal == "GOLD":
+            gold = self.nbp_gold_pln_per_gram()
+            if gold is not None:
+                return Quote(price=TROY_OUNCE_G * gold[1], currency="PLN", source="NBP (cena złota)", as_of=gold[0])
+        if metal == "SILVER":
+            cached = self.fmp_quote("SIUSD")
+            if cached is not None and cached.value.get("price"):
+                return Quote(
+                    price=float(cached.value["price"]), currency="USD", source="FMP (kontrakt na srebro)",
+                    as_of=_timestamp_date(cached.value.get("timestamp")), stale=cached.stale,
+                )
+        return self.manual_valuation(position, "MARKET")
+
     def crypto_quote(self, symbol: str) -> Quote | None:
         cached = self.fmp_quote(symbol)
         if cached is None or not cached.value.get("price"):
@@ -476,6 +496,8 @@ class MarketData:
         asset_class = asset_class_of(position)
         if asset_class in PHYSICAL:
             return self._physical_metal_quote(position)
+        if asset_class == COMMODITY:
+            return self._commodity_quote(position)
         if asset_class == CRYPTO:
             symbol = (position["price_symbol"] if "price_symbol" in keys else None) or position["ticker"]
             return self.crypto_quote(symbol)

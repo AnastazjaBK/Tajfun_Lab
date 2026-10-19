@@ -325,7 +325,7 @@ def test_phase11_migration_runs_only_after_verified_backup(conn):
         for name, _ in pg_store.PG_NEW_TABLES:
             cur.execute(f"DROP TABLE IF EXISTS {name}")
         for table, column, _ in pg_store.PG_COLUMN_MIGRATIONS:
-            if column in ("isin", "asset_class", "fx_rate_actual"):
+            if column in ("isin", "asset_class", "fx_rate_actual", "sale_fee_pct"):
                 cur.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}")
         cur.execute("DELETE FROM portfolio_backups")
     conn.commit()
@@ -341,13 +341,14 @@ def test_phase11_migration_runs_only_after_verified_backup(conn):
 
     info = pg_store.get_latest_backup_info(conn)
     assert "positions.isin" in info["reason"]
+    assert "positions.sale_fee_pct" in info["reason"]  # metale na platformie (2026-10-19)
     assert json.loads(info["row_counts"])["purchase_transactions"] == 1
     with conn.cursor() as cur:
         cur.execute("SELECT payload FROM portfolio_backups WHERE backup_id = %s", (info["backup_id"],))
         payload = json.loads(cur.fetchone()["payload"])
     assert payload["positions"][0]["ticker"] == "SU.PA"
     [position] = pg_store.get_positions_for_user(conn, uid)
-    assert position["isin"] is None and position["asset_class"] is None
+    assert position["isin"] is None and position["asset_class"] is None and position["sale_fee_pct"] is None
     pg_store.init_schema(conn)  # brak oczekujących migracji -> brak kolejnej kopii
     assert pg_store.get_latest_backup_info(conn)["backup_id"] == info["backup_id"]
 

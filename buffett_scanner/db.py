@@ -800,6 +800,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("positions", "is_collectible", "INTEGER"),
     ("positions", "exposure_type", "TEXT"),
     ("positions", "annual_fee_pct", "REAL"),
+    ("positions", "sale_fee_pct", "REAL"),
     ("purchase_transactions", "fx_rate_actual", "REAL"),
     ("sale_transactions", "fx_rate_actual", "REAL"),
 )
@@ -843,6 +844,7 @@ POSITION_EXTRA_FIELDS = (
     "isin", "quote_currency", "price_provider", "price_symbol", "asset_class",
     "metal", "product_form", "unit_weight", "weight_unit", "fineness",
     "storage_location", "is_collectible", "exposure_type", "annual_fee_pct",
+    "sale_fee_pct",
 )
 
 

@@ -182,6 +182,7 @@ PG_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("positions", "is_collectible", "INTEGER"),
     ("positions", "exposure_type", "TEXT"),
     ("positions", "annual_fee_pct", "DOUBLE PRECISION"),
+    ("positions", "sale_fee_pct", "DOUBLE PRECISION"),
     ("purchase_transactions", "fx_rate_actual", "DOUBLE PRECISION"),
     ("sale_transactions", "fx_rate_actual", "DOUBLE PRECISION"),
 )
@@ -251,6 +252,7 @@ POSITION_EXTRA_FIELDS = (
     "isin", "quote_currency", "price_provider", "price_symbol", "asset_class",
     "metal", "product_form", "unit_weight", "weight_unit", "fineness",
     "storage_location", "is_collectible", "exposure_type", "annual_fee_pct",
+    "sale_fee_pct",
 )
 
 
