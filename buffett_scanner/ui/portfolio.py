@@ -201,6 +201,66 @@ def find_negative_holding(purchases: list, sales: list, *, tolerance: float = 1e
     return None
 
 
+# Opłaty transakcji (`fee_status`, 2026-10-19). Koszt zakupu w bazie to
+# ZAWSZE cała kwota z konta (z opłatami) -- opłaty nigdy nie są doliczane
+# drugi raz. Status mówi tylko, czy ich wysokość jest znana.
+FEES_KNOWN = "KNOWN"      # `fees` = znana kwota opłat (może być 0)
+FEES_UNSPLIT = "UNSPLIT"  # opłaty zawarte w kwocie, wysokość nieznana (`fees` NULL)
+
+
+class AmountError(ValueError):
+    """Niespójne kwoty w formularzu -- komunikat dla użytkownika."""
+
+
+def resolve_purchase_amounts(amount: float, fees: float, *, amount_includes_fees: bool,
+                             fees_unknown: bool) -> tuple[float, float | None, str]:
+    """(koszt łączny, opłaty albo None, fee_status) z dwóch sposobów
+    wpisania: A) kwota łączna z opłatami, B) kwota bez opłat + opłaty.
+    Przykład: A 300 z opłatą 4,50 i B 295,50 + 4,50 -> koszt 300,00."""
+    if fees_unknown:
+        if not amount_includes_fees:
+            raise AmountError("Przy kwocie bez opłat trzeba podać opłaty — albo wybierz „Kwota zawiera opłaty”.")
+        return round(amount, 2), None, FEES_UNSPLIT
+    if amount_includes_fees:
+        if fees > amount:
+            raise AmountError("Opłaty nie mogą być większe niż kwota łączna.")
+        return round(amount, 2), fees, FEES_KNOWN
+    return round(amount + fees, 2), fees, FEES_KNOWN
+
+
+def resolve_sale_amounts(shares: float, amount: float, fees: float, *, amount_is_net: bool,
+                         fees_unknown: bool) -> tuple[float, float | None, str]:
+    """(cena za jednostkę przed opłatami, opłaty albo None, fee_status).
+    Kwota sprzedaży to łączna kwota za wszystkie jednostki: albo
+    faktyczny wpływ po opłatach (netto), albo kwota przed opłatami
+    (brutto). Przychód liczony dalej = liczba x cena - opłaty = wpływ netto."""
+    if shares <= 0:
+        raise AmountError("Liczba jednostek musi być większa od zera.")
+    if fees_unknown:
+        if not amount_is_net:
+            raise AmountError("Przy kwocie przed opłatami trzeba podać opłaty — albo wybierz „wpływ po opłatach”.")
+        return amount / shares, None, FEES_UNSPLIT
+    gross = amount + fees if amount_is_net else amount
+    if fees > gross:
+        raise AmountError("Opłaty nie mogą być większe niż kwota sprzedaży.")
+    return gross / shares, fees, FEES_KNOWN
+
+
+def fees_unknown_default(row) -> bool:
+    """Formularz edycji: opłaty nieznane, gdy tak oznaczono albo gdy stary
+    wpis (bez statusu) nie ma podanych opłat -- nie zakładamy zera."""
+    status = _field(row, "fee_status")
+    if status == FEES_UNSPLIT:
+        return True
+    return status is None and not _field(row, "fees")
+
+
+def sale_amounts(row) -> tuple[float, float]:
+    """(kwota przed opłatami, wpływ po opłatach) wiersza sprzedaży."""
+    gross = float(row["shares"]) * float(row["sale_price"])
+    return gross, gross - (_field(row, "fees") or 0.0)
+
+
 # Typy transakcji w interfejsie -> tabela, w której żyje wiersz.
 TRANSACTION_TABLE = {"BUY": "PURCHASE", "BONUS": "PURCHASE", "SELL": "SALE"}
 
@@ -233,8 +293,17 @@ def retype_defaults(kind: str, row, new_type: str) -> dict:
         total = float(row["total_invested"] or 0.0)
         defaults["total_invested"] = total
         defaults["sale_price"] = (total + fees) / shares if shares > 0 and total > 0 else 0.0
+    # Pola formularza kwoty: zakup -- kwota łączna z opłatami; sprzedaż --
+    # wpływ po opłatach (netto). Zakup -> sprzedaż: dotychczasowa kwota
+    # traktowana jako wpływ netto (cena = (kwota + opłaty) / liczba).
+    defaults["fees_unknown"] = fees_unknown_default(row)
+    if new_type == "SELL":
+        defaults["amount"] = sale_amounts(row)[1] if kind == "SALE" else float(row["total_invested"] or 0.0)
+    else:
+        defaults["amount"] = defaults["total_invested"]
     if new_type == "BONUS":
         defaults["total_invested"] = 0.0
+        defaults["amount"] = 0.0
         defaults["fees"] = 0.0
     return defaults
 

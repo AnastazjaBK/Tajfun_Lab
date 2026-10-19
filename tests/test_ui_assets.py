@@ -104,3 +104,50 @@ def test_realizable_value_is_separate_from_market_value_and_never_guessed():
     assert value == pytest.approx(545.89 * 0.985) and "1.5%" in basis
     assert realizable_value_pln(545.89, sale_fee_pct=1.5, sale_price_value_pln=520.0)[0] == 520.0
     assert realizable_value_pln(None, sale_fee_pct=1.5) == (None, None)
+
+
+# --- Kategorie portfela i dashboard kategorii (2026-10-19) ---
+
+from buffett_scanner.ui.assets import (  # noqa: E402
+    PORTFOLIO_CATEGORIES,
+    category_summaries,
+    is_active,
+    portfolio_category_of,
+)
+
+
+def test_category_comes_only_from_saved_asset_class_and_each_class_has_one_category():
+    assert portfolio_category_of({"asset_class": None, "ticker": "XAU"}) == "STOCKS"  # ticker nie decyduje
+    assert portfolio_category_of({"asset_class": "COMMODITY", "ticker": "XAU"}) == "PLATFORM_METALS"
+    assert portfolio_category_of({"asset_class": "COMMODITY", "ticker": "XAG"}) == "PLATFORM_METALS"
+    assert portfolio_category_of({"asset_class": "ETC", "metal": "GOLD"}) == "FUNDS"  # nie metal fizyczny
+    assert portfolio_category_of({"asset_class": "PHYSICAL_SILVER"}) == "SILVER"
+    classes = [c for _, _, cs in PORTFOLIO_CATEGORIES for c in cs]
+    assert len(classes) == len(set(classes))
+
+
+def test_category_dashboard_values_share_active_and_missing_prices():
+    sold = compute_position_summary(
+        9, [{"broker": "OTHER", "currency": "PLN", "purchase_date": "2026-01-01", "shares": 1.0,
+             "total_invested": 100.0, "acquisition_type": "BUY"}],
+        [{"broker": "OTHER", "currency": "PLN", "sale_date": "2026-02-01", "shares": 1.0, "sale_price": 130.0}],
+        current_price=150.0, current_price_currency="PLN", fx=FX,
+    )
+    positions = [
+        ({"ticker": "AAPL", "asset_class": None}, _summary(1, 230.0, "USD", invested=500.0)),
+        ({"ticker": "NYMT", "asset_class": "STOCK"}, _summary(2, None, None)),
+        ({"ticker": "KO", "asset_class": "STOCK"}, sold),
+        ({"ticker": "XAG", "asset_class": COMMODITY, "metal": "SILVER"},
+         compute_position_summary(3, [REVOLUT_XAG], [], current_price=50.0, current_price_currency="USD", fx=FX)),
+    ]
+    cats = category_summaries(positions)
+    assert list(cats) == ["STOCKS", "PLATFORM_METALS"]
+    stocks, metals = cats["STOCKS"], cats["PLATFORM_METALS"]
+    assert stocks["value_pln"] == pytest.approx(230.0 * 3.70)
+    assert stocks["cost_pln"] == pytest.approx(500.0)
+    assert stocks["unrealized_pl_pln"] == pytest.approx(230.0 * 3.70 - 500.0)
+    assert stocks["active_count"] == 2 and stocks["closed_count"] == 1  # KO sprzedane w całości
+    assert stocks["missing"] == ["NYMT"]
+    assert stocks["realized_pl_pln"] == pytest.approx(30.0)
+    assert stocks["share_pct"] + metals["share_pct"] == pytest.approx(100.0)
+    assert not is_active(sold)

@@ -391,14 +391,14 @@ def apply_transaction_change(
                 conn, position_id=position_id, broker=new_row["broker"], acquisition_type=new_type,
                 purchase_date=new_row["purchase_date"], shares=new_row["shares"], total_invested=total,
                 currency=new_row["currency"], price_per_share=(total / new_row["shares"]) if new_type == "BUY" else None,
-                fees=new_row.get("fees") or None, note=note or None,
+                fees=new_row.get("fees"), note=note or None, fee_status=new_row.get("fee_status"),
             )
             new_kind, table = "PURCHASE", "zakup"
         else:
             new_id = store.insert_sale_transaction(
                 conn, position_id=position_id, broker=new_row["broker"], sale_date=new_row["sale_date"],
                 shares=new_row["shares"], sale_price=new_row["sale_price"], currency=new_row["currency"],
-                fees=new_row.get("fees") or None, note=note or None,
+                fees=new_row.get("fees"), note=note or None, fee_status=new_row.get("fee_status"),
             )
             new_kind, table = "SALE", "sprzedaż"
         if fx_rate and str(new_row["currency"]).upper() != "PLN":

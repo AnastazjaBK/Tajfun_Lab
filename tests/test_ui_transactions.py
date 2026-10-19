@@ -195,3 +195,79 @@ def test_sell_to_buy_and_buy_to_bonus(conn):
             new_row={"broker": "REVOLUT", "currency": "PLN", "shares": 1, "sale_date": "2026-03-01",
                      "sale_price": 1.0},
         )
+
+
+# --- Kwota z opłatami albo bez + opłaty (2026-10-19) ---
+
+from buffett_scanner.ui.portfolio import (  # noqa: E402
+    FEES_KNOWN,
+    FEES_UNSPLIT,
+    AmountError,
+    fees_unknown_default,
+    resolve_purchase_amounts,
+    resolve_sale_amounts,
+)
+
+
+def test_both_purchase_entry_modes_give_exactly_the_same_total_cost():
+    assert resolve_purchase_amounts(300.0, 4.50, amount_includes_fees=True, fees_unknown=False) == (300.0, 4.5, FEES_KNOWN)
+    assert resolve_purchase_amounts(295.50, 4.50, amount_includes_fees=False, fees_unknown=False) == (300.0, 4.5, FEES_KNOWN)
+    assert resolve_purchase_amounts(300.0, 0.0, amount_includes_fees=True, fees_unknown=True) == (300.0, None, FEES_UNSPLIT)
+    with pytest.raises(AmountError):  # bez opłat, a opłat nie znam -> nie da się policzyć kosztu
+        resolve_purchase_amounts(295.5, 0.0, amount_includes_fees=False, fees_unknown=True)
+    with pytest.raises(AmountError):
+        resolve_purchase_amounts(3.0, 4.5, amount_includes_fees=True, fees_unknown=False)
+
+
+def test_sale_gross_and_net_entry_give_the_same_proceeds():
+    price_net, fees, _ = resolve_sale_amounts(2.0, 196.0, 4.0, amount_is_net=True, fees_unknown=False)
+    price_gross, fees2, _ = resolve_sale_amounts(2.0, 200.0, 4.0, amount_is_net=False, fees_unknown=False)
+    assert price_net == price_gross == 100.0 and fees == fees2 == 4.0
+    price, fees, status = resolve_sale_amounts(2.0, 196.0, 0.0, amount_is_net=True, fees_unknown=True)
+    assert (price * 2, fees, status) == (196.0, None, FEES_UNSPLIT)  # wpływ = kwota, opłaty nierozdzielone
+    with pytest.raises(AmountError):
+        resolve_sale_amounts(2.0, 200.0, 0.0, amount_is_net=False, fees_unknown=True)
+
+
+def test_fees_are_not_counted_twice_in_cost_and_counted_once_in_sale_result():
+    total, fees, _ = resolve_purchase_amounts(295.50, 4.50, amount_includes_fees=False, fees_unknown=False)
+    price, sale_fees, _ = resolve_sale_amounts(1.0, 400.0, 5.0, amount_is_net=False, fees_unknown=False)
+    s = summary([buy(1, "2026-01-10", 1.0, total, fees=fees)], [sell(1, "2026-03-01", 1.0, price, fees=sale_fees)])
+    [sub] = s.by_broker_currency
+    assert sub.realized_pl == pytest.approx(395.0 - 300.0)  # wpływ netto - koszt z opłatami
+
+
+def test_legacy_row_without_fees_is_treated_as_unknown_not_zero():
+    assert fees_unknown_default({"fees": None, "fee_status": None}) is True
+    assert fees_unknown_default({"fees": 4.5, "fee_status": None}) is False
+    assert fees_unknown_default({"fees": None, "fee_status": FEES_KNOWN}) is False
+    assert fees_unknown_default({"fees": None, "fee_status": FEES_UNSPLIT}) is True
+
+
+def test_historic_bitcoin_purchase_can_be_marked_unsplit_then_split_without_changing_cost(conn):
+    uid = db.create_user(conn, "Anastazja")
+    pid = db.insert_position(conn, user_id=uid, ticker="BTCUSD", company_name="Bitcoin", instrument_confirmed=True)
+    legacy = db.insert_purchase_transaction(conn, position_id=pid, broker="REVOLUT", acquisition_type="BUY",
+                                            purchase_date="2021-05-01", shares=0.00123456, total_invested=300.0,
+                                            currency="PLN")
+    conn.commit()
+    row = dict(db.get_purchase_transactions(conn, pid)[0])
+    d = retype_defaults("PURCHASE", row, "BUY")
+    assert d["amount"] == 300.0 and d["fees_unknown"] is True  # domyślnie: opłaty nieznane, nie zero
+
+    total, fees, status = resolve_purchase_amounts(300.0, 0.0, amount_includes_fees=True, fees_unknown=True)
+    marked = apply_transaction_change(conn, pid, kind="PURCHASE", old_id=legacy, current_type="BUY", new_type="BUY",
+                                      new_row={"broker": "REVOLUT", "currency": "PLN", "shares": 0.00123456,
+                                               "purchase_date": "2021-05-01", "total_invested": total,
+                                               "fees": fees, "fee_status": status})
+    total, fees, status = resolve_purchase_amounts(295.50, 4.50, amount_includes_fees=False, fees_unknown=False)
+    split = apply_transaction_change(conn, pid, kind="PURCHASE", old_id=marked, current_type="BUY", new_type="BUY",
+                                     new_row={"broker": "REVOLUT", "currency": "PLN", "shares": 0.00123456,
+                                              "purchase_date": "2021-05-01", "total_invested": total,
+                                              "fees": fees, "fee_status": status})
+    [active] = db.get_purchase_transactions(conn, pid)
+    assert active["transaction_id"] == split
+    assert (active["total_invested"], active["fees"], active["fee_status"], active["shares"]) == (300.0, 4.5, FEES_KNOWN, 0.00123456)
+    history = conn.execute("SELECT transaction_id, fee_status, voided_at FROM purchase_transactions ORDER BY transaction_id").fetchall()
+    assert [(r["transaction_id"], r["fee_status"], r["voided_at"] is not None) for r in history] == [
+        (legacy, None, True), (marked, FEES_UNSPLIT, True), (split, FEES_KNOWN, False)]  # nic nie zniknęło

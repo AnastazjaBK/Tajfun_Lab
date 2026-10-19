@@ -185,6 +185,10 @@ PG_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("positions", "sale_fee_pct", "DOUBLE PRECISION"),
     ("purchase_transactions", "fx_rate_actual", "DOUBLE PRECISION"),
     ("sale_transactions", "fx_rate_actual", "DOUBLE PRECISION"),
+    # 2026-10-19: KNOWN = opłaty znane; UNSPLIT = zawarte w kwocie, wysokość
+    # nieznana; NULL = wpis sprzed tej zmiany (nic nie zakładamy).
+    ("purchase_transactions", "fee_status", "TEXT"),
+    ("sale_transactions", "fee_status", "TEXT"),
 )
 
 _PG_NOW = "to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')"
@@ -632,25 +636,31 @@ def get_position(conn, position_id: int):
         return cur.fetchone()
 
 
+def _insert_returning(conn, table: str, values: dict, id_column: str) -> int:
+    """INSERT z nazwami kolumn ze stałego kodu (nigdy z danych użytkownika)."""
+    columns = ", ".join(values)
+    placeholders = ", ".join(["%s"] * len(values))
+    with conn.cursor() as cur:
+        cur.execute(
+            f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING {id_column}", tuple(values.values()),
+        )
+        return cur.fetchone()[id_column]
+
+
 def insert_purchase_transaction(
     conn, *, position_id: int, broker: str, acquisition_type: str, purchase_date: str,
     shares: float, total_invested: float, currency: str,
     price_per_share: float | None = None, fees: float | None = None, note: str | None = None,
+    fee_status: str | None = None,
 ) -> int:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO purchase_transactions (
-                position_id, broker, acquisition_type, purchase_date, shares,
-                price_per_share, total_invested, currency, fees, note
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING transaction_id
-            """,
-            (
-                position_id, broker, acquisition_type, purchase_date, shares,
-                price_per_share, total_invested, currency, fees, note,
-            ),
-        )
-        return cur.fetchone()["transaction_id"]
+    values = {
+        "position_id": position_id, "broker": broker, "acquisition_type": acquisition_type,
+        "purchase_date": purchase_date, "shares": shares, "price_per_share": price_per_share,
+        "total_invested": total_invested, "currency": currency, "fees": fees, "note": note,
+    }
+    if fee_status is not None:  # kolumna z 2026-10-19 -- bez niej zapis działa też na starszym schemacie
+        values["fee_status"] = fee_status
+    return _insert_returning(conn, "purchase_transactions", values, "transaction_id")
 
 
 def get_purchase_transactions(conn, position_id: int) -> list:
@@ -684,17 +694,15 @@ def void_purchase_transaction(conn, transaction_id: int, reason: str | None = No
 def insert_sale_transaction(
     conn, *, position_id: int, broker: str, sale_date: str, shares: float,
     sale_price: float, currency: str, fees: float | None = None, note: str | None = None,
+    fee_status: str | None = None,
 ) -> int:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO sale_transactions (
-                position_id, broker, sale_date, shares, sale_price, currency, fees, note
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING transaction_id
-            """,
-            (position_id, broker, sale_date, shares, sale_price, currency, fees, note),
-        )
-        return cur.fetchone()["transaction_id"]
+    values = {
+        "position_id": position_id, "broker": broker, "sale_date": sale_date, "shares": shares,
+        "sale_price": sale_price, "currency": currency, "fees": fees, "note": note,
+    }
+    if fee_status is not None:  # patrz insert_purchase_transaction
+        values["fee_status"] = fee_status
+    return _insert_returning(conn, "sale_transactions", values, "transaction_id")
 
 
 def get_sale_transactions(conn, position_id: int) -> list:

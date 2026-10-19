@@ -91,6 +91,7 @@ from buffett_scanner.portfolio_backend import (
 )
 from buffett_scanner.ui.assets import (
     ASSET_CLASS_LABELS,
+    CATEGORY_LABELS,
     COMMODITY,
     COMMODITY_SYMBOLS,
     CRYPTO,
@@ -104,8 +105,11 @@ from buffett_scanner.ui.assets import (
     PHYSICAL_GOLD,
     PHYSICAL_SILVER,
     PRODUCT_FORM_LABELS,
+    STOCK,
     asset_class_of,
+    category_summaries,
     exposure_summary,
+    is_active,
     pure_grams_per_piece,
     commodity_cost_error,
     realizable_value_pln,
@@ -133,11 +137,18 @@ from buffett_scanner.ui.price_changes import (
     periods_affected,
 )
 from buffett_scanner.ui.portfolio import (
+    FEES_KNOWN,
+    FEES_UNSPLIT,
+    AmountError,
+    fees_unknown_default,
     compute_portfolio_bar_summary,
     compute_portfolio_pln_summary,
     find_negative_holding,
     replace_transaction,
+    resolve_purchase_amounts,
+    resolve_sale_amounts,
     retype_defaults,
+    sale_amounts,
     transaction_type,
 )
 from buffett_scanner.ui.market_data import EODHD_DAILY_BUDGET, MarketData
@@ -279,7 +290,7 @@ def _format_shares(value: float) -> str:
 
 
 def _render_pln_summary(
-    container, positions_with_summaries: list, fx: FxRates | None, *, compact: bool,
+    container, positions_with_summaries: list, fx: FxRates | None, *,
     dividends_net_pln: float | None = 0.0,
 ) -> None:
     """Faza 11 (P1): portfel w PLN. Koszt = kursy z dni transakcji (kurs
@@ -323,16 +334,6 @@ def _render_pln_summary(
             "(orientacyjnie — to nie kurs brokera ani kurs podatkowy; kurs brokera możesz dopisać w karcie pozycji)"
         )
     container.caption("; ".join(notes) + ".")
-    if compact or len(pln["by_broker"]) < 2:
-        return
-    container.dataframe(
-        [
-            {"Platforma": broker_label(b), "Wartość (PLN)": round(v["value_pln"], 2),
-             "Koszt (PLN)": round(v["cost_pln"], 2), "Wynik (PLN)": round(v["value_pln"] - v["cost_pln"], 2)}
-            for b, v in sorted(pln["by_broker"].items())
-        ],
-        use_container_width=True, hide_index=True,
-    )
 
 
 def _dividends_received_pln(portfolio_conn, market: MarketData, positions_with_summaries: list, broker: str | None):
@@ -797,7 +798,7 @@ def _render_portfolio_bar(portfolio_conn, scanner_conn, user: dict) -> None:
     cols[1].metric("Do przeglądu", review_needed)
     if summaries:
         _render_pln_summary(
-            st, positions_with_summaries, fx, compact=True,
+            st, positions_with_summaries, fx,
             dividends_net_pln=_dividends_received_pln(portfolio_conn, market, positions_with_summaries, broker),
         )
         _render_pricing_caption(st, summaries, fx, market.eodhd_calls_today())
@@ -966,13 +967,8 @@ def _render_portfolio_summary_tab(
             st.info(f"Brak pozycji na platformie {broker_label(platform_filter)}.")
         return
 
-    st.markdown("##### Łączne wartości (PLN)")
     market = _market(portfolio_conn)
     broker = None if platform_filter == "ALL" else platform_filter
-    _render_pln_summary(
-        st, positions_with_summaries, fx, compact=False,
-        dividends_net_pln=_dividends_received_pln(portfolio_conn, market, positions_with_summaries, broker),
-    )
     with st.expander("Kwoty w oryginalnych walutach"):
         bar = compute_portfolio_bar_summary(summaries, review_needed_count=0)
         cols = st.columns(3)
@@ -980,7 +976,6 @@ def _render_portfolio_summary_tab(
         cols[1].metric("Zainwestowany kapitał", _format_currency_dict(bar["invested_by_currency"]))
         _render_pl_metric(cols[2], "Zysk/strata", bar["unrealized_pl_by_currency"])
         st.caption("Każda waluta osobno — bez przeliczania i bez sumowania różnych walut.")
-    _render_exposure(positions_with_summaries)
 
     portfolio_view = st.radio("Widok pozycji", _PORTFOLIO_VIEWS, horizontal=True, key="portfolio_view")
     if portfolio_view == "Zmiany cen":
@@ -1071,42 +1066,182 @@ def _render_portfolio_summary_tab(
 
 
 _PORTFOLIO_VIEWS = ("Wycena", "Zmiany cen", "Dywidendy")
+_PORTFOLIO_SECTIONS = ("Kategorie", "Wszystkie pozycje", "Wg platform", "+ Dodaj transakcję")
 
 
-def _render_exposure(positions_with_summaries: list) -> None:
-    """Faza 11 (P4): udział klas aktywów i ekspozycja na metale (PLN)."""
-    exposure = exposure_summary(positions_with_summaries)
-    total = sum(exposure["by_class"].values())
-    if total <= 0:
-        return
-    with st.expander("Klasy aktywów i ekspozycja na metale szlachetne"):
-        st.dataframe(
-            [
-                {"Klasa aktywów": ASSET_CLASS_LABELS[c], "Wartość (PLN)": round(v, 2), "Udział": f"{v / total * 100:.1f}%"}
-                for c, v in sorted(exposure["by_class"].items(), key=lambda kv: -kv[1])
-            ],
-            hide_index=True, use_container_width=True,
-        )
-        rows = []
+def _pl_styled(rows: list[dict], signs: list[int], columns: list[str]):
+    """Zielony zysk / czerwona strata w podanych kolumnach (Styler)."""
+    return pd.DataFrame(rows).style.apply(
+        lambda _col: [_PL_GAIN_CSS if x > 0 else _PL_LOSS_CSS if x < 0 else "" for x in signs], subset=columns,
+    )
+
+
+def _sign(value: float | None) -> int:
+    return 0 if not value else (1 if value > 0 else -1)
+
+
+def _render_category_comparison(positions_with_summaries: list, categories: dict) -> None:
+    """Porównanie kategorii (które grupy zyskują, które tracą) i
+    ekspozycja na metale szlachetne -- każda pozycja liczona raz."""
+    with st.expander("Porównanie kategorii i ekspozycja na metale"):
+        rows, signs = [], []
+        for key, data in categories.items():
+            pl = data["unrealized_pl_pln"]
+            rows.append({
+                "Kategoria": CATEGORY_LABELS[key], "Wartość (PLN)": _format_pln(data["value_pln"]),
+                "Wynik (PLN)": _format_pln(pl, signed=True),
+                "Wynik %": f"{data['unrealized_pl_pct']:+.1f}%" if data["unrealized_pl_pct"] is not None else "—",
+                "Udział": f"{data['share_pct']:.1f}%" if data["share_pct"] is not None else "—",
+            })
+            signs.append(_sign(pl))
+        st.dataframe(_pl_styled(rows, signs, ["Wynik (PLN)", "Wynik %"]), hide_index=True, use_container_width=True)
+        exposure = exposure_summary(positions_with_summaries)
+        total = sum(exposure["by_class"].values())
+        metal_rows = []
         for metal, parts in exposure["metals"].items():
             if parts["physical"] or parts["platform"] or parts["exchange"]:
-                rows.append({
+                metal_rows.append({
                     "Metal": METAL_LABELS[metal], "Fizyczny (PLN)": round(parts["physical"], 2),
                     "Na platformie (PLN)": round(parts["platform"], 2),
                     "Giełdowy ETF/ETC/ETN (PLN)": round(parts["exchange"], 2),
                     "Razem (PLN)": round(parts["physical"] + parts["platform"] + parts["exchange"], 2),
                 })
-        if rows:
-            st.dataframe(rows, hide_index=True, use_container_width=True)
-            precious = sum(r["Razem (PLN)"] for r in rows)
+        if metal_rows and total > 0:
+            st.markdown("Ekspozycja na metale szlachetne")
+            st.dataframe(metal_rows, hide_index=True, use_container_width=True)
+            precious = sum(r["Razem (PLN)"] for r in metal_rows)
             st.write(f"Łącznie metale szlachetne: **{precious:,.0f} PLN** ({precious / total * 100:.1f}% wycenionej części portfela).")
         st.caption(
             "Metal fizyczny i metal na platformie (np. XAG/XAU w Revolut) wyceniane po cenie spot czystego metalu "
             "(złoto: NBP; srebro: kontrakt FMP jako przybliżenie) — to nie cena odkupu u dealera ani cena "
             "sprzedaży na platformie. Giełdowe ETF/ETC/ETN po cenie rynkowej, nie jako gramy "
-            "metalu na własność; każda pozycja liczona raz."
+            "metalu na własność; każda pozycja liczona raz. Udział = część wycenionej wartości portfela."
             + (f" Bez wyceny (pominięte): {', '.join(exposure['unpriced'])}." if exposure["unpriced"] else "")
         )
+
+
+def _position_pln(summary) -> tuple[float | None, float | None, float | None]:
+    """(wartość, koszt, wynik) pozycji w PLN -- suma jej subpozycji
+    (platform); None, gdy którejś posiadanej subpozycji brakuje ceny/kursu."""
+    held = [sub for sub in summary.by_broker_currency if sub.shares_held > 1e-12]
+    values = [sub.current_value_pln for sub in held]
+    costs = [sub.invested_pln for sub in held]
+    value = sum(values) if all(v is not None for v in values) else None
+    cost = sum(costs) if all(c is not None for c in costs) else None
+    return value, cost, (value - cost) if value is not None and cost is not None else None
+
+
+def _instrument_label(position) -> str:
+    position = dict(position)
+    if asset_class_of(position) in PHYSICAL:
+        return (position.get("company_name") or position["ticker"])[:30]
+    return position["ticker"]
+
+
+def _render_categories(portfolio_conn, positions_with_summaries: list) -> None:
+    """Widok domyślny PORTFELA: kategoria aktywów (poziom 1) -> dashboard
+    kategorii -> tabela jej instrumentów -> instrument (poziom 2) i jego
+    karta z historią i edycją transakcji. Liczby z tej samej logiki co
+    pasek portfela u góry; sprzedane w całości pozycje nie są aktywne."""
+    categories = category_summaries(positions_with_summaries)
+    if not categories:
+        return
+    keys = list(categories)
+    chosen = st.segmented_control(
+        "Kategoria", keys, default=keys[0], key="portfolio_category",
+        format_func=lambda k: f"{CATEGORY_LABELS[k]} ({categories[k]['active_count']})",
+    )
+    key = chosen if chosen in categories else keys[0]
+    data = categories[key]
+
+    star = " *" if data["missing"] else ""
+    pl, pct = data["unrealized_pl_pln"], data["unrealized_pl_pct"]
+    cols = st.columns(2)
+    cols[0].metric(
+        f"{CATEGORY_LABELS[key]} — wartość{star}", _format_pln(data["value_pln"]),
+        delta=(_format_pln(pl, signed=True) + (f" ({pct:+.1f}%)" if pct is not None else "")) if pl else None,
+        help="Zmiana = wynik niezrealizowany: wartość dziś minus historyczny koszt nabycia (PLN).",
+    )
+    cols[1].metric("Udział w portfelu", f"{data['share_pct']:.1f}%" if data["share_pct"] is not None else "—")
+    realized = data["realized_pl_pln"]
+    st.markdown(
+        f"Koszt nabycia{star}: **{_format_pln(data['cost_pln'])}** · aktywne pozycje: **{data['active_count']}**"
+        + (f" · zamknięte: {data['closed_count']}" if data["closed_count"] else "")
+        + f" · zrealizowany: {_color_pl_text(realized, _format_pln(realized, signed=True)) if realized is not None else '—'}"
+    )
+    if data["missing"]:
+        st.warning("* Wycena częściowa — brak ceny lub kursu dla: " + ", ".join(data["missing"]) + ".")
+
+    active = [(p, s) for p, s in data["positions"] if is_active(s)]
+    closed = [(p, s) for p, s in data["positions"] if not is_active(s)]
+    if active:
+        rows, signs = [], []
+        for position, summary in active:
+            value, cost, pl = _position_pln(summary)
+            rows.append({
+                "Instrument": _instrument_label(position),
+                "Ilość": _format_shares(summary.shares_held),
+                "Wartość (PLN)": _format_pln(value),
+                "Wynik (PLN)": _format_pln(pl, signed=True),
+                "Wynik %": f"{pl / cost * 100:+.1f}%" if pl is not None and cost else "—",
+                "Koszt (PLN)": _format_pln(cost),
+            })
+            signs.append(_sign(pl))
+        st.dataframe(
+            _pl_styled(rows, signs, ["Wynik (PLN)", "Wynik %"]), use_container_width=True, hide_index=True,
+            column_config={"Instrument": st.column_config.TextColumn("Instrument", pinned=True)},
+        )
+    if closed:
+        st.caption("Zamknięte (sprzedane w całości): " + ", ".join(
+            f"{_instrument_label(p)} — wynik zrealizowany "
+            + _format_pln(sum(sub.realized_pl_pln or 0.0 for sub in s.by_broker_currency), signed=True)
+            for p, s in closed
+        ))
+
+    by_id = {p["position_id"]: (p, s) for p, s in active + closed}
+
+    def label(position_id) -> str:
+        position, summary = by_id[position_id]
+        return _instrument_label(position) + ("" if is_active(summary) else " (zamknięta)")
+
+    if len(by_id) <= 20:
+        selected = st.pills("Instrument — szczegóły i transakcje", list(by_id), format_func=label,
+                            key=f"portfolio_instrument_{key}")
+    else:
+        selected = st.selectbox("Instrument — szczegóły i transakcje", list(by_id), index=None, format_func=label,
+                                placeholder="Wybierz instrument", key=f"portfolio_instrument_{key}")
+    if selected in by_id:
+        position, summary = by_id[selected]
+        with st.container(border=True):
+            _render_position_card(portfolio_conn, dict(position), summary)
+    else:
+        st.caption("Wybierz instrument, aby zobaczyć jego szczegóły, historię i edycję transakcji.")
+
+    _render_category_comparison(positions_with_summaries, categories)
+
+
+def _render_platform_breakdown(positions_with_summaries: list) -> None:
+    """Dodatkowy widok: wartość, koszt i wynik według platform (brokerów).
+    Pełna tabela pozycji z rozbiciem na platformy -> „Wszystkie pozycje”."""
+    pln = compute_portfolio_pln_summary(positions_with_summaries)
+    if not pln["by_broker"]:
+        st.info("Brak wycenionych pozycji.")
+        return
+    rows, signs = [], []
+    for broker, values in sorted(pln["by_broker"].items()):
+        pl = values["value_pln"] - values["cost_pln"]
+        rows.append({
+            "Platforma": broker_label(broker), "Wartość (PLN)": _format_pln(values["value_pln"]),
+            "Koszt (PLN)": _format_pln(values["cost_pln"]), "Wynik (PLN)": _format_pln(pl, signed=True),
+            "Wynik %": f"{pl / values['cost_pln'] * 100:+.1f}%" if values["cost_pln"] else "—",
+        })
+        signs.append(_sign(pl))
+    st.dataframe(_pl_styled(rows, signs, ["Wynik (PLN)", "Wynik %"]), hide_index=True, use_container_width=True)
+    st.caption(
+        "Tylko wycenione pozycje. Filtr „Platforma” powyżej zawęża cały portfel do jednej platformy; "
+        "pełna tabela z rozbiciem na platformy jest w „Wszystkie pozycje”."
+        + (" Bez wyceny: " + ", ".join(pln["missing"]) + "." if pln["missing"] else "")
+    )
 
 
 def _position_history(market: MarketData, position) -> tuple[list[dict], bool, str] | None:
@@ -1156,12 +1291,16 @@ def _render_position_card(portfolio_conn, position: dict, summary) -> None:
         except (TypeError, ValueError):
             snapshot = {}
 
-    st.markdown("#### Co to za firma?")
-    description = snapshot.get("business_description") if snapshot else None
-    if description:
-        st.write(description)
-    else:
-        st.info("Opis spółki niedostępny — ta pozycja nie ma jeszcze zapisanej analizy scannera.")
+    # Opis firmy i teza zakupowa pochodzą z analizy spółek scannera -- dla
+    # metali, krypto i funduszy tylko zaśmiecałyby kartę na telefonie.
+    is_stock = asset_class_of(position) == STOCK
+    if is_stock:
+        st.markdown("#### Co to za firma?")
+        description = snapshot.get("business_description") if snapshot else None
+        if description:
+            st.write(description)
+        else:
+            st.info("Opis spółki niedostępny — ta pozycja nie ma jeszcze zapisanej analizy scannera.")
 
     st.markdown("#### Moja pozycja")
     st.write(f"Liczba akcji/jednostek: **{_format_shares(summary.shares_held)}**")
@@ -1187,29 +1326,30 @@ def _render_position_card(portfolio_conn, position: dict, summary) -> None:
             + (f" · zrealizowany {_color_pl_text(realized, _format_pln(realized, signed=True))}" if realized else "")
         )
 
-    st.markdown("#### Dlaczego ją mam?")
-    bull_case = snapshot.get("bull_case") if snapshot else None
-    if bull_case:
-        for item in bull_case:
-            st.write(f"- {item}")
-    else:
-        st.info("Zakup przed analizą scannera — teza do uzupełnienia.")
-
-    st.markdown("#### Co się zmieniło od zakupu?")
-    st.info("Brak danych — monitoring zmian od zakupu nie jest jeszcze częścią V0.")
-
-    st.markdown("#### Co obserwować?")
-    thesis_invalidation = snapshot.get("thesis_invalidation") if snapshot else None
-    biggest_unknown = snapshot.get("biggest_unknown") if snapshot else None
-    if thesis_invalidation or biggest_unknown:
-        if thesis_invalidation:
-            st.write("**Co obaliłoby tezę:**")
-            for item in thesis_invalidation:
+    if is_stock:
+        st.markdown("#### Dlaczego ją mam?")
+        bull_case = snapshot.get("bull_case") if snapshot else None
+        if bull_case:
+            for item in bull_case:
                 st.write(f"- {item}")
-        if biggest_unknown:
-            st.write(f"**Największa niewiadoma:** {biggest_unknown}")
-    else:
-        st.info("Niedostępne — brak zapisanej tezy zakupowej dla tej pozycji.")
+        else:
+            st.info("Zakup przed analizą scannera — teza do uzupełnienia.")
+
+        st.markdown("#### Co się zmieniło od zakupu?")
+        st.info("Brak danych — monitoring zmian od zakupu nie jest jeszcze częścią V0.")
+
+        st.markdown("#### Co obserwować?")
+        thesis_invalidation = snapshot.get("thesis_invalidation") if snapshot else None
+        biggest_unknown = snapshot.get("biggest_unknown") if snapshot else None
+        if thesis_invalidation or biggest_unknown:
+            if thesis_invalidation:
+                st.write("**Co obaliłoby tezę:**")
+                for item in thesis_invalidation:
+                    st.write(f"- {item}")
+            if biggest_unknown:
+                st.write(f"**Największa niewiadoma:** {biggest_unknown}")
+        else:
+            st.info("Niedostępne — brak zapisanej tezy zakupowej dla tej pozycji.")
 
     st.markdown("---")
     st.markdown("#### Status")
@@ -1514,6 +1654,58 @@ def _negative_holding_message(negative: dict, what: str) -> str:
     )
 
 
+_AMOUNT_MODES = {
+    "BUY": {True: "Kwota zawiera opłaty", False: "Kwota bez opłat (+ opłaty)"},
+    "SELL": {True: "Wpływ po opłatach (netto)", False: "Kwota przed opłatami (brutto)"},
+}
+
+
+def _render_amount_fields(key: str, *, side: str, amount: float = 0.0, fees: float = 0.0,
+                          fees_unknown: bool = False, includes: bool = True) -> tuple[bool, float, float, bool]:
+    """Kwota i opłaty transakcji (wewnątrz st.form) -- dwa sposoby
+    wpisania: kwota łączna z opłatami albo kwota bez opłat + opłaty.
+    Opłat nigdy nie doliczamy drugi raz (patrz `resolve_purchase_amounts`)."""
+    includes = st.radio(
+        "Sposób wpisania kwoty", (True, False), index=0 if includes else 1, format_func=_AMOUNT_MODES[side].get,
+        horizontal=True, key=f"{key}_amode",
+    )
+    amount = st.number_input(
+        "Kwota sprzedaży (łącznie za wszystkie jednostki)" if side == "SELL" else "Kwota zakupu (łącznie)",
+        min_value=0.0, value=float(amount or 0.0), step=0.01, format="%.2f", key=f"{key}_amount",
+    )
+    fees = st.number_input("Opłaty / prowizja", min_value=0.0, value=float(fees or 0.0), step=0.01, format="%.2f",
+                           key=f"{key}_afees")
+    fees_unknown = st.checkbox(
+        "Nie znam wysokości opłat — są zawarte w kwocie (nierozdzielone)", value=bool(fees_unknown),
+        key=f"{key}_aunknown",
+    )
+    return includes, amount, fees, fees_unknown
+
+
+def _resolve_buy(fields: tuple[bool, float, float, bool]) -> tuple[float, float | None, str]:
+    includes, amount, fees, unknown = fields
+    total, fees, status = resolve_purchase_amounts(amount, fees, amount_includes_fees=includes, fees_unknown=unknown)
+    if total <= 0:
+        raise AmountError("Kwota zakupu musi być większa od zera (bezpłatne jednostki to „Bonus”).")
+    return total, fees, status
+
+
+def _resolve_sell(shares: float, fields: tuple[bool, float, float, bool]) -> tuple[float, float | None, str]:
+    includes, amount, fees, unknown = fields
+    if amount <= 0:
+        raise AmountError("Kwota sprzedaży musi być większa od zera.")
+    return resolve_sale_amounts(shares, amount, fees, amount_is_net=includes, fees_unknown=unknown)
+
+
+def _fees_text(kind: str, row) -> str:
+    status = row.get("fee_status") if hasattr(row, "get") else None
+    if status == FEES_UNSPLIT:
+        return "w kwocie (nieznane)"
+    if row["fees"]:
+        return f"{row['fees']:.2f}"
+    return "0.00" if status == FEES_KNOWN else "—"
+
+
 def _render_transaction_editor(portfolio_conn, position: dict) -> None:
     """Historia transakcji pozycji i edycja jednego wpisu, w tym zmiana
     typu (zakup <-> sprzedaż, -> bonus). Zapis = nowy wpis właściwego typu
@@ -1538,14 +1730,18 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
             "Typ": _TRANSACTION_TYPE_LABELS[tx_type].split(" (")[0],
             "Platforma": broker_label(row["broker"]),
             "Ilość": _format_shares(row["shares"]),
-            "Kwota / cena": (
-                f"{row['sale_price']:.4f} {row['currency']}/jedn." if kind == "SALE"
+            "Kwota": (
+                f"{sale_amounts(row)[1]:.2f} {row['currency']}" if kind == "SALE"
                 else f"{row['total_invested']:.2f} {row['currency']}"
             ),
-            "Opłaty": f"{row['fees']:.2f}" if row.get("fees") else "—",
+            "Opłaty": _fees_text(kind, row),
         })
     st.dataframe(history, hide_index=True, use_container_width=True)
-    st.caption("Kwota przy zakupie = cała kwota, która zeszła z konta; przy sprzedaży — cena za jednostkę.")
+    st.caption(
+        "Kwota: zakup — łączny koszt z opłatami; sprzedaż — wpływ po opłatach. "
+        "„w kwocie (nieznane)” = opłaty zawarte w kwocie, wysokość nierozdzielona. "
+        "Sposób rozliczenia opłat zmienisz poniżej: wybierz transakcję, ten sam typ, popraw kwotę/opłaty i zapisz."
+    )
 
     st.markdown("###### Edytuj transakcję")
     index = st.selectbox(
@@ -1577,20 +1773,12 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
         shares = st.number_input("Liczba jednostek", min_value=0.0, value=defaults["shares"], step=0.00000001,
                                  format="%.8f", key=f"{key}_shares")
         currency = st.text_input("Waluta", value=defaults["currency"], key=f"{key}_ccy")
-        total_invested = sale_price = fees = 0.0
-        if new_type == "BUY":
-            total_invested = st.number_input(
-                "Kwota zakupu (cała kwota, która zeszła z konta)", min_value=0.0,
-                value=float(defaults["total_invested"]), step=0.01, format="%.2f", key=f"{key}_total",
+        amount_fields = None
+        if new_type in ("BUY", "SELL"):
+            amount_fields = _render_amount_fields(
+                key, side=new_type, amount=defaults["amount"], fees=defaults["fees"],
+                fees_unknown=defaults["fees_unknown"],
             )
-            fees = st.number_input("Opłaty (informacyjnie, już w kwocie)", min_value=0.0,
-                                   value=float(defaults["fees"]), step=0.01, format="%.2f", key=f"{key}_fees")
-        elif new_type == "SELL":
-            sale_price = st.number_input("Cena sprzedaży za jednostkę", min_value=0.0,
-                                         value=float(defaults["sale_price"]), step=0.0001, format="%.4f",
-                                         key=f"{key}_price")
-            fees = st.number_input("Opłaty sprzedaży (odejmowane od przychodu)", min_value=0.0,
-                                   value=float(defaults["fees"]), step=0.01, format="%.2f", key=f"{key}_fees")
         else:
             st.caption("Bonus: bezpłatne jednostki — koszt 0.")
         fx_rate = st.number_input(
@@ -1605,16 +1793,21 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
                 errors.append("Liczba jednostek musi być większa od zera.")
             if not currency:
                 errors.append("Waluta jest wymagana.")
-            if new_type == "BUY" and total_invested <= 0:
-                errors.append("Kwota zakupu musi być większa od zera (bezpłatne jednostki to „Bonus”).")
-            if new_type == "SELL" and sale_price <= 0:
-                errors.append("Cena sprzedaży musi być większa od zera.")
+            total_invested = sale_price = 0.0
+            fees, fee_status = None, None
+            if amount_fields is not None and not errors:
+                try:
+                    if new_type == "BUY":
+                        total_invested, fees, fee_status = _resolve_buy(amount_fields)
+                    else:
+                        sale_price, fees, fee_status = _resolve_sell(shares, amount_fields)
+                except AmountError as exc:
+                    errors.append(str(exc))
             new_row = {
                 "transaction_id": None, "broker": broker, "currency": currency, "shares": shares,
                 "purchase_date": str(tx_date), "sale_date": str(tx_date),
                 "acquisition_type": new_type if new_type != "SELL" else None,
-                "total_invested": total_invested if new_type == "BUY" else 0.0,
-                "sale_price": sale_price, "fees": fees or None,
+                "total_invested": total_invested, "sale_price": sale_price, "fees": fees, "fee_status": fee_status,
             }
             if not errors:
                 negative = find_negative_holding(*replace_transaction(
@@ -1856,16 +2049,11 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
         purchase_date = st.date_input("Data transakcji", key="new_pos_date")
         shares = st.number_input("Liczba (akcji / sztuk / jednostek)", min_value=0.0, step=0.00000001, format="%.8f", key="new_pos_shares")
         currency = st.text_input("Waluta transakcji (np. PLN, USD, EUR)", key="new_pos_currency")
-        total_invested = st.number_input(
-            "Zainwestowany kapitał (cała kwota, która zeszła z konta)" if acquisition_type == "BUY"
-            else "Zainwestowany kapitał (bonus = 0)",
-            min_value=0.0, step=0.01, format="%.2f",
-            disabled=(acquisition_type == "BONUS"), key="new_pos_invested",
-        )
-        fees = st.number_input(
-            "Opłaty (opcjonalnie, informacyjnie — już wliczone w kwotę powyżej)",
-            min_value=0.0, step=0.01, format="%.2f", key="new_pos_fees",
-        )
+        amount_fields = None
+        if acquisition_type == "BUY":
+            amount_fields = _render_amount_fields("new_pos", side="BUY")
+        else:
+            st.caption("Bonus: bezpłatne jednostki — koszt 0.")
         fx_rate = st.number_input(
             "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
             min_value=0.0, step=0.0001, format="%.4f", key="new_pos_fx",
@@ -1881,15 +2069,15 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
                 errors.append("Liczba akcji musi być większa od zera.")
             if not currency.strip():
                 errors.append("Waluta transakcji jest wymagana.")
-            if acquisition_type == "BUY" and total_invested <= 0:
-                errors.append(
-                    "Zainwestowany kapitał musi być większy od zera dla zakupu. "
-                    "Jeśli to akcje za darmo, wybierz powyżej „Bonus”."
-                )
+            final_invested, fees, fee_status = 0.0, None, None
+            if amount_fields is not None:
+                try:
+                    final_invested, fees, fee_status = _resolve_buy(amount_fields)
+                except AmountError as exc:
+                    errors.append(str(exc))
             for error in errors:
                 st.error(error)
             if not errors:
-                final_invested = 0.0 if acquisition_type == "BONUS" else total_invested
                 price_per_share = (final_invested / shares) if acquisition_type == "BUY" and shares > 0 else None
                 ticker = (confirmed_result.symbol if confirmed_result else choice.symbol).strip()
                 position_id = insert_position(
@@ -1906,7 +2094,7 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
                     portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                     purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                     currency=currency.strip(), price_per_share=price_per_share,
-                    fees=(fees or None), note=(note.strip() or None),
+                    fees=fees, note=(note.strip() or None), fee_status=fee_status,
                 )
                 if fx_rate and currency.strip().upper() != "PLN":
                     set_transaction_fx_rate(
@@ -1938,16 +2126,11 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             currency = st.text_input(
                 "Waluta transakcji", value=position["instrument_currency"] or "", key=f"ep_currency_{position_id}",
             )
-            total_invested = st.number_input(
-                "Zainwestowany kapitał (cała kwota, która zeszła z konta)" if acquisition_type == "BUY"
-                else "Zainwestowany kapitał (bonus = 0)",
-                min_value=0.0, step=0.01, format="%.2f",
-                disabled=(acquisition_type == "BONUS"), key=f"ep_invested_{position_id}",
-            )
-            fees = st.number_input(
-                "Opłaty (opcjonalnie, informacyjnie — już wliczone w kwotę powyżej)",
-                min_value=0.0, step=0.01, format="%.2f", key=f"ep_fees_{position_id}",
-            )
+            amount_fields = None
+            if acquisition_type == "BUY":
+                amount_fields = _render_amount_fields(f"ep_{position_id}", side="BUY")
+            else:
+                st.caption("Bonus: bezpłatne jednostki — koszt 0.")
             fx_rate = st.number_input(
                 "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
                 min_value=0.0, step=0.0001, format="%.4f", key=f"ep_fx_{position_id}",
@@ -1961,21 +2144,21 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                     errors.append("Liczba akcji musi być większa od zera.")
                 if not currency.strip():
                     errors.append("Waluta transakcji jest wymagana.")
-                if acquisition_type == "BUY" and total_invested <= 0:
-                    errors.append(
-                        "Zainwestowany kapitał musi być większy od zera dla zakupu. "
-                        "Jeśli to akcje za darmo, wybierz powyżej „Bonus”."
-                    )
+                final_invested, fees, fee_status = 0.0, None, None
+                if amount_fields is not None:
+                    try:
+                        final_invested, fees, fee_status = _resolve_buy(amount_fields)
+                    except AmountError as exc:
+                        errors.append(str(exc))
                 for error in errors:
                     st.error(error)
                 if not errors:
-                    final_invested = 0.0 if acquisition_type == "BONUS" else total_invested
                     price_per_share = (final_invested / shares) if acquisition_type == "BUY" and shares > 0 else None
                     transaction_id = insert_purchase_transaction(
                         portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
                         purchase_date=str(purchase_date), shares=shares, total_invested=final_invested,
                         currency=currency.strip(), price_per_share=price_per_share,
-                        fees=(fees or None), note=(note.strip() or None),
+                        fees=fees, note=(note.strip() or None), fee_status=fee_status,
                     )
                     if fx_rate and currency.strip().upper() != "PLN":
                         set_transaction_fx_rate(
@@ -1991,16 +2174,10 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
             shares = st.number_input(
                 "Liczba sprzedanych jednostek", min_value=0.0, step=0.00000001, format="%.8f", key=f"es_shares_{position_id}",
             )
-            sale_price = st.number_input(
-                "Cena sprzedaży za jednostkę", min_value=0.0, step=0.0001, format="%.4f", key=f"es_price_{position_id}",
-            )
             currency = st.text_input(
                 "Waluta transakcji", value=position["instrument_currency"] or "", key=f"es_currency_{position_id}",
             )
-            fees = st.number_input(
-                "Opłaty sprzedaży (odejmowane od przychodu)", min_value=0.0, step=0.01, format="%.2f",
-                key=f"es_fees_{position_id}",
-            )
+            amount_fields = _render_amount_fields(f"es_{position_id}", side="SELL")
             fx_rate = st.number_input(
                 "Kurs brokera (opcjonalnie, tylko waluta inna niż PLN): ile PLN za 1 jednostkę waluty",
                 min_value=0.0, step=0.0001, format="%.4f", key=f"es_fx_{position_id}",
@@ -2012,10 +2189,14 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                 errors = []
                 if shares <= 0:
                     errors.append("Liczba sprzedanych jednostek musi być większa od zera.")
-                if sale_price <= 0:
-                    errors.append("Cena sprzedaży musi być większa od zera.")
                 if not currency.strip():
                     errors.append("Waluta transakcji jest wymagana.")
+                sale_price, fees, fee_status = 0.0, None, None
+                if not errors:
+                    try:
+                        sale_price, fees, fee_status = _resolve_sell(shares, amount_fields)
+                    except AmountError as exc:
+                        errors.append(str(exc))
                 if not errors:
                     # Sekcja 7 specyfikacji: "Nie pozwalaj, aby sprzedaż na
                     # jednym brokerze tworzyła ujemną subpozycję tylko
@@ -2039,7 +2220,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                     transaction_id = insert_sale_transaction(
                         portfolio_conn, position_id=position_id, broker=broker, sale_date=str(sale_date),
                         shares=shares, sale_price=sale_price, currency=currency.strip(),
-                        fees=(fees or None), note=(note.strip() or None),
+                        fees=fees, note=(note.strip() or None), fee_status=fee_status,
                     )
                     if fx_rate and currency.strip().upper() != "PLN":
                         set_transaction_fx_rate(
@@ -2126,27 +2307,31 @@ def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) 
             format="%.8f", key=f"{key}_qty",
         )
         currency = st.text_input("Waluta", value=tx["currency"], key=f"{key}_ccy")
-        total = st.number_input(
-            "Łączny koszt (cała kwota, która zeszła z konta)" if acquisition_type == "BUY" else "Koszt (bonus = 0)",
-            min_value=0.0, value=float(tx["total_invested"] or 0.0), step=0.01, format="%.2f",
-            disabled=acquisition_type == "BONUS", key=f"{key}_total",
-        )
-        fees = st.number_input("W tym opłaty (informacyjnie)", min_value=0.0, value=float(tx["fees"] or 0.0),
-                               step=0.01, format="%.2f", key=f"{key}_fees")
+        amount_fields = None
+        if acquisition_type == "BUY":
+            amount_fields = _render_amount_fields(
+                key, side="BUY", amount=tx["total_invested"] or 0.0, fees=tx["fees"] or 0.0,
+                fees_unknown=fees_unknown_default(tx),
+            )
+        else:
+            st.caption("Bonus: bezpłatne jednostki — koszt 0.")
         fx_rate = st.number_input(
             "Kurs brokera (opcjonalnie, waluta inna niż PLN)", min_value=0.0,
             value=float(tx["fx_rate_actual"] or 0.0), step=0.0001, format="%.4f", key=f"{key}_fx",
         )
         note = st.text_input("Notatka", value=tx["note"] or "", key=f"{key}_note")
         if st.form_submit_button("Zapisz kopię"):
-            final_total = 0.0 if acquisition_type == "BONUS" else total
+            final_total, fees, fee_status = 0.0, None, None
             errors = []
             if quantity <= 0:
                 errors.append("Ilość musi być większa od zera.")
             if not currency.strip():
                 errors.append("Waluta jest wymagana.")
-            if acquisition_type == "BUY" and final_total <= 0:
-                errors.append("Koszt zakupu musi być większy od zera (albo wybierz „Bonus”).")
+            if amount_fields is not None:
+                try:
+                    final_total, fees, fee_status = _resolve_buy(amount_fields)
+                except AmountError as exc:
+                    errors.append(str(exc))
             if product and not product["name"].strip():
                 errors.append("Nazwa produktu jest wymagana.")
             if product and pure_grams_per_piece(product["unit_weight"], product["weight_unit"], product["fineness"]) is None:
@@ -2164,6 +2349,7 @@ def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) 
                             "price_provider": position.get("price_provider"), **product},
                     broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
                     total=final_total, fees=fees, fx_rate=fx_rate, note=note, acquisition_type=acquisition_type,
+                    fee_status=fee_status,
                 )
             else:
                 transaction_id = insert_purchase_transaction(
@@ -2171,7 +2357,7 @@ def _render_copy_transaction(portfolio_conn, user: dict, positions: list[dict]) 
                     acquisition_type=acquisition_type, purchase_date=str(purchase_date), shares=quantity,
                     total_invested=final_total, currency=currency.strip(),
                     price_per_share=(final_total / quantity) if acquisition_type == "BUY" else None,
-                    fees=(fees or None), note=(note.strip() or None),
+                    fees=fees, note=(note.strip() or None), fee_status=fee_status,
                 )
                 if fx_rate and currency.strip().upper() != "PLN":
                     set_transaction_fx_rate(
@@ -2215,23 +2401,19 @@ def _render_purchase_fields(key_prefix: str, *, default_broker_index: int = 0, q
     purchase_date = st.date_input("Data zakupu", key=f"{key_prefix}_date")
     quantity = st.number_input(quantity_label, min_value=0.0, step=0.00000001, format="%.8f", key=f"{key_prefix}_qty")
     currency = st.text_input("Waluta zakupu (np. PLN, USD, EUR)", key=f"{key_prefix}_ccy")
-    total = st.number_input(
-        "Łączny koszt (cała kwota, z prowizją/premią)", min_value=0.0, step=0.01, format="%.2f", key=f"{key_prefix}_total",
-    )
-    fees = st.number_input(
-        "W tym opłaty/prowizje (informacyjnie)", min_value=0.0, step=0.01, format="%.2f", key=f"{key_prefix}_fees",
-    )
+    amount_fields = _render_amount_fields(key_prefix, side="BUY")
     fx_rate = st.number_input(
         "Kurs (opcjonalnie, waluta inna niż PLN): ile PLN za 1 jednostkę waluty", min_value=0.0, step=0.0001,
         format="%.4f", key=f"{key_prefix}_fx",
     )
     note = st.text_input("Notatka (opcjonalnie)", key=f"{key_prefix}_note")
-    return broker, purchase_date, quantity, currency, total, fees, fx_rate, note
+    return broker, purchase_date, quantity, currency, amount_fields, fx_rate, note
 
 
 def _save_new_asset_position(
     portfolio_conn, user: dict, *, ticker: str, name: str, fields: dict, broker: str, purchase_date, quantity: float,
-    currency: str, total: float, fees: float, fx_rate: float, note: str, acquisition_type: str = "BUY",
+    currency: str, total: float, fees: float | None, fx_rate: float, note: str, acquisition_type: str = "BUY",
+    fee_status: str | None = None,
 ) -> None:
     position_id = insert_position(
         portfolio_conn, user_id=user["user_id"], ticker=ticker, company_name=name,
@@ -2242,7 +2424,7 @@ def _save_new_asset_position(
         portfolio_conn, position_id=position_id, broker=broker, acquisition_type=acquisition_type,
         purchase_date=str(purchase_date), shares=quantity, total_invested=total, currency=currency.strip(),
         price_per_share=(total / quantity) if acquisition_type == "BUY" else None,
-        fees=(fees or None), note=(note.strip() or None),
+        fees=fees, note=(note.strip() or None), fee_status=fee_status,
     )
     if fx_rate and currency.strip().upper() != "PLN":
         set_transaction_fx_rate(portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate)
@@ -2285,11 +2467,18 @@ def _render_new_physical_metal_form(portfolio_conn, user: dict, asset_class: str
             "Moneta kolekcjonerska (wycena tylko ręczna, nie po cenie metalu)", key=f"{asset_class}_coll",
         )
         storage = st.text_input("Miejsce przechowywania (opcjonalnie)", key=f"{asset_class}_storage")
-        broker, purchase_date, quantity, currency, total, fees, fx_rate, note = _render_purchase_fields(
+        broker, purchase_date, quantity, currency, amount_fields, fx_rate, note = _render_purchase_fields(
             asset_class, default_broker_index=_BROKER_OPTIONS.index("OTHER"),
         )
         if st.form_submit_button("Zapisz"):
-            errors = _purchase_errors(quantity, currency, total)
+            total, fees, fee_status = 0.0, None, None
+            try:
+                total, fees, fee_status = _resolve_buy(amount_fields)
+            except AmountError as exc:
+                errors_amount = [str(exc)]
+            else:
+                errors_amount = []
+            errors = errors_amount + _purchase_errors(quantity, currency, total or 1.0)
             if not name.strip():
                 errors.append("Nazwa produktu jest wymagana.")
             if pure_grams_per_piece(unit_weight, weight_unit, fineness) is None:
@@ -2305,7 +2494,7 @@ def _render_new_physical_metal_form(portfolio_conn, user: dict, asset_class: str
                             "is_collectible": 1 if collectible else 0, "storage_location": storage.strip() or None,
                             "price_provider": "NBP" if metal == "GOLD" else "FMP"},
                     broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
-                    total=total, fees=fees, fx_rate=fx_rate, note=note,
+                    total=total, fees=fees, fx_rate=fx_rate, note=note, fee_status=fee_status,
                 )
                 st.toast("Zapisano pozycję.")
                 st.rerun()
@@ -2392,7 +2581,7 @@ def _save_commodity_purchase(
     transaction_id = insert_purchase_transaction(
         portfolio_conn, position_id=position_id, broker=broker, acquisition_type="BUY",
         purchase_date=str(purchase_date), shares=quantity, total_invested=total, currency=currency,
-        price_per_share=price, fees=(fee or None), note=(note.strip() or None),
+        price_per_share=price, fees=fee, note=(note.strip() or None), fee_status=FEES_KNOWN,
     )
     if fx_rate and currency != "PLN":
         set_transaction_fx_rate(portfolio_conn, kind="PURCHASE", transaction_id=transaction_id, fx_rate_actual=fx_rate)
@@ -2421,11 +2610,18 @@ def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
             confirmed = st.checkbox("Tak, to właściwe aktywo", key="crypto_confirm")
     with st.form("new_crypto_form", clear_on_submit=True):
         storage = st.text_input("Gdzie przechowywane (giełda/portfel, opcjonalnie)", key="crypto_storage")
-        broker, purchase_date, quantity, currency, total, fees, fx_rate, note = _render_purchase_fields(
+        broker, purchase_date, quantity, currency, amount_fields, fx_rate, note = _render_purchase_fields(
             "crypto", quantity_label="Ilość (do 8 miejsc po przecinku)",
         )
         if st.form_submit_button("Zapisz"):
-            errors = _purchase_errors(quantity, currency, total)
+            total, fees, fee_status = 0.0, None, None
+            try:
+                total, fees, fee_status = _resolve_buy(amount_fields)
+            except AmountError as exc:
+                errors_amount = [str(exc)]
+            else:
+                errors_amount = []
+            errors = errors_amount + _purchase_errors(quantity, currency, total or 1.0)
             if not confirmed:
                 errors.append("Najpierw sprawdź parę notowania i potwierdź aktywo.")
             for error in errors:
@@ -2436,7 +2632,7 @@ def _render_new_crypto_form(portfolio_conn, user: dict) -> None:
                     fields={"asset_class": CRYPTO, "price_provider": "FMP", "price_symbol": symbol,
                             "quote_currency": symbol[-3:], "storage_location": storage.strip() or None},
                     broker=broker, purchase_date=purchase_date, quantity=quantity, currency=currency,
-                    total=total, fees=fees, fx_rate=fx_rate, note=note,
+                    total=total, fees=fees, fx_rate=fx_rate, note=note, fee_status=fee_status,
                 )
                 st.session_state.pop("crypto_lookup", None)
                 st.toast("Zapisano pozycję.")
@@ -2524,13 +2720,15 @@ def _render_platform_filter(portfolio_conn, user: dict) -> str:
 
 
 def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
-    """Sekcja 6 specyfikacji: wewnątrz PORTFEL, filtr platformy, drugi
-    poziom zakładek [PODSUMOWANIE][+ Dodaj transakcję] + DYNAMICZNE
-    tickery posiadanych pozycji. Filtr platformy zawęża PODSUMOWANIE i
-    zakładki pozycji; "+ Dodaj transakcję" celowo NIE jest filtrowana
-    (`_render_add_transaction_tab` sama czyta pełną, nieprzefiltrowaną
-    listę pozycji -- można dodać transakcję na innej platformie niż
-    aktualnie przeglądana)."""
+    """PORTFEL (przebudowa 2026-10-19, wygoda na iPhonie): filtr platformy
+    i krótki przełącznik widoku zamiast rzędu zakładek ze wszystkimi
+    instrumentami. Domyślnie „Kategorie” (kategoria -> dashboard ->
+    instrument -> karta); „Wszystkie pozycje” = pełna tabela na żądanie;
+    „Wg platform” = podział na brokerów. Podsumowanie całego portfela jest
+    TYLKO w pasku nad zakładkami (bez powielania). Renderowany jest wyłącznie
+    wybrany widok i wybrany instrument. Filtr platformy zawęża widoki;
+    "+ Dodaj transakcję" celowo NIE jest filtrowana (można dodać transakcję
+    na innej platformie niż aktualnie przeglądana)."""
     platform_filter = _render_platform_filter(portfolio_conn, user)
     broker = None if platform_filter == "ALL" else platform_filter
     market = _market(portfolio_conn)
@@ -2540,20 +2738,24 @@ def _render_portfolio_tab(portfolio_conn, scanner_conn, user: dict) -> None:
         pln_rate_fn=market.pln_rate,
     )
 
-    inner_labels = ["PODSUMOWANIE", "+ Dodaj transakcję"] + [p["ticker"] for p, _ in positions_with_summaries]
-    inner_tabs = st.tabs(inner_labels)
-
-    with inner_tabs[0]:
+    section = st.segmented_control(
+        "Widok portfela", _PORTFOLIO_SECTIONS, default=_PORTFOLIO_SECTIONS[0], key="portfolio_section",
+    ) or _PORTFOLIO_SECTIONS[0]
+    if section == "+ Dodaj transakcję":
+        _add_transaction_fragment(portfolio_conn, user)
+    elif not positions_with_summaries:
+        st.info(
+            "Brak pozycji. Dodaj pierwszą transakcję w „+ Dodaj transakcję”." if platform_filter == "ALL"
+            else f"Brak pozycji na platformie {broker_label(platform_filter)}."
+        )
+    elif section == "Wszystkie pozycje":
         _render_portfolio_summary_tab(
             portfolio_conn, positions_with_summaries, platform_filter=platform_filter, fx=fx,
         )
-
-    with inner_tabs[1]:
-        _add_transaction_fragment(portfolio_conn, user)
-
-    for tab, (position, summary) in zip(inner_tabs[2:], positions_with_summaries):
-        with tab:
-            _render_position_card(portfolio_conn, dict(position), summary)
+    elif section == "Wg platform":
+        _render_platform_breakdown(positions_with_summaries)
+    else:
+        _render_categories(portfolio_conn, positions_with_summaries)
 
     _render_backup_section(portfolio_conn)
 

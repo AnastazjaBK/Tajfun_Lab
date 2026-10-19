@@ -135,3 +135,53 @@ def commodity_cost_error(quantity: float, price: float, fee: float, total: float
             "Sprawdź ilość, cenę i opłatę (albo zostaw łączny koszt pusty — zostanie wyliczony)."
         )
     return None
+
+
+# Kategorie PORTFELA (nawigacja, 2026-10-19). Każda klasa aktywa należy do
+# DOKŁADNIE jednej kategorii -- o kategorii decyduje zapisana klasa
+# (`asset_class`), nigdy nazwa ani ticker; pozycje sprzed Fazy 11 (NULL) to akcje.
+PORTFOLIO_CATEGORIES = (
+    ("STOCKS", "Akcje", (STOCK,)),
+    ("FUNDS", "ETF / ETC / ETN", (ETF, ETC, ETN)),
+    ("SILVER", "Srebro fizyczne", (PHYSICAL_SILVER,)),
+    ("GOLD", "Złoto fizyczne", (PHYSICAL_GOLD,)),
+    ("PLATFORM_METALS", "Metale na platformie", (COMMODITY,)),
+    ("CRYPTO", "Kryptowaluty", (CRYPTO,)),
+)
+CATEGORY_LABELS = {key: label for key, label, _ in PORTFOLIO_CATEGORIES}
+_CATEGORY_OF_CLASS = {cls: key for key, _, classes in PORTFOLIO_CATEGORIES for cls in classes}
+
+
+def portfolio_category_of(position) -> str:
+    return _CATEGORY_OF_CLASS.get(asset_class_of(position), "STOCKS")
+
+
+def is_active(summary) -> bool:
+    """Pozycja z jednostkami w posiadaniu (sprzedana w całości -> False)."""
+    return any(sub.shares_held > 1e-12 for sub in summary.by_broker_currency)
+
+
+def category_summaries(positions_with_summaries: list) -> dict[str, dict]:
+    """Dashboard kategorii: dla każdej kategorii z pozycjami -- wartość,
+    koszt, wynik niezrealizowany (kwota, %), zrealizowany, udział w
+    wycenionej wartości portfela, liczba aktywnych/zamkniętych pozycji,
+    braki cen. Liczone TĄ SAMĄ funkcją co podsumowanie całego portfela
+    (`compute_portfolio_pln_summary`) na podzbiorze pozycji."""
+    from buffett_scanner.ui.portfolio import compute_portfolio_pln_summary
+
+    total_value = compute_portfolio_pln_summary(positions_with_summaries)["value_pln"]
+    result: dict[str, dict] = {}
+    for key, _label, _classes in PORTFOLIO_CATEGORIES:
+        subset = [(p, s) for p, s in positions_with_summaries if portfolio_category_of(p) == key]
+        if not subset:
+            continue
+        pln = compute_portfolio_pln_summary(subset)
+        active = sum(1 for _, s in subset if is_active(s))
+        result[key] = {
+            **pln,
+            "share_pct": (pln["value_pln"] / total_value * 100.0) if total_value > 0 else None,
+            "active_count": active,
+            "closed_count": len(subset) - active,
+            "positions": subset,
+        }
+    return result

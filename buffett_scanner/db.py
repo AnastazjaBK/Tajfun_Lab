@@ -803,6 +803,8 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("positions", "sale_fee_pct", "REAL"),
     ("purchase_transactions", "fx_rate_actual", "REAL"),
     ("sale_transactions", "fx_rate_actual", "REAL"),
+    ("purchase_transactions", "fee_status", "TEXT"),  # patrz pg_store.PG_COLUMN_MIGRATIONS
+    ("sale_transactions", "fee_status", "TEXT"),
 )
 
 # Faza 11 -- nowe tabele portfela (patrz `pg_store.PG_NEW_TABLES`).
@@ -1991,6 +1993,7 @@ def insert_purchase_transaction(
     price_per_share: float | None = None,
     fees: float | None = None,
     note: str | None = None,
+    fee_status: str | None = None,
 ) -> int:
     """`acquisition_type='BONUS'` -- wołający MUSI przekazać
     `total_invested=0` (Decyzja właścicielki, Faza 7 pkt 3: "nigdy nie
@@ -2001,12 +2004,12 @@ def insert_purchase_transaction(
         """
         INSERT INTO purchase_transactions (
             position_id, broker, acquisition_type, purchase_date, shares,
-            price_per_share, total_invested, currency, fees, note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            price_per_share, total_invested, currency, fees, note, fee_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             position_id, broker, acquisition_type, purchase_date, shares,
-            price_per_share, total_invested, currency, fees, note,
+            price_per_share, total_invested, currency, fees, note, fee_status,
         ),
     )
     return cur.lastrowid
@@ -2048,14 +2051,15 @@ def insert_sale_transaction(
     currency: str,
     fees: float | None = None,
     note: str | None = None,
+    fee_status: str | None = None,
 ) -> int:
     cur = conn.execute(
         """
         INSERT INTO sale_transactions (
-            position_id, broker, sale_date, shares, sale_price, currency, fees, note
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            position_id, broker, sale_date, shares, sale_price, currency, fees, note, fee_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (position_id, broker, sale_date, shares, sale_price, currency, fees, note),
+        (position_id, broker, sale_date, shares, sale_price, currency, fees, note, fee_status),
     )
     return cur.lastrowid
 
