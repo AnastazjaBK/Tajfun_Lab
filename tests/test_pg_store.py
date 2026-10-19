@@ -353,6 +353,52 @@ def test_phase11_migration_runs_only_after_verified_backup(conn):
 
 
 @pytest.mark.integration
+def test_broker_list_migration_keeps_rows_and_accepts_new_platforms(conn):
+    """Baza produkcyjna ma stary CHECK (TR/Revolut/Inna). init_schema:
+    kopia zapasowa -> wymiana ograniczenia; istniejące wiersze bez zmian."""
+    old = "CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER'))"
+    with conn.cursor() as cur:
+        for table in ("purchase_transactions", "sale_transactions", "dividend_receipts"):
+            cur.execute(f"ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {table}_broker_check")
+            cur.execute(f"ALTER TABLE {table} ADD CONSTRAINT {table}_broker_check {old}")
+        cur.execute("DELETE FROM portfolio_backups")
+    conn.commit()
+    uid = pg_store.create_user(conn, "Anastazja")
+    pid = pg_store.insert_position(conn, user_id=uid, ticker="KRUGER", company_name="Krugerrand 1 oz")
+    pg_store.insert_purchase_transaction(
+        conn, position_id=pid, broker="OTHER", acquisition_type="BUY",
+        purchase_date="2026-10-01", shares=1.0, total_invested=16000.0, currency="PLN",
+    )
+    conn.commit()
+    with pytest.raises(psycopg2.errors.CheckViolation):
+        pg_store.insert_purchase_transaction(
+            conn, position_id=pid, broker="CASHIFY", acquisition_type="BUY",
+            purchase_date="2026-10-02", shares=1.0, total_invested=1.0, currency="PLN",
+        )
+    conn.rollback()
+
+    pg_store.init_schema(conn)
+
+    info = pg_store.get_latest_backup_info(conn)
+    assert "purchase_transactions: lista platform" in info["reason"]
+    assert json.loads(info["row_counts"])["purchase_transactions"] == 1
+    for broker in ("CASHIFY", "GOLD_SAVER", "MENNICA_SKARBOWA"):
+        pg_store.insert_purchase_transaction(
+            conn, position_id=pid, broker=broker, acquisition_type="BUY",
+            purchase_date="2026-10-02", shares=1.0, total_invested=1.0, currency="PLN",
+        )
+    pg_store.insert_sale_transaction(
+        conn, position_id=pid, broker="MENNICA_SKARBOWA", sale_date="2026-10-10",
+        shares=1.0, sale_price=1.0, currency="PLN",
+    )
+    conn.commit()
+    brokers = [r["broker"] for r in pg_store.get_purchase_transactions(conn, pid)]
+    assert sorted(brokers) == ["CASHIFY", "GOLD_SAVER", "MENNICA_SKARBOWA", "OTHER"]
+    pg_store.init_schema(conn)  # ograniczenie aktualne -> brak kolejnej kopii
+    assert pg_store.get_latest_backup_info(conn)["backup_id"] == info["backup_id"]
+
+
+@pytest.mark.integration
 def test_phase11_crud(conn):
     uid = pg_store.create_user(conn, "Anastazja")
     pid = pg_store.insert_position(conn, user_id=uid, ticker="GSK.L", company_name="GSK plc")

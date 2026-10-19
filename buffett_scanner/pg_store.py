@@ -90,7 +90,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_user_id ON positions(user_id);
 CREATE TABLE IF NOT EXISTS purchase_transactions (
     transaction_id    SERIAL PRIMARY KEY,
     position_id       INTEGER NOT NULL REFERENCES positions(position_id),
-    broker            TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    broker            TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','CASHIFY','GOLD_SAVER','MENNICA_SKARBOWA','OTHER')),
     acquisition_type  TEXT NOT NULL CHECK (acquisition_type IN ('BUY','BONUS')),
     purchase_date     TEXT NOT NULL,
     shares            DOUBLE PRECISION NOT NULL,
@@ -107,7 +107,7 @@ CREATE INDEX IF NOT EXISTS idx_purchase_transactions_position_id ON purchase_tra
 CREATE TABLE IF NOT EXISTS sale_transactions (
     transaction_id  SERIAL PRIMARY KEY,
     position_id     INTEGER NOT NULL REFERENCES positions(position_id),
-    broker          TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    broker          TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','CASHIFY','GOLD_SAVER','MENNICA_SKARBOWA','OTHER')),
     sale_date       TEXT NOT NULL,
     shares          DOUBLE PRECISION NOT NULL,
     sale_price      DOUBLE PRECISION NOT NULL,
@@ -202,7 +202,7 @@ PG_NEW_TABLES: tuple[tuple[str, str], ...] = (
         CREATE TABLE IF NOT EXISTS dividend_receipts (
             receipt_id       SERIAL PRIMARY KEY,
             position_id      INTEGER NOT NULL REFERENCES positions(position_id),
-            broker           TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+            broker           TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','CASHIFY','GOLD_SAVER','MENNICA_SKARBOWA','OTHER')),
             pay_date         TEXT NOT NULL,
             ex_date          TEXT,
             gross_amount     DOUBLE PRECISION NOT NULL,
@@ -252,6 +252,30 @@ POSITION_EXTRA_FIELDS = (
     "metal", "product_form", "unit_weight", "weight_unit", "fineness",
     "storage_location", "is_collectible", "exposure_type", "annual_fee_pct",
 )
+
+
+# Dozwolone platformy (Decyzja właścicielki 2026-10-19: + Cashify, Gold
+# Saver, Mennica Skarbowa). Tabele utworzone wcześniej mają ograniczenie
+# CHECK ze starą listą -- `init_schema` wymienia je (po kopii zapasowej).
+BROKER_CODES = ("TRADE_REPUBLIC", "REVOLUT", "CASHIFY", "GOLD_SAVER", "MENNICA_SKARBOWA", "OTHER")
+_BROKER_TABLES = ("purchase_transactions", "sale_transactions", "dividend_receipts")
+
+
+def _outdated_broker_checks(cur) -> list[tuple[str, str]]:
+    """(tabela, nazwa ograniczenia) dla CHECK-ów `broker` bez nowych platform."""
+    cur.execute(
+        """
+        SELECT c.conrelid::regclass::text AS table_name, c.conname, pg_get_constraintdef(c.oid) AS definition
+        FROM pg_constraint c
+        WHERE c.contype = 'c' AND c.conrelid::regclass::text = ANY(%s)
+          AND pg_get_constraintdef(c.oid) ILIKE '%%broker%%'
+        """,
+        (list(_BROKER_TABLES),),
+    )
+    return [
+        (r["table_name"], r["conname"]) for r in cur.fetchall()
+        if not all(code in r["definition"] for code in BROKER_CODES)
+    ]
 
 
 class BackupVerificationError(RuntimeError):
@@ -358,12 +382,15 @@ def init_schema(conn) -> None:
         cur.execute(PG_SCHEMA)
         cur.execute(PG_BACKUP_TABLE)
         tables, columns = _existing_schema(cur)
+        outdated_checks = _outdated_broker_checks(cur)
     conn.commit()
     pending = [name for name, _ in PG_NEW_TABLES if name not in tables]
     pending += [f"{t}.{c}" for t, c, _ in PG_COLUMN_MIGRATIONS if (t, c) not in columns]
+    pending += [f"{t}: lista platform" for t, _ in outdated_checks]
     if not pending:
         return
     create_verified_backup(conn, reason="przed migracją: " + ", ".join(pending))
+    allowed = ", ".join(f"'{code}'" for code in BROKER_CODES)
     with conn.cursor() as cur:
         for name, ddl in PG_NEW_TABLES:
             if name not in tables:
@@ -371,6 +398,10 @@ def init_schema(conn) -> None:
         for table, column, coltype in PG_COLUMN_MIGRATIONS:
             if (table, column) not in columns:
                 cur.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {coltype}")
+        for table, constraint in outdated_checks:
+            # Nowa lista jest nadzbiorem starej -- istniejące wiersze ją spełniają.
+            cur.execute(f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS "{constraint}"')
+            cur.execute(f"ALTER TABLE {table} ADD CONSTRAINT {table}_broker_check CHECK (broker IN ({allowed}))")
     conn.commit()
 
 

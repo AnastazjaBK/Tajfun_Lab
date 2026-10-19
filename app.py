@@ -173,7 +173,7 @@ _HOLDING_ACTION_BUTTONS = (
 
 # Sekcja 9/3 specyfikacji -- istniejący enum `purchase_transactions.
 # broker`/`sale_transactions.broker` (sekcja 1.1/16 design review).
-_BROKER_OPTIONS = ("TRADE_REPUBLIC", "REVOLUT", "OTHER")
+_BROKER_OPTIONS = ("TRADE_REPUBLIC", "REVOLUT", "CASHIFY", "GOLD_SAVER", "MENNICA_SKARBOWA", "OTHER")
 
 # Sekcja 10 specyfikacji -- istniejący enum `purchase_transactions.
 # acquisition_type`.
@@ -1595,7 +1595,7 @@ def _render_new_position_form(portfolio_conn, user: dict) -> None:
         exchange = st.text_input(
             "Giełda (opcjonalnie)", value=(confirmed_result.exchange if confirmed_result else "") or "",
         )
-        broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key="new_pos_broker")
+        broker = st.selectbox("Platforma", _BROKER_OPTIONS, format_func=broker_label, key="new_pos_broker")
         purchase_date = st.date_input("Data transakcji", key="new_pos_date")
         shares = st.number_input("Liczba (akcji / sztuk / jednostek)", min_value=0.0, step=0.00000001, format="%.8f", key="new_pos_shares")
         currency = st.text_input("Waluta transakcji (np. PLN, USD, EUR)", key="new_pos_currency")
@@ -1672,7 +1672,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
     if kind == "Zakup/Bonus":
         acquisition_type = _render_acquisition_type_picker(f"ep_acq_type_{position_id}")
         with st.form(f"purchase_form_{position_id}", clear_on_submit=True):
-            broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key=f"ep_broker_{position_id}")
+            broker = st.selectbox("Platforma", _BROKER_OPTIONS, format_func=broker_label, key=f"ep_broker_{position_id}")
             purchase_date = st.date_input("Data transakcji", key=f"ep_date_{position_id}")
             shares = st.number_input(
                 "Liczba (akcji / sztuk / jednostek)", min_value=0.0, step=0.00000001, format="%.8f", key=f"ep_shares_{position_id}",
@@ -1728,7 +1728,7 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                     st.rerun()
     else:
         with st.form(f"sale_form_{position_id}", clear_on_submit=True):
-            broker = st.selectbox("Broker", _BROKER_OPTIONS, format_func=broker_label, key=f"es_broker_{position_id}")
+            broker = st.selectbox("Platforma", _BROKER_OPTIONS, format_func=broker_label, key=f"es_broker_{position_id}")
             sale_date = st.date_input("Data sprzedaży", key=f"es_date_{position_id}")
             shares = st.number_input(
                 "Liczba sprzedanych akcji", min_value=0.0, step=0.00000001, format="%.8f", key=f"es_shares_{position_id}",
@@ -2135,12 +2135,12 @@ def _render_platform_filter(portfolio_conn, user: dict) -> str:
     do `compute_position_summary` -- `ui/queries.get_user_positions_
     with_summaries(..., broker=...)`), nigdy nie miesza brokerów,
     użytkowników ani walut, nie wymaga FX. Trade Republic/Revolut
-    zawsze widoczne; "Inny" tylko gdy użytkownik ma choć jedną realną
-    transakcję OTHER (`get_brokers_in_use_for_user`)."""
+    zawsze widoczne; pozostałe platformy (Cashify, Gold Saver, Mennica
+    Skarbowa, Inny) tylko gdy użytkownik ma na nich choć jedną realną
+    transakcję (`get_brokers_in_use_for_user`)."""
     brokers_in_use = get_brokers_in_use_for_user(portfolio_conn, user["user_id"])
     codes = list(_PLATFORM_FILTER_ALWAYS_AVAILABLE)
-    if "OTHER" in brokers_in_use:
-        codes.append("OTHER")
+    codes += [c for c in _BROKER_OPTIONS if c in brokers_in_use and c not in codes]
     labels = {"ALL": "Wszystkie", **{c: broker_label(c) for c in codes if c != "ALL"}}
     selected = st.selectbox(
         "Platforma", codes, format_func=lambda c: labels[c], key="platform_filter",

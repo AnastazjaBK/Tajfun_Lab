@@ -45,6 +45,10 @@ HOLDING_ACTION_LABELS: dict[str, str] = {
 BROKER_LABELS: dict[str, str] = {
     "TRADE_REPUBLIC": "Trade Republic",
     "REVOLUT": "Revolut",
+    # Decyzja właścicielki 2026-10-19: platformy metali i elektroniki.
+    "CASHIFY": "Cashify",
+    "GOLD_SAVER": "Gold Saver",
+    "MENNICA_SKARBOWA": "Mennica Skarbowa",
     "OTHER": "Inny",
 }
 

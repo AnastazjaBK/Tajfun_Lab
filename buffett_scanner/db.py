@@ -642,7 +642,7 @@ CREATE INDEX IF NOT EXISTS idx_positions_user_id ON positions(user_id);
 CREATE TABLE IF NOT EXISTS purchase_transactions (
     transaction_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     position_id       INTEGER NOT NULL REFERENCES positions(position_id),
-    broker            TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    broker            TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','CASHIFY','GOLD_SAVER','MENNICA_SKARBOWA','OTHER')),
     acquisition_type  TEXT NOT NULL CHECK (acquisition_type IN ('BUY','BONUS')),
     purchase_date     TEXT NOT NULL,
     shares            REAL NOT NULL,
@@ -662,7 +662,7 @@ CREATE INDEX IF NOT EXISTS idx_purchase_transactions_position_id ON purchase_tra
 CREATE TABLE IF NOT EXISTS sale_transactions (
     transaction_id  INTEGER PRIMARY KEY AUTOINCREMENT,
     position_id     INTEGER NOT NULL REFERENCES positions(position_id),
-    broker          TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    broker          TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','CASHIFY','GOLD_SAVER','MENNICA_SKARBOWA','OTHER')),
     sale_date       TEXT NOT NULL,
     shares          REAL NOT NULL,
     sale_price      REAL NOT NULL,
@@ -814,7 +814,7 @@ CREATE TABLE IF NOT EXISTS market_data_cache (
 CREATE TABLE IF NOT EXISTS dividend_receipts (
     receipt_id       INTEGER PRIMARY KEY AUTOINCREMENT,
     position_id      INTEGER NOT NULL REFERENCES positions(position_id),
-    broker           TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','OTHER')),
+    broker           TEXT NOT NULL CHECK (broker IN ('TRADE_REPUBLIC','REVOLUT','CASHIFY','GOLD_SAVER','MENNICA_SKARBOWA','OTHER')),
     pay_date         TEXT NOT NULL,
     ex_date          TEXT,
     gross_amount     REAL NOT NULL,
