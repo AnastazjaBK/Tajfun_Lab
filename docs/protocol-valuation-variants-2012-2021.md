@@ -1,5 +1,7 @@
 # Protokół porównania wariantów wyceny na danych 2012–2021 (zdefiniowany przed testem)
 
+> **Wersja robocza v1 — NIE do zamrożenia.** Kryterium lat, dobór lat z odpowiednimi danymi, obsługa zależności obserwacji i 12 porównań oraz rozdzielenie wyboru od potwierdzenia wymagają zmian opisanych w `docs/methodology-proposals-2026-10-23-r2.md`, sekcja 4. Wersja v2 powstanie po akceptacji tych zmian.
+
 Status: **PROJEKT DO AKCEPTACJI. Test nie został wykonany.** Po akceptacji protokół jest zamrażany (commit + hash) przed jakimkolwiek uruchomieniem. Zmiany po obejrzeniu wyników są niedozwolone. Nowy pomysł = nowa wersja protokołu oznaczona jako eksploracyjna.
 
 ## 1. Cel
