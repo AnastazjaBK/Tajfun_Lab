@@ -1149,3 +1149,133 @@ def test_analyze_live_scan_shortlist_repair_prompt_carries_price_valuation_conte
     # Nigdy pełny source payload -- repair nie cytuje źródeł (specyfikacja
     # właścicielki, punkt 6).
     assert "ŹRÓDŁA" not in repair_prompt
+
+
+# --- 2026-10-23: przygotowanie płatnej walidacji na 3-5 spółkach -------
+
+
+def _two_failed_candidates(tmp_path, monkeypatch, capsys, **scenario):
+    """Skan AAPL+MSFT, w którym pierwsze wywołanie Claude kończy się błędem
+    API (fail-fast) -> obie spółki PENDING/FAILED, jak 22 spółki z 22.10."""
+    _use_counting_claude(monkeypatch, fail_tickers={"AAPL", "MSFT"})
+    monkeypatch.setattr(cli, "FMPClient", _TwoTickerFMPClient)
+    db_path = tmp_path / "test.db"
+    cli.main(["--db", str(db_path), "run-live-scan", "--sample", "AAPL,MSFT", "--shortlist-limit", "20"])
+    capsys.readouterr()
+    _use_counting_claude(monkeypatch, **scenario)
+    monkeypatch.setattr(cli, "FMPClient", _TwoTickerFMPClient)
+
+    from buffett_scanner.db import connect
+
+    conn = connect(db_path)
+    run_id = conn.execute("SELECT run_id FROM live_scan_runs").fetchone()["run_id"]
+    return db_path, conn, run_id
+
+
+def _statuses(conn, run_id):
+    from buffett_scanner.db import get_live_scan_candidates
+
+    return {r["ticker"]: r for r in get_live_scan_candidates(conn, run_id, only_shortlist=True)}
+
+
+def test_tickers_option_analyzes_only_selected_companies(tmp_path, monkeypatch, capsys):
+    db_path, conn, run_id = _two_failed_candidates(tmp_path, monkeypatch, capsys)
+    exit_code = cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+                          "--tickers", "aapl"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    assert _CountingClaudeClient.call_count["n"] == 1
+    assert all('"AAPL"' in p for p in _CountingClaudeClient.received_prompts)
+    rows = _statuses(conn, run_id)
+    assert rows["AAPL"]["llm_status"] == "COMPLETE"
+    assert rows["MSFT"]["llm_status"] in ("PENDING", "FAILED")  # nietknięty
+    # Część spółek -> skan dalej niekompletny, więc nie może zostać opublikowany.
+    assert "INCOMPLETE_LLM_ANALYSIS" in out
+    assert cli.main(["--db", str(db_path), "verify-run-complete", "--report-out", str(tmp_path / "r")]) == 1
+
+
+def test_tickers_option_rejects_unknown_or_already_complete_without_calls(tmp_path, monkeypatch, capsys):
+    db_path, conn, run_id = _two_failed_candidates(tmp_path, monkeypatch, capsys)
+    assert cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+                     "--tickers", "AAPL,XYZ"]) == 1
+    assert "spoza shortlisty" in capsys.readouterr().err
+
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--tickers", "AAPL"])
+    capsys.readouterr()
+    calls = _CountingClaudeClient.call_count["n"]
+    assert cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+                     "--tickers", "AAPL"]) == 1
+    assert "już COMPLETE" in capsys.readouterr().err
+    assert _CountingClaudeClient.call_count["n"] == calls  # zero nowych wywołań
+
+
+def test_max_claude_calls_is_never_exceeded(tmp_path, monkeypatch, capsys):
+    """Obie spółki w najgorszym przypadku (pełna + 2 nieudane naprawy =
+    3 wywołania). Limit 4 -> pierwsza spółka zużywa 3, druga się nie
+    zaczyna (potrzebowałaby do 3 kolejnych)."""
+    db_path, conn, run_id = _two_failed_candidates(
+        tmp_path, monkeypatch, capsys,
+        semantically_incomplete_tickers={"AAPL", "MSFT"}, repair_fails_tickers={"AAPL", "MSFT"},
+    )
+    exit_code = cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+                          "--max-claude-calls", "4"])
+    out = capsys.readouterr().out
+
+    assert exit_code == 0
+    total = _CountingClaudeClient.call_count["n"] + _CountingClaudeClient.repair_call_count["n"]
+    assert total == 3
+    assert "STOP: limit wywołań Claude (3/4)" in out
+    assert "Wywołania Claude w tym przebiegu (pełne + naprawy): 3 / limit 4" in out
+
+
+def test_max_claude_calls_below_worst_case_makes_zero_calls(tmp_path, monkeypatch, capsys):
+    db_path, conn, run_id = _two_failed_candidates(tmp_path, monkeypatch, capsys)
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--max-claude-calls", "2"])
+    capsys.readouterr()
+    assert _CountingClaudeClient.call_count["n"] == 0
+
+
+def test_sources_until_run_date_passes_scan_date_as_filing_cutoff(tmp_path, monkeypatch, capsys):
+    db_path, conn, run_id = _two_failed_candidates(tmp_path, monkeypatch, capsys)
+    seen = []
+    real = cli.build_sec_source_packet
+
+    def spy(client, **kwargs):
+        seen.append(kwargs.get("filed_on_or_before"))
+        return real(client, **kwargs)
+
+    monkeypatch.setattr(cli, "build_sec_source_packet", spy)
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--tickers", "AAPL"])
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--tickers", "MSFT",
+              "--sources-until-run-date"])
+    capsys.readouterr()
+    run_date = conn.execute("SELECT run_date FROM live_scan_runs").fetchone()["run_date"]
+    assert seen == [None, run_date]
+
+
+def test_validation_summary_reports_calls_repairs_tokens_and_cost(tmp_path, monkeypatch, capsys):
+    db_path, conn, run_id = _two_failed_candidates(
+        tmp_path, monkeypatch, capsys, semantically_incomplete_tickers={"AAPL"},
+    )
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--tickers", "AAPL"])
+    capsys.readouterr()
+    row = _statuses(conn, run_id)["AAPL"]
+    tok_in = row["llm_input_tokens"] + row["llm_repair_input_tokens"]
+    tok_out = row["llm_output_tokens"] + row["llm_repair_output_tokens"]
+
+    report_dir = tmp_path / "reports"
+    exit_code = cli.main(["--db", str(db_path), "validation-summary", "--run-id", run_id, "--tickers", "AAPL",
+                          "--price-input-per-mtok", "2", "--price-output-per-mtok", "10",
+                          "--report-out", str(report_dir)])
+    out = capsys.readouterr().out
+    assert exit_code == 0
+    assert f"| AAPL | COMPLETE | 2 | 1 | 1 | {tok_in} |" in out
+    assert f"{(tok_in * 2 + tok_out * 10) / 1e6:.4f}" in out
+    assert "WSZYSTKIE COMPLETE" in (report_dir / "validation_summary.md").read_text(encoding="utf-8")
+
+    # Spółka niekompletna -> walidacja nieudana (czerwony job).
+    assert cli.main(["--db", str(db_path), "validation-summary", "--run-id", run_id, "--tickers", "AAPL,MSFT",
+                     "--price-input-per-mtok", "2", "--price-output-per-mtok", "10",
+                     "--report-out", str(report_dir)]) == 1
+    assert "::error title=Walidacja nieudana::" in capsys.readouterr().out

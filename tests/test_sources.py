@@ -99,3 +99,19 @@ def test_build_sec_source_packet_empty_when_no_matching_forms():
         client, cik="0000320193", issuer="Apple Inc.", forms=("20-F",), limit_per_form=2,
     )
     assert packet == []
+
+
+def test_build_sec_source_packet_cutoff_skips_later_filings_and_keeps_limit():
+    """Wznowienie skanu z 2024-06-30: 10-Q z 2024-08-01 i 10-K z 2024-11-01
+    nie istniały w dniu skanu -> pominięte; limit 2 dalej wypełniany
+    starszymi 10-Q."""
+    packet = build_sec_source_packet(
+        _FakeClient(), cik="0000320193", issuer="Apple Inc.",
+        forms=("10-K", "10-Q"), limit_per_form=2, filed_on_or_before="2024-06-30",
+    )
+    assert [s.doc_date for s in packet] == ["2024-05-01", "2024-02-01"]
+    # Filing złożony w dniu skanu jest jeszcze widoczny.
+    same_day = build_sec_source_packet(
+        _FakeClient(), cik="0000320193", issuer="Apple Inc.", filed_on_or_before="2024-08-01",
+    )
+    assert "2024-08-01" in [s.doc_date for s in same_day]

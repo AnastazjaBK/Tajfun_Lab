@@ -1,0 +1,131 @@
+name: Phase 6c Paid Validation (3-5 companies, never published)
+
+# Płatny test naprawy analiz jakościowych (decyzja właścicielki
+# 2026-10-23) na KOPII bazy z wcześniejszego skanu, dla 3-5 wybranych
+# spółek z shortlisty. Zabezpieczenia:
+# - brak kroku publikacji i token tylko do odczytu (contents: read) --
+#   ten workflow nie może utworzyć ani zmienić release'u / snapshotu;
+# - artefakt pod osobną nazwą (phase6c-validation-result), więc nie
+#   zostanie pomylony z wynikiem skanu przy późniejszym wznowieniu;
+# - pobrana baza źródłowa jest kopiowana, a jej sha256 sprawdzany na końcu;
+# - twardy limit wywołań Claude (pełne analizy + naprawy);
+# - job jest czerwony, jeśli którakolwiek testowana spółka nie skończy COMPLETE.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "ID uruchomienia GH Actions skanu, z którego bierzemy bazę (22.10 = 39847892014)"
+        required: true
+        default: "39847892014"
+      run_id:
+        description: "run_id skanu w bazie"
+        required: true
+        default: "live-scan-2026-10-22T202049554465Z"
+      tickers:
+        description: "3-5 spółek z shortlisty, po przecinku"
+        required: true
+        default: "DECK,TPR,PODD,NFLX,CEG"
+      max_claude_calls:
+        description: "Twardy limit wywołań Claude (maks. 15 = 5 spółek x najgorszy przypadek 3)"
+        required: true
+        default: "15"
+      sources_until_run_date:
+        description: "Tylko filingi SEC złożone najpóźniej w dniu skanu"
+        type: boolean
+        required: true
+        default: true
+      price_input_per_mtok:
+        description: "Cena USD za mln tokenów input (do raportu kosztu)"
+        required: true
+        default: "2"
+      price_output_per_mtok:
+        description: "Cena USD za mln tokenów output (do raportu kosztu)"
+        required: true
+        default: "10"
+
+jobs:
+  paid-validation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read  # pobranie artefaktu z innego uruchomienia
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy jednostkowe
+        run: python -m pytest -q
+
+      - name: Kontrola zakresu (3-5 spółek, limit wywołań <= 15)
+        env:
+          TICKERS: ${{ inputs.tickers }}
+          MAX_CALLS: ${{ inputs.max_claude_calls }}
+        run: |
+          count=$(echo "$TICKERS" | tr ',' '\n' | grep -c '[A-Za-z]')
+          if [ "$count" -lt 3 ] || [ "$count" -gt 5 ]; then
+            echo "::error title=Zły zakres::Podaj 3-5 spółek, podano $count."; exit 1
+          fi
+          if ! [ "$MAX_CALLS" -ge 1 ] 2>/dev/null || [ "$MAX_CALLS" -gt 15 ]; then
+            echo "::error title=Zły limit::max_claude_calls musi być liczbą 1-15."; exit 1
+          fi
+
+      - name: Pobranie bazy ze skanu źródłowego
+        uses: actions/download-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: source-result
+          run-id: ${{ inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Kopia bazy do testu (źródło zostaje nietknięte)
+        run: |
+          mkdir -p reports
+          sha256sum source-result/live_scan_result.db | tee reports/source_sha256.txt
+          cp source-result/live_scan_result.db validation.db
+
+      - name: Analiza wybranych spółek (płatne wywołania Claude)
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUN_ID: ${{ inputs.run_id }}
+          TICKERS: ${{ inputs.tickers }}
+          MAX_CALLS: ${{ inputs.max_claude_calls }}
+          CUTOFF: ${{ inputs.sources_until_run_date && '--sources-until-run-date' || '' }}
+        run: |
+          set -o pipefail
+          python -m buffett_scanner.cli --db validation.db analyze-live-scan-shortlist \
+            --run-id "$RUN_ID" --tickers "$TICKERS" --max-claude-calls "$MAX_CALLS" $CUTOFF \
+            | tee reports/validation_log.txt
+
+      - name: Podsumowanie walidacji (status, wywołania, naprawy, tokeny, koszt)
+        if: always()
+        env:
+          RUN_ID: ${{ inputs.run_id }}
+          TICKERS: ${{ inputs.tickers }}
+          PRICE_IN: ${{ inputs.price_input_per_mtok }}
+          PRICE_OUT: ${{ inputs.price_output_per_mtok }}
+        run: |
+          python -m buffett_scanner.cli --db validation.db validation-summary \
+            --run-id "$RUN_ID" --tickers "$TICKERS" \
+            --price-input-per-mtok "$PRICE_IN" --price-output-per-mtok "$PRICE_OUT" --report-out reports
+
+      - name: Kontrola, że baza źródłowa nie została zmieniona
+        if: always()
+        run: sha256sum -c reports/source_sha256.txt
+
+      - name: Upload wyniku testu (bez publikacji)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6c-validation-result
+          path: |
+            reports/
+            validation.db
+          if-no-files-found: warn

@@ -888,10 +888,25 @@ def cmd_analyze_live_scan_shortlist(args: argparse.Namespace) -> int:
         print(f"BŁĄD: run_id '{args.run_id}' nie istnieje w tej bazie.", file=sys.stderr)
         return 1
 
+    tickers = None
+    if args.tickers:
+        tickers = {t.strip().upper() for t in args.tickers.split(",") if t.strip()}
+        shortlist = {r["ticker"]: r["llm_status"] for r in get_live_scan_candidates(conn, args.run_id, only_shortlist=True)}
+        unknown = sorted(tickers - set(shortlist))
+        if unknown:
+            print(f"BŁĄD: spoza shortlisty run_id '{args.run_id}': {', '.join(unknown)}", file=sys.stderr)
+            return 1
+        done = sorted(t for t in tickers if shortlist[t] == "COMPLETE")
+        if done:
+            print(f"BŁĄD: już COMPLETE (nie płacimy drugi raz): {', '.join(done)}", file=sys.stderr)
+            return 1
+    sources_cutoff = run_row["run_date"] if args.sources_until_run_date else None
+
     return _analyze_shortlist_and_report(
         conn, run_id=args.run_id, config=config, config_version=run_row["config_version"],
         user_agent=user_agent, claude_key=claude_key, final_limit=args.limit,
-        markdown_out=args.markdown_out,
+        markdown_out=args.markdown_out, tickers=tickers, max_claude_calls=args.max_claude_calls,
+        sources_filed_on_or_before=sources_cutoff,
     )
 
 
@@ -1003,7 +1018,8 @@ def _generate_validated_analysis(
 
 def _analyze_shortlist_and_report(
     conn, *, run_id: str, config, config_version: str, user_agent: str, claude_key: str,
-    final_limit: int, markdown_out: str | None,
+    final_limit: int, markdown_out: str | None, tickers: set[str] | None = None,
+    max_claude_calls: int | None = None, sources_filed_on_or_before: str | None = None,
 ) -> int:
     """Faza 6c, etap 2 — pełna analiza Claude (jakościowa +
     anti-confirmation-bias + source assembly) WYŁĄCZNIE dla kandydatów
@@ -1016,10 +1032,20 @@ def _analyze_shortlist_and_report(
     deterministycznej / brak zweryfikowanych źródeł jest per-kandydat,
     NIE zatrzymuje reszty. Finalny raport generowany TYLKO, gdy CAŁA
     shortlist jest COMPLETE — inaczej status INCOMPLETE_LLM_ANALYSIS,
-    nigdy partial top-N."""
+    nigdy partial top-N.
+
+    Walidacja płatna (2026-10-23): `tickers` zawęża analizę do podanych
+    spółek; `max_claude_calls` to twardy limit wywołań Claude (pełne +
+    naprawy) w tym przebiegu -- spółka startuje tylko, gdy zostało
+    miejsce na jej najgorszy przypadek (1 + MAX_REPAIR_ATTEMPTS);
+    `sources_filed_on_or_before` odcina filingi SEC złożone po dacie."""
     run_row = get_live_scan_run(conn, run_id)
     shortlist_rows = get_live_scan_candidates(conn, run_id, only_shortlist=True)
-    pending_or_failed = [r for r in shortlist_rows if r["llm_status"] in ("PENDING", "FAILED")]
+    pending_or_failed = [
+        r for r in shortlist_rows
+        if r["llm_status"] in ("PENDING", "FAILED") and (tickers is None or r["ticker"] in tickers)
+    ]
+    calls_used = 0
 
     if pending_or_failed:
         stop_early = False
@@ -1030,6 +1056,13 @@ def _analyze_shortlist_and_report(
                 if stop_early:
                     break
                 cik, ticker = row["cik"], row["ticker"]
+                if max_claude_calls is not None and calls_used + 1 + MAX_REPAIR_ATTEMPTS > max_claude_calls:
+                    print(
+                        f"  STOP: limit wywołań Claude ({calls_used}/{max_claude_calls}) nie mieści "
+                        f"najgorszego przypadku kolejnej spółki ({1 + MAX_REPAIR_ATTEMPTS}). "
+                        f"{ticker} i dalsze zostają bez zmian."
+                    )
+                    break
                 periods = get_fundamentals_periods(conn, cik)
                 if not periods:
                     update_live_scan_candidate_llm_status(
@@ -1046,7 +1079,9 @@ def _analyze_shortlist_and_report(
                     "SELECT name FROM companies WHERE cik = ?", (cik,)
                 ).fetchone()
                 issuer = company_row["name"] if company_row else ticker
-                packet = build_sec_source_packet(edgar_client, cik=cik, issuer=issuer)
+                packet = build_sec_source_packet(
+                    edgar_client, cik=cik, issuer=issuer, filed_on_or_before=sources_filed_on_or_before,
+                )
                 verified_sources = [s for s in packet if s.verified]
                 fingerprint = source_fingerprint(packet)
                 cache_key = build_cache_key(
@@ -1109,19 +1144,10 @@ def _analyze_shortlist_and_report(
                     decline_snapshot=decline_snapshot_ctx, valuation_result=valuation_result_for_prompt,
                 )
 
-                # TARGETED FIELD REPAIR (Faza 6h): dokładnie 1 full
-                # analysis call. Jeśli przejdzie walidację od razu ->
-                # COMPLETE. Jeśli JEDYNYM naruszeniem jest semantycznie
-                # pusty `thesis_invalidation` -> dokładnie 1 dodatkowy,
-                # minimalny repair call (WYŁĄCZNIE to pole), scalony w
-                # analizę i zwalidowany PONOWNIE w całości. Każdy inny
-                # błąd walidacji (strukturalny lub inne pole semantycznie
-                # puste, w tym thesis_invalidation + inne pole naraz) ->
-                # od razu FAILED, zero repair (nie generalizujemy na
-                # przypadki, dla których nie mamy dowodu z realnych
-                # runów). ClaudeError (błąd API) -- na KTÓRYMKOLWIEK z
-                # dwóch wywołań -- zachowuje istniejący fail-fast (Faza
-                # 6c): zatrzymuje dalsze NOWE wywołania w tym przebiegu.
+                # 1 pełna analiza + najwyżej MAX_REPAIR_ATTEMPTS napraw
+                # pustych pól treści (patrz `_generate_validated_analysis`).
+                # ClaudeError (błąd API) na którymkolwiek wywołaniu zachowuje
+                # fail-fast z Fazy 6c: zatrzymuje dalsze NOWE wywołania.
                 analysis, claude_error, validation_error, usage, repair_usage, repair_attempts = (
                     _generate_validated_analysis(
                         conn, claude_client, run_id=run_id, cik=cik, ticker=ticker, prompt=prompt,
@@ -1129,6 +1155,7 @@ def _analyze_shortlist_and_report(
                         decline_snapshot=decline_snapshot_ctx, valuation_result=valuation_result_for_prompt,
                     )
                 )
+                calls_used += 1 + repair_attempts
 
                 if claude_error is not None:
                     update_live_scan_candidate_llm_status(
@@ -1244,6 +1271,8 @@ def _analyze_shortlist_and_report(
         # Faza 6h (TARGETED FIELD REPAIR) -- repair calls liczone i
         # raportowane ODRĘBNIE od full analysis calls (specyfikacja
         # właścicielki, punkt 3: musi być możliwe odróżnienie).
+        f"Wywołania Claude w tym przebiegu (pełne + naprawy): {calls_used}"
+        + (f" / limit {max_claude_calls}" if max_claude_calls is not None else "") + "\n"
         f"Wywołania naprawy pól (wszystkie próby): {usage_summary['repair_calls']}, "
         f"repair input_tokens: {usage_summary['total_repair_input_tokens']}, "
         f"repair output_tokens: {usage_summary['total_repair_output_tokens']}\n"
@@ -2437,6 +2466,93 @@ def build_run_status_report(db_path: str) -> tuple[str | None, str]:
     return summary.status, "\n".join(lines) + "\n"
 
 
+def build_validation_summary(
+    db_path: str, *, run_id: str, tickers: list[str], price_input_per_mtok: float, price_output_per_mtok: float,
+) -> tuple[bool, str]:
+    """(wszystkie testowane spółki COMPLETE, raport markdown) płatnej
+    walidacji: status, wywołania, naprawy, odrzucone odpowiedzi, tokeny
+    i koszt. Tokeny output zawierają thinking (tak rozlicza API); cache
+    write liczony 1,25x, cache read 0,1x ceny input."""
+    conn = init_db(db_path)
+    try:
+        rows = {r["ticker"]: r for r in conn.execute(
+            "SELECT * FROM live_scan_candidates WHERE run_id = ? AND in_shortlist = 1", (run_id,),
+        ).fetchall()}
+        rejected = dict(conn.execute(
+            "SELECT ticker, COUNT(*) FROM llm_rejected_outputs WHERE run_id = ? GROUP BY ticker", (run_id,),
+        ).fetchall())
+    finally:
+        conn.close()
+
+    def n(value) -> int:
+        return value or 0
+
+    lines = [
+        f"## Walidacja płatna: {run_id}",
+        "",
+        "| Ticker | Status | Wywołania | Naprawy | Odrzucone odp. | Input | Output (w tym thinking) | Koszt USD |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    all_complete = True
+    total_calls = total_in = total_out = 0
+    total_cost = 0.0
+    for ticker in tickers:
+        r = rows.get(ticker)
+        if r is None:
+            all_complete = False
+            lines.append(f"| {ticker} | brak na shortliście | 0 | 0 | 0 | 0 | 0 | 0.0000 |")
+            continue
+        full_call = 1 if r["llm_input_tokens"] is not None else 0
+        repairs = n(r["llm_repair_attempts"])
+        tok_in = n(r["llm_input_tokens"]) + n(r["llm_repair_input_tokens"])
+        tok_out = n(r["llm_output_tokens"]) + n(r["llm_repair_output_tokens"])
+        thinking = n(r["llm_thinking_tokens"]) + n(r["llm_repair_thinking_tokens"])
+        cache_write = n(r["llm_cache_creation_input_tokens"]) + n(r["llm_repair_cache_creation_input_tokens"])
+        cache_read = n(r["llm_cache_read_input_tokens"]) + n(r["llm_repair_cache_read_input_tokens"])
+        cost = (
+            tok_in * price_input_per_mtok + cache_write * 1.25 * price_input_per_mtok
+            + cache_read * 0.1 * price_input_per_mtok + tok_out * price_output_per_mtok
+        ) / 1_000_000
+        all_complete &= r["llm_status"] == "COMPLETE"
+        total_calls += full_call + repairs
+        total_in += tok_in
+        total_out += tok_out
+        total_cost += cost
+        lines.append(
+            f"| {ticker} | {r['llm_status']} | {full_call + repairs} | {repairs} | {rejected.get(ticker, 0)} "
+            f"| {tok_in} | {tok_out} ({thinking}) | {cost:.4f} |"
+        )
+    lines += [
+        "",
+        f"- Wywołania Claude łącznie: {total_calls}",
+        f"- Tokeny: input {total_in}, output {total_out}",
+        f"- Koszt: {total_cost:.4f} USD (cena: {price_input_per_mtok:g} / {price_output_per_mtok:g} USD za mln "
+        "tokenów input / output)",
+        f"- Wynik: {'WSZYSTKIE COMPLETE' if all_complete else 'NIE WSZYSTKIE COMPLETE -- test nieudany'}",
+    ]
+    return all_complete, "\n".join(lines) + "\n"
+
+
+def cmd_validation_summary(args: argparse.Namespace) -> int:
+    tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
+    ok, report = build_validation_summary(
+        args.db, run_id=args.run_id, tickers=tickers,
+        price_input_per_mtok=args.price_input_per_mtok, price_output_per_mtok=args.price_output_per_mtok,
+    )
+    print(report)
+    out_dir = Path(args.report_out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "validation_summary.md").write_text(report, encoding="utf-8")
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as f:
+            f.write(report)
+    if not ok:
+        print("::error title=Walidacja nieudana::Nie wszystkie testowane spółki mają analizę COMPLETE.")
+        return 1
+    return 0
+
+
 def cmd_verify_run_complete(args: argparse.Namespace) -> int:
     """Bramka kompletności (diagnostyka 2026-10-23): kod wyjścia 1, gdy
     skan nie jest COMPLETE -- workflow zgłasza niepowodzenie, a krok
@@ -2540,6 +2656,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--limit", type=int, default=5, help="Maks. liczba finalnych kandydatów (domyślnie 5).",
     )
     p_analyze_shortlist.add_argument("--markdown-out", default=None, help="Katalog na finalny raport .md")
+    p_analyze_shortlist.add_argument(
+        "--tickers", default=None,
+        help="Tylko te spółki z shortlisty (np. 'DECK,PODD'); każda musi być PENDING/FAILED.",
+    )
+    p_analyze_shortlist.add_argument(
+        "--max-claude-calls", type=int, default=None,
+        help="Twardy limit wywołań Claude (pełne analizy + naprawy) w tym przebiegu.",
+    )
+    p_analyze_shortlist.add_argument(
+        "--sources-until-run-date", action="store_true",
+        help="Pomija filingi SEC złożone po dacie skanu (spójność wznowienia z dniem skanu).",
+    )
     p_analyze_shortlist.set_defaults(func=cmd_analyze_live_scan_shortlist)
 
     p_pit = sub.add_parser("pit-prototype")
@@ -2640,6 +2768,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify-run-complete")
     p_verify.add_argument("--report-out", default="reports", help="Katalog na raport run_status.md.")
     p_verify.set_defaults(func=cmd_verify_run_complete)
+
+    p_vsum = sub.add_parser("validation-summary")
+    p_vsum.add_argument("--run-id", required=True)
+    p_vsum.add_argument("--tickers", required=True, help="Testowane spółki, np. 'DECK,PODD'.")
+    p_vsum.add_argument("--price-input-per-mtok", type=float, required=True, help="USD za mln tokenów input.")
+    p_vsum.add_argument("--price-output-per-mtok", type=float, required=True, help="USD za mln tokenów output.")
+    p_vsum.add_argument("--report-out", default="reports", help="Katalog na validation_summary.md.")
+    p_vsum.set_defaults(func=cmd_validation_summary)
 
     return parser
 

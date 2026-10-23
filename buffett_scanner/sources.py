@@ -47,10 +47,13 @@ def build_sec_source_packet(
     issuer: str,
     forms: tuple[str, ...] = DEFAULT_FORMS,
     limit_per_form: int = DEFAULT_LIMIT_PER_FORM,
+    filed_on_or_before: str | None = None,
 ) -> list[VerifiedSource]:
     """Buduje source packet z rzeczywiście pobranych i zahashowanych
     filingów SEC EDGAR dla danego CIK, najwyżej `limit_per_form`
-    najnowszych na każdy typ formularza w `forms`."""
+    najnowszych na każdy typ formularza w `forms`. `filed_on_or_before`
+    (YYYY-MM-DD) pomija filingi złożone PO tej dacie -- wznowienie skanu
+    po kilku dniach widzi wtedy te same źródła, co w dniu skanu."""
     try:
         filings = client.get_filings(cik)
     except SecEdgarError as exc:
@@ -67,6 +70,8 @@ def build_sec_source_packet(
     for filing in filings:
         form = filing["form"]
         if form not in forms or counts[form] >= limit_per_form:
+            continue
+        if filed_on_or_before is not None and filing["filing_date"] > filed_on_or_before:
             continue
         counts[form] += 1
         url = SecEdgarClient.build_filing_url(
