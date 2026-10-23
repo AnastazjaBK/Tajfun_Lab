@@ -1,0 +1,93 @@
+Grupy: {'Z_DCF': 117, 'BEZ_DCF': 39, 'BEZ_METODY': 3, 'NIEKOMPLETNE': 3}
+BEZ_METODY: ['ARE', 'GL', 'WY'] | NIEKOMPLETNE: ['APO', 'COIN', 'HONA']
+
+== A. Kwalifikacja: siatka progów (liczebność wynika z kryteriów) ==
+Rozkład bezpieczeństwa (pkt surowe /16) w grupach operacyjnych:
+  Z_DCF: n=117 | >=8: 105, >=10: 101, >=12: 72, >=14: 40, >=16: 37
+  BEZ_DCF: n=39 | >=8: 21, >=10: 18, >=12: 8, >=14: 3, >=16: 3
+  Z_DCF MoS BASE: >=0%: 54, >=25%: 43, >=50%: 23
+
+| min bezp. (/16) | min MoS (Z_DCF) | Q z DCF | Q bez DCF | razem | max wywołań (x3) | wspólne z produkcją |
+| 8 | 0% | 50 | 21 | 71 | 213 | 23/24 |
+| 8 | 25% | 42 | 21 | 63 | 189 | 23/24 |
+| 8 | 50% | 22 | 21 | 43 | 129 | 19/24 |
+| 10 | 0% | 48 | 18 | 66 | 198 | 23/24 |
+| 10 | 25% | 40 | 18 | 58 | 174 | 23/24 |
+| 10 | 50% | 20 | 18 | 38 | 114 | 19/24 |
+| 12 | 0% | 35 | 8 | 43 | 129 | 18/24 |
+| 12 | 25% | 29 | 8 | 37 | 111 | 18/24 |
+| 12 | 50% | 13 | 8 | 21 | 63 | 14/24 |
+| 14 | 0% | 20 | 3 | 23 | 69 | 11/24 |
+| 14 | 25% | 14 | 3 | 17 | 51 | 11/24 |
+| 14 | 50% | 6 | 3 | 9 | 27 | 7/24 |
+
+Progi (14, 50): z DCF ['APP', 'DECK', 'INTU', 'MU', 'SNDK', 'TPR']
+  bez DCF ['FSLR', 'PODD', 'RDDT']
+  produkcja poza Q: ['ADBE', 'APO', 'APTV', 'BKNG', 'CEG', 'DXCM', 'EME', 'EXE', 'FISV', 'HII', 'JBL', 'LDOS', 'NFLX', 'PNR', 'QCOM', 'UBER', 'XYL']
+  Q poza produkcją: ['FSLR', 'RDDT']
+
+Progi (14, 25): z DCF ['APH', 'APP', 'CPRT', 'DECK', 'DXCM', 'INTU', 'LII', 'MU', 'PNR', 'QCOM', 'SNDK', 'TPR', 'VRT', 'XYL']
+  bez DCF ['FSLR', 'PODD', 'RDDT']
+  produkcja poza Q: ['ADBE', 'APO', 'APTV', 'BKNG', 'CEG', 'EME', 'EXE', 'FISV', 'HII', 'JBL', 'LDOS', 'NFLX', 'UBER']
+  Q poza produkcją: ['APH', 'CPRT', 'FSLR', 'LII', 'RDDT', 'VRT']
+
+Progi (12, 50): z DCF ['ADBE', 'APP', 'BKNG', 'BSX', 'DECK', 'EXE', 'INTU', 'IR', 'LDOS', 'MU', 'SNDK', 'TPR', 'TYL']
+  bez DCF ['ARES', 'CEG', 'CVNA', 'FSLR', 'NFLX', 'PODD', 'RDDT', 'UBER']
+  produkcja poza Q: ['APO', 'APTV', 'DXCM', 'EME', 'FISV', 'HII', 'JBL', 'PNR', 'QCOM', 'XYL']
+  Q poza produkcją: ['ARES', 'BSX', 'CVNA', 'FSLR', 'IR', 'RDDT', 'TYL']
+
+BEZ_DCF -- przyczyna braku DCF i bezpieczeństwo:
+  FSLR: fq=16 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  PODD: fq=16 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  RDDT: fq=16 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  ARES: fq=13 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  CEG: fq=13 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  CVNA: fq=13 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  NFLX: fq=13 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  UBER: fq=13 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  ALB: fq=11 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+  LEN: fq=11 | 
+  COHR: fq=10 | Najnowszy owner_earnings_proxy_fcf jest None/ujemny — projekcja DCF z nie-dodatniej bazy b
+  GEV: fq=10 | Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna i
+
+== B. P-D3 doprecyzowany ==
+NSY3 (spółki operacyjne, n=158): mediana 2.21%, kwartyle -0.61 / 3.83%, <=0: 46
+T=4.0%: rozkład punktów: mediana 6.0, 10/10: 9, 0: 15
+T=6.0%: rozkład punktów: mediana 6.0, 10/10: 5, 0: 15
+bez dywidendy w oknie: 52 | dziś 10/10: 29 | P-D3 10/10: 2
+czysta reinwestycja (bez D i B przez 3 lata): 8 ['AXON', 'BSX', 'CVNA', 'DDOG', 'FDXF', 'HONA', 'RDDT', 'TYL']
+  ich punkty dziś -> P-D3: [('AXON', 5.0, 0.0), ('BSX', 5.0, 0.0), ('CVNA', 5.0, 0.0), ('DDOG', 5.0, 0.0), ('FDXF', 3.0, 0.0), ('HONA', 4.0, 0), ('RDDT', 5.0, 0.0), ('TYL', 5.0, 0.0)]
+cięcie DPS r/r: ['BE', 'COHR', 'CRH', 'DOW', 'F', 'INTC', 'IR', 'MCHP', 'MRVL', 'SKYD', 'TPL']
+dziś 'brak cięcia' przyznany spółkom bez dywidendy: 52
+zwrot niepokryty z 3-letniego FCF: 56; w tym przy rosnącym długu brutto: 36 ['ADBE', 'ADI', 'APTV', 'BKNG', 'CARR', 'CLX', 'CRH', 'CSGP', 'CSX', 'DOW', 'FICO', 'FISV', 'FLEX', 'GIS', 'GLW']
+buyback w oknie, a liczba akcji wzrosła w 3 latach: 42 ['AMD', 'ANET', 'APH', 'APO', 'ARES', 'AVGO', 'BA', 'BX', 'COHR', 'COIN', 'COO', 'CSGP', 'DASH', 'ECHO', 'EIX']
+okno skrócone: ['HONA', 'SKYD']
+
+| Spółka | dziś | DY3 % | tempo akcji %/r | NSY3 % | A | pokrycie % FCF3 | B | C | P-D3 | T=6% | flagi |
+| MRK | 10 | 2.12 | +0.46 | 2.58 | 2.6 | 79 | 4 | 2 | 8.6 | 7.7 |  |
+| SNA | 10 | 2.16 | +0.74 | 2.90 | 2.9 | 67 | 4 | 2 | 8.9 | 7.9 |  |
+| ADBE | 10 | 0.00 | +3.22 | 3.22 | 3.2 | 102 | 0 | 2 | 5.2 | 4.1 | nadwyżka ponad FCF przy rosnącym długu |
+| CHTR | 10 | 0.00 | +5.73 | 5.73 | 4.0 | 86 | 4 | 2 | 10.0 | 9.8 |  |
+| AVGO | 8 | 0.61 | -4.69 | -4.08 | 0.0 | 86 | 4 | 2 | 6.0 | 6.0 |  |
+| APP | 10 | 0.00 | +2.73 | 2.73 | 2.7 | 61 | 4 | 2 | 8.7 | 7.8 |  |
+| NFLX | 10 | 0.00 | +1.47 | 1.47 | 1.5 | 92 | 4 | 2 | 7.5 | 7.0 |  |
+| UBER | 10 | 0.00 | -2.39 | -2.39 | 0.0 | 39 | 4 | 0 | 4.0 | 4.0 |  |
+| DECK | 10 | 0.00 | +3.07 | 3.07 | 3.1 | 69 | 4 | 2 | 9.1 | 8.0 |  |
+| TPR | 10 | 1.32 | +4.50 | 5.81 | 4.0 | 112 | 0 | 2 | 6.0 | 5.9 | nadwyżka ponad FCF przy rosnącym długu |
+| QCOM | 10 | 1.91 | +0.95 | 2.86 | 2.9 | 79 | 4 | 2 | 8.9 | 7.9 |  |
+| BA | 6 | 0.08 | -8.60 | -8.52 | 0.0 | — | 0 | 0 | 0.0 | 0.0 | FCF3 <= 0 |
+| AXON | 5 | 0.00 | -11.30 | -11.30 | 0.0 | — | 0 | 0 | 0.0 | 0.0 | bez zwrotu kapitału |
+| BSX | 5 | 0.00 | -1.25 | -1.25 | 0.0 | — | 0 | 0 | 0.0 | 0.0 | bez zwrotu kapitału |
+| CVNA | 5 | 0.00 | -30.54 | -30.54 | 0.0 | — | 0 | 0 | 0.0 | 0.0 | bez zwrotu kapitału |
+
+TOP20+remisy (Z_DCF + BEZ_DCF, renormalizacja jak dziś): dziś 23, P-D3 20; wypadają ['APTV', 'CEG', 'FISV', 'JBL', 'NFLX', 'PODD', 'UBER'], wchodzą ['CHRW', 'CMCSA', 'F', 'IR']
+B = 2 (nadwyżka ponad FCF3 bez wzrostu długu brutto): ['BX', 'LITE', 'NKE', 'PG', 'PYPL']
+P-D3 = 10: ['CAT', 'CHTR', 'CMCSA', 'FIS', 'LEN', 'LOW', 'ULTA', 'VST', 'WYNN']
+dziś 10/10 i P-D3 <= 4: [('CEG', 4.0), ('COO', 4.0), ('GEV', 4.0), ('GLW', 2.8), ('PODD', 4.0), ('UBER', 4.0)]
+
+== A2. Rdzeń wypłacalności (3 warunki z istniejących kryteriów) ==
+MoS >= 0%: z DCF 41, bez DCF 9, razem 50, wspólne z produkcją 21/24
+  bez DCF: ['CEG', 'CVNA', 'FSLR', 'GEV', 'LEN', 'NFLX', 'PODD', 'RDDT', 'UBER']
+MoS >= 25%: z DCF 34, bez DCF 9, razem 43, wspólne z produkcją 21/24
+MoS >= 50%: z DCF 17, bez DCF 9, razem 26, wspólne z produkcją 17/24
+  z DCF: ['ADBE', 'APP', 'BKNG', 'CHRW', 'DECK', 'EME', 'EXE', 'F', 'HII', 'INTU', 'JBHT', 'JBL', 'LDOS', 'MU', 'SNDK', 'TPR', 'TYL']
