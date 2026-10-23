@@ -1254,28 +1254,76 @@ def test_sources_until_run_date_passes_scan_date_as_filing_cutoff(tmp_path, monk
     assert seen == [None, run_date]
 
 
-def test_validation_summary_reports_calls_repairs_tokens_and_cost(tmp_path, monkeypatch, capsys):
+def _summary(db_path, tmp_path, usage, *extra):
+    return cli.main(["--db", str(db_path), "validation-summary", "--usage-json", str(usage),
+                     "--price-input-per-mtok", "2", "--price-output-per-mtok", "10",
+                     "--report-out", str(tmp_path / "reports"), *extra])
+
+
+def test_validation_summary_reports_this_runs_calls_tokens_cost_and_scan_state(tmp_path, monkeypatch, capsys):
+    """Koszt liczony z wywołań TEGO przebiegu (plik --usage-out), nie z
+    tokenów zapisanych w bazie przez wcześniejsze przebiegi."""
     db_path, conn, run_id = _two_failed_candidates(
         tmp_path, monkeypatch, capsys, semantically_incomplete_tickers={"AAPL"},
     )
-    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--tickers", "AAPL"])
+    usage = tmp_path / "usage.json"
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--tickers", "AAPL",
+              "--sources-until-run-date", "--max-claude-calls", "3", "--usage-out", str(usage)])
     capsys.readouterr()
-    row = _statuses(conn, run_id)["AAPL"]
-    tok_in = row["llm_input_tokens"] + row["llm_repair_input_tokens"]
-    tok_out = row["llm_output_tokens"] + row["llm_repair_output_tokens"]
+    data = json.loads(usage.read_text(encoding="utf-8"))
+    aapl = data["companies"]["AAPL"]
+    assert (data["total_calls"], aapl["full_calls"], aapl["repair_calls"], aapl["calls_without_usage"]) == (2, 1, 1, 0)
+    assert "MSFT" not in data["companies"]  # nieanalizowana -> zero kosztu w raporcie
+    run_date = conn.execute("SELECT run_date FROM live_scan_runs").fetchone()["run_date"]
+    assert data["sources_filed_on_or_before"] == run_date
 
-    report_dir = tmp_path / "reports"
-    exit_code = cli.main(["--db", str(db_path), "validation-summary", "--run-id", run_id, "--tickers", "AAPL",
-                          "--price-input-per-mtok", "2", "--price-output-per-mtok", "10",
-                          "--report-out", str(report_dir)])
+    assert _summary(db_path, tmp_path, usage) == 0
     out = capsys.readouterr().out
-    assert exit_code == 0
-    assert f"| AAPL | COMPLETE | 2 | 1 | 1 | {tok_in} |" in out
-    assert f"{(tok_in * 2 + tok_out * 10) / 1e6:.4f}" in out
-    assert "WSZYSTKIE COMPLETE" in (report_dir / "validation_summary.md").read_text(encoding="utf-8")
+    cost = (aapl["input_tokens"] * 2 + aapl["output_tokens"] * 10) / 1e6
+    assert (f"| AAPL | COMPLETE | 1 | 1 | 1 | 0 | {aapl['input_tokens']} | {aapl['output_tokens']} "
+            f"({aapl['thinking_tokens']}) | {cost:.4f} |") in out
+    assert "Wywołania Claude w tym przebiegu: 2 (limit 3), w tym naprawy: 1" in out
+    assert "- Analizy jakościowe: 1/2 COMPLETE" in out
+    assert "Ranking kompletny technicznie: NIE" in out
+    assert "Spółki bez DCF" in out
+    assert "## Look-ahead: BRAK" in out and "NARUSZENIE" not in out
+    assert "**Wynik: OK**" in (tmp_path / "reports" / "validation_summary.md").read_text(encoding="utf-8")
 
-    # Spółka niekompletna -> walidacja nieudana (czerwony job).
-    assert cli.main(["--db", str(db_path), "validation-summary", "--run-id", run_id, "--tickers", "AAPL,MSFT",
-                     "--price-input-per-mtok", "2", "--price-output-per-mtok", "10",
-                     "--report-out", str(report_dir)]) == 1
+    # Sprawdzana spółka niekompletna -> wynik nieudany (czerwony job).
+    assert _summary(db_path, tmp_path, usage, "--tickers", "AAPL,MSFT") == 1
     assert "::error title=Walidacja nieudana::" in capsys.readouterr().out
+
+
+def test_validation_summary_flags_look_ahead_when_sec_filter_was_off(tmp_path, monkeypatch, capsys):
+    db_path, conn, run_id = _two_failed_candidates(tmp_path, monkeypatch, capsys)
+    usage = tmp_path / "usage.json"
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id, "--tickers", "AAPL",
+              "--usage-out", str(usage)])
+    capsys.readouterr()
+    assert _summary(db_path, tmp_path, usage) == 1
+    out = capsys.readouterr().out
+    assert "## Look-ahead: WYKRYTY" in out
+    assert "NARUSZENIE: filtr dokumentów SEC w tym przebiegu = WYŁĄCZONY" in out
+
+
+def test_validation_summary_counts_calls_without_usage_and_complete_ranking(tmp_path, monkeypatch, capsys):
+    """Błąd API bez usage (np. ucięta odpowiedź) to też wywołanie -- raport
+    je liczy i ostrzega, zamiast zaniżać koszt. Po uzupełnieniu obu spółek
+    ranking jest kompletny technicznie."""
+    db_path, conn, run_id = _two_failed_candidates(tmp_path, monkeypatch, capsys, fail_tickers={"MSFT"})
+    usage = tmp_path / "usage.json"
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+              "--sources-until-run-date", "--usage-out", str(usage)])
+    capsys.readouterr()
+    assert json.loads(usage.read_text(encoding="utf-8"))["companies"]["MSFT"]["calls_without_usage"] == 1
+    _summary(db_path, tmp_path, usage)
+    assert "UWAGA: 1 wywołań bez usage z API" in capsys.readouterr().out
+
+    _use_counting_claude(monkeypatch)
+    monkeypatch.setattr(cli, "FMPClient", _TwoTickerFMPClient)
+    cli.main(["--db", str(db_path), "analyze-live-scan-shortlist", "--run-id", run_id,
+              "--sources-until-run-date", "--usage-out", str(usage)])
+    capsys.readouterr()
+    assert _summary(db_path, tmp_path, usage) == 0
+    out = capsys.readouterr().out
+    assert "Ranking kompletny technicznie: TAK" in out and "2/2 COMPLETE" in out

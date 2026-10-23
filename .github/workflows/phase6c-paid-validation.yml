@@ -8,7 +8,11 @@ name: Phase 6c Paid Validation (3-5 companies, never published)
 # - artefakt pod osobną nazwą (phase6c-validation-result), więc nie
 #   zostanie pomylony z wynikiem skanu przy późniejszym wznowieniu;
 # - pobrana baza źródłowa jest kopiowana, a jej sha256 sprawdzany na końcu;
-# - twardy limit wywołań Claude (pełne analizy + naprawy);
+# - twardy limit wywołań Claude (pełne analizy + naprawy) -- to limit
+#   LICZBY wywołań; kwoty w USD nic tu nie egzekwuje (każde wywołanie ma
+#   tylko limit tokenów output z config.yaml, input nie jest limitowany);
+# - dokumenty SEC wyłącznie złożone najpóźniej w dniu skanu (zawsze
+#   włączone -- decyzja właścicielki 2026-10-23, brak look-ahead);
 # - job jest czerwony, jeśli którakolwiek testowana spółka nie skończy COMPLETE.
 
 on:
@@ -30,11 +34,6 @@ on:
         description: "Twardy limit wywołań Claude (maks. 15 = 5 spółek x najgorszy przypadek 3)"
         required: true
         default: "15"
-      sources_until_run_date:
-        description: "Tylko filingi SEC złożone najpóźniej w dniu skanu"
-        type: boolean
-        required: true
-        default: true
       price_input_per_mtok:
         description: "Cena USD za mln tokenów input (do raportu kosztu)"
         required: true
@@ -97,23 +96,22 @@ jobs:
           RUN_ID: ${{ inputs.run_id }}
           TICKERS: ${{ inputs.tickers }}
           MAX_CALLS: ${{ inputs.max_claude_calls }}
-          CUTOFF: ${{ inputs.sources_until_run_date && '--sources-until-run-date' || '' }}
         run: |
           set -o pipefail
           python -m buffett_scanner.cli --db validation.db analyze-live-scan-shortlist \
-            --run-id "$RUN_ID" --tickers "$TICKERS" --max-claude-calls "$MAX_CALLS" $CUTOFF \
+            --run-id "$RUN_ID" --tickers "$TICKERS" --max-claude-calls "$MAX_CALLS" \
+            --sources-until-run-date --usage-out reports/usage.json \
             | tee reports/validation_log.txt
 
-      - name: Podsumowanie walidacji (status, wywołania, naprawy, tokeny, koszt)
+      - name: Podsumowanie walidacji (status, wywołania, naprawy, tokeny, koszt, DCF, look-ahead)
         if: always()
         env:
-          RUN_ID: ${{ inputs.run_id }}
           TICKERS: ${{ inputs.tickers }}
           PRICE_IN: ${{ inputs.price_input_per_mtok }}
           PRICE_OUT: ${{ inputs.price_output_per_mtok }}
         run: |
           python -m buffett_scanner.cli --db validation.db validation-summary \
-            --run-id "$RUN_ID" --tickers "$TICKERS" \
+            --usage-json reports/usage.json --tickers "$TICKERS" \
             --price-input-per-mtok "$PRICE_IN" --price-output-per-mtok "$PRICE_OUT" --report-out reports
 
       - name: Kontrola, że baza źródłowa nie została zmieniona
