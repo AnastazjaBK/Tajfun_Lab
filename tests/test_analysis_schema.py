@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import pytest
 
+from pydantic import ValidationError
+
 from buffett_scanner.analysis_schema import (
+    REPAIRABLE_FIELDS,
     AnalysisOutput,
     AnalysisValidationError,
-    ThesisInvalidationRepair,
-    is_only_thesis_invalidation_semantically_empty,
+    collect_validation_violations,
+    repair_model,
+    repairable_fields,
     validate_analysis_output,
 )
 
@@ -222,58 +226,68 @@ def test_validate_accepts_concrete_honest_unknown_statement():
 
 
 # ---------------------------------------------------------------------------
-# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06) -- `is_only_thesis_invalidation_
-# semantically_empty` decyduje, czy targeted repair jest WOGÓLE zasadny.
-# Specyfikacja właścicielki, punkt 2: "jeżeli brakuje/inwalidne jest [inne
-# pole] ... zachowaj bezpieczny FAILED" -- repair NIGDY nie jest próbowany,
-# gdy zawodzi więcej niż jedno pole.
+# 2026-10-23: pola obowiązkowe w schemacie, WSZYSTKIE naruszenia, naprawa pól
+# (diagnostyka runu live-scan-2026-10-22T202049554465Z: 22/24 odrzuconych).
 # ---------------------------------------------------------------------------
 
-
-def test_is_only_thesis_invalidation_semantically_empty_true_when_isolated():
-    """Test B (specyfikacja właścicielki): wszystkie pozostałe wymagane
-    pola są semantycznie niepuste, zawodzi WYŁĄCZNIE thesis_invalidation
-    -- jak CBOE/DECK/INTU/ACN w realnym live runie."""
-    result = make_valid_output(thesis_invalidation=[])
-    assert is_only_thesis_invalidation_semantically_empty(result) is True
-
-
-def test_is_only_thesis_invalidation_semantically_empty_false_when_already_valid():
-    result = make_valid_output()
-    assert is_only_thesis_invalidation_semantically_empty(result) is False
-
-
-@pytest.mark.parametrize(
-    "field_name", ["bull_case", "bear_case", "why_market_may_be_right", "why_this_may_not_be_a_bargain"]
+_SIX_FIELDS = (
+    "bull_case", "bear_case", "why_market_may_be_right", "why_this_may_not_be_a_bargain",
+    "thesis_invalidation", "biggest_unknown",
 )
-def test_is_only_thesis_invalidation_semantically_empty_false_when_other_list_field_also_empty(field_name):
-    """Test D (specyfikacja właścicielki): thesis_invalidation ORAZ inne
-    wymagane pole są puste -> NIE jest to "wyłącznie thesis_invalidation",
-    więc targeted repair nie może być próbowany (musi iść do FAILED)."""
-    result = make_valid_output(thesis_invalidation=[], **{field_name: []})
-    assert is_only_thesis_invalidation_semantically_empty(result) is False
 
 
-def test_is_only_thesis_invalidation_semantically_empty_false_when_biggest_unknown_also_empty():
+def test_six_content_fields_are_required_in_json_schema_sent_to_model():
+    required = set(AnalysisOutput.model_json_schema()["required"])
+    assert set(_SIX_FIELDS) <= required
+    assert set(REPAIRABLE_FIELDS) == set(_SIX_FIELDS)
+
+
+def test_response_missing_two_fields_is_rejected_not_silently_filled():
+    """Wcześniej brakujące pole dostawało po cichu ""/[] (wartość domyślna)."""
+    payload = make_valid_output().model_dump()
+    del payload["thesis_invalidation"], payload["biggest_unknown"]
+    with pytest.raises(ValidationError) as exc:
+        AnalysisOutput.model_validate(payload)
+    missing = {e["loc"][0] for e in exc.value.errors() if e["type"] == "missing"}
+    assert missing == {"thesis_invalidation", "biggest_unknown"}
+
+
+def test_all_violations_are_reported_not_only_the_first():
+    """Dokładnie przypadek z 22.10: puste thesis_invalidation ORAZ biggest_unknown."""
     result = make_valid_output(thesis_invalidation=[], biggest_unknown="")
-    assert is_only_thesis_invalidation_semantically_empty(result) is False
+    violations = collect_validation_violations(result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set())
+    assert [v.field for v in violations] == ["thesis_invalidation", "biggest_unknown"]
+    with pytest.raises(AnalysisValidationError) as exc:
+        validate_analysis_output(result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set())
+    assert "thesis_invalidation" in str(exc.value) and "biggest_unknown" in str(exc.value)
+    assert len(exc.value.violations) == 2
 
 
-def test_is_only_thesis_invalidation_semantically_empty_true_for_placeholder_only():
-    result = make_valid_output(thesis_invalidation=["brak"])
-    assert is_only_thesis_invalidation_semantically_empty(result) is True
+def test_present_but_semantically_empty_fields_still_fail():
+    result = make_valid_output(bull_case=["N/A"], biggest_unknown="brak", why_market_may_be_right=["krótko"])
+    fields = [v.field for v in collect_validation_violations(
+        result, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set())]
+    assert fields == ["bull_case", "why_market_may_be_right", "biggest_unknown"]
 
 
-def test_thesis_invalidation_repair_model_accepts_minimal_list_payload():
-    """`ThesisInvalidationRepair` (Faza 6h) -- WYŁĄCZNIE jedno pole, bez
-    verification_items/cited_source_ids/innych pól AnalysisOutput."""
-    repaired = ThesisInvalidationRepair.model_validate(
-        {"thesis_invalidation": ["Utrata kluczowego klienta odpowiadającego za istotną część przychodów."]}
-    )
-    assert repaired.thesis_invalidation == [
-        "Utrata kluczowego klienta odpowiadającego za istotną część przychodów.",
-    ]
-    assert not hasattr(repaired, "bull_case")
+def test_repairable_fields_only_when_every_violation_is_an_empty_content_field():
+    empty = make_valid_output(thesis_invalidation=[], biggest_unknown="", bear_case=["brak"])
+    violations = collect_validation_violations(empty, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set())
+    assert repairable_fields(violations) == ["bear_case", "thesis_invalidation", "biggest_unknown"]
+    structural = make_valid_output(thesis_invalidation=[], cited_source_ids=["src-1", "zmyslone"])
+    violations = collect_validation_violations(
+        structural, allowed_source_ids={"src-1"}, pdf_paginated_source_ids=set())
+    assert repairable_fields(violations) is None  # błąd cytowania -> bez naprawy
+    assert repairable_fields([]) is None
+
+
+def test_repair_model_contains_only_requested_fields_all_required():
+    model = repair_model(("thesis_invalidation", "biggest_unknown"))
+    schema = model.model_json_schema()
+    assert set(schema["properties"]) == {"thesis_invalidation", "biggest_unknown"}
+    assert set(schema["required"]) == {"thesis_invalidation", "biggest_unknown"}
+    with pytest.raises(ValidationError):
+        model.model_validate({"thesis_invalidation": ["x" * 20]})
 
 
 def test_validate_accepts_payx_like_response():

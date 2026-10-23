@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import anthropic
 import pytest
 
-from buffett_scanner.analysis_schema import AnalysisOutput, ThesisInvalidationRepair
+from buffett_scanner.analysis_schema import AnalysisOutput, repair_model
 from buffett_scanner.providers.claude import ClaudeClient, ClaudeError, ClaudeRepairResult, ClaudeUsage
 
 VALID_PAYLOAD = {
@@ -21,6 +21,13 @@ VALID_PAYLOAD = {
         "classification": "TEMPORARY", "confidence": "MEDIUM", "trigger": "x", "reasoning": "y",
     },
     "dividend_trap_alert": {"triggered": False, "reasoning": ""},
+    # 2026-10-23: sześć pól treści jest obowiązkowych w schemacie.
+    "bull_case": ["Silny moat oparty na efektach sieciowych ekosystemu."],
+    "bear_case": ["Rosnąca presja regulacyjna na opłaty w sklepie z aplikacjami."],
+    "why_market_may_be_right": ["Spadek może odzwierciedlać trwałe spowolnienie sprzedaży sprzętu."],
+    "why_this_may_not_be_a_bargain": ["Wycena może już uwzględniać ryzyko regulacyjne."],
+    "thesis_invalidation": ["Trwały spadek marży usług poniżej historycznego poziomu."],
+    "biggest_unknown": "Nie wiadomo, jak szybko regulacje zmienią model opłat w sklepie z aplikacjami.",
     "cited_source_ids": [],
 }
 
@@ -172,18 +179,19 @@ def test_generate_analysis_wraps_api_status_error(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06) -- `repair_thesis_invalidation`
-# współdzieli `_parse` z `generate_analysis` (identyczna obsługa błędów API/
-# refusal/nie-sparsowalnego JSON, patrz testy wyżej) -- testy niżej pilnują
-# TYLKO tego, co jest odrębne: minimalny schemat `ThesisInvalidationRepair`
-# (WYŁĄCZNIE jedno pole) i zwracany typ `ClaudeRepairResult`.
+# NAPRAWA PÓL (2026-10-23) -- `repair_fields` współdzieli `_parse` z
+# `generate_analysis`; testy niżej pilnują tego, co odrębne: schemat
+# WYŁĄCZNIE z naprawianymi polami i wynik jako słownik tych pól.
 # ---------------------------------------------------------------------------
 
+_REPAIR_FIELDS = ["thesis_invalidation", "biggest_unknown"]
 
-def test_repair_thesis_invalidation_returns_parsed_output_and_real_usage(monkeypatch):
+
+def test_repair_fields_returns_only_requested_fields_and_real_usage(monkeypatch):
     client = ClaudeClient("dummy-key", model="claude-sonnet-5", max_output_tokens=1000)
-    parsed = ThesisInvalidationRepair(
+    parsed = repair_model(tuple(_REPAIR_FIELDS))(
         thesis_invalidation=["Trwały spadek marży operacyjnej poniżej historycznego poziomu."],
+        biggest_unknown="Nie wiadomo, czy spadek popytu w segmencie jest cykliczny czy trwały.",
     )
     fake_response = SimpleNamespace(
         stop_reason="end_turn", parsed_output=parsed, model="claude-sonnet-5",
@@ -191,11 +199,10 @@ def test_repair_thesis_invalidation_returns_parsed_output_and_real_usage(monkeyp
     )
     monkeypatch.setattr(client._client.messages, "parse", lambda **kwargs: fake_response)
 
-    result = client.repair_thesis_invalidation("dummy repair prompt")
+    result = client.repair_fields("dummy repair prompt", _REPAIR_FIELDS)
     assert isinstance(result, ClaudeRepairResult)
-    assert result.output.thesis_invalidation == [
-        "Trwały spadek marży operacyjnej poniżej historycznego poziomu.",
-    ]
+    assert set(result.output) == set(_REPAIR_FIELDS)
+    assert result.output["thesis_invalidation"] == ["Trwały spadek marży operacyjnej poniżej historycznego poziomu."]
     assert result.usage == ClaudeUsage(
         model="claude-sonnet-5", input_tokens=300, output_tokens=40,
         cache_creation_input_tokens=None, cache_read_input_tokens=None,
@@ -203,31 +210,25 @@ def test_repair_thesis_invalidation_returns_parsed_output_and_real_usage(monkeyp
     )
 
 
-def test_repair_thesis_invalidation_passes_dedicated_minimal_output_format(monkeypatch):
-    """Repair call MUSI zwracać wyłącznie `ThesisInvalidationRepair`
-    (jedno pole), nigdy całą `AnalysisOutput` -- to jest sam sens
-    TARGETED FIELD REPAIR (specyfikacja właścicielki, punkt 7)."""
+def test_repair_fields_passes_minimal_schema_with_only_requested_fields(monkeypatch):
     client = ClaudeClient("dummy-key", model="claude-sonnet-5", max_output_tokens=1234)
     captured = {}
 
     def fake_parse(**kwargs):
         captured.update(kwargs)
-        parsed = ThesisInvalidationRepair(thesis_invalidation=["x" * 20])
-        return SimpleNamespace(
-            stop_reason="end_turn", parsed_output=parsed, model="claude-sonnet-5",
-            usage=_fake_usage(),
-        )
+        parsed = repair_model(tuple(_REPAIR_FIELDS))(thesis_invalidation=["x" * 20], biggest_unknown="y" * 20)
+        return SimpleNamespace(stop_reason="end_turn", parsed_output=parsed, model="claude-sonnet-5",
+                               usage=_fake_usage())
 
     monkeypatch.setattr(client._client.messages, "parse", fake_parse)
-    client.repair_thesis_invalidation("dummy repair prompt")
+    client.repair_fields("dummy repair prompt", _REPAIR_FIELDS)
 
-    assert captured["output_format"] is ThesisInvalidationRepair
+    assert captured["output_format"] is repair_model(tuple(_REPAIR_FIELDS))
+    assert set(captured["output_format"].model_json_schema()["required"]) == set(_REPAIR_FIELDS)
     assert captured["messages"] == [{"role": "user", "content": "dummy repair prompt"}]
 
 
-def test_repair_thesis_invalidation_raises_on_refusal_but_carries_real_usage(monkeypatch):
-    """Patrz `test_generate_analysis_raises_on_refusal_but_carries_real_usage`
-    -- `_parse` jest współdzielony, więc semantyka błędu jest identyczna."""
+def test_repair_fields_raises_on_refusal_but_carries_real_usage(monkeypatch):
     client = ClaudeClient("dummy-key", model="claude-sonnet-5")
     fake_response = SimpleNamespace(
         stop_reason="refusal", parsed_output=None, model="claude-sonnet-5",
@@ -236,5 +237,5 @@ def test_repair_thesis_invalidation_raises_on_refusal_but_carries_real_usage(mon
     monkeypatch.setattr(client._client.messages, "parse", lambda **kwargs: fake_response)
 
     with pytest.raises(ClaudeError, match="refusal") as exc_info:
-        client.repair_thesis_invalidation("dummy repair prompt")
+        client.repair_fields("dummy repair prompt", _REPAIR_FIELDS)
     assert exc_info.value.usage.input_tokens == 200

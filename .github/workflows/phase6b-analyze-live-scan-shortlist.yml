@@ -41,6 +41,8 @@ jobs:
   analyze-shortlist:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    permissions:
+      contents: write  # publikacja snapshotu po uzupełnieniu do COMPLETE
     steps:
       - uses: actions/checkout@v4
 
@@ -72,6 +74,9 @@ jobs:
           SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
+      - name: Walidacja kompletności skanu
+        run: python -m buffett_scanner.cli --db live_scan_result.db verify-run-complete --report-out reports
+
       - name: Upload wyniku (raport jesli COMPLETE + baza do dalszego resume, jesli trzeba)
         if: always()
         uses: actions/upload-artifact@v4
@@ -82,3 +87,11 @@ jobs:
             live_scan_result.db
           if-no-files-found: warn
           retention-days: 30
+
+      # Wznowiony skan publikowany WYŁĄCZNIE po uzupełnieniu do COMPLETE
+      # (walidacja wyżej + blokada w samym publish-snapshot). Ten sam
+      # run_id z nową zawartością dostaje nowy, immutable tag release'u.
+      - name: Publikacja snapshotu scannera (GitHub Release)
+        run: python -m buffett_scanner.cli --db live_scan_result.db publish-snapshot
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

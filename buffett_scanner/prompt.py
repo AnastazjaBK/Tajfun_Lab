@@ -77,6 +77,33 @@ _THESIS_INVALIDATION_REQUIREMENT = (
     "wymyślonego progu), ale podaj przynajmniej jeden."
 )
 
+# Wymagania treści sześciu pól anti-confirmation-bias -- JEDNO źródło dla
+# promptu głównej analizy i promptu naprawy pól (2026-10-23), żeby
+# instrukcje nigdy się nie rozjechały. Kolejność = kolejność w prompcie.
+FIELD_REQUIREMENTS: dict[str, str] = {
+    "bull_case": "konkretne, uzasadnione dowodami argumenty ZA tezą inwestycyjną.",
+    "bear_case": (
+        "TAK SAMO rygorystyczne argumenty PRZECIW tezie — nie wolno "
+        "ograniczyć się do ogólników ('ryzyko rynkowe'); szukaj najsilniejszego "
+        "kontrargumentu, jaki uczciwy sceptyk by przedstawił."
+    ),
+    "why_market_may_be_right": (
+        "napisz, dlaczego spadek ceny/wycena rynkowa MOŻE "
+        "być racjonalna i uzasadniona, a nie błędem rynku do wykorzystania. Jeśli nie "
+        "widzisz dobrego argumentu, napisz to wprost — nie wymyślaj słabego na siłę."
+    ),
+    "why_this_may_not_be_a_bargain": (
+        "napisz, dlaczego obecna cena może NIE być "
+        "okazją (np. wycena już uwzględnia realne ryzyko, margin of safety jest iluzoryczny "
+        "z powodu niepewnych założeń)."
+    ),
+    "thesis_invalidation": _THESIS_INVALIDATION_REQUIREMENT,
+    "biggest_unknown": (
+        "najważniejsza rzecz, której NIE wiesz z dostarczonych danych "
+        "i źródeł, a która mogłaby zmienić ocenę."
+    ),
+}
+
 
 def _price_valuation_context_lines(
     current_price: float | None,
@@ -184,19 +211,7 @@ def build_analysis_prompt(
         "(niska pewność / biggest_unknown) zamiast zgadywać albo dopowiadać.",
         "",
         "ANTI-CONFIRMATION-BIAS (nieprzekraczalne — nie formalność, realny wymóg treści):",
-        "- `bull_case`: konkretne, uzasadnione dowodami argumenty ZA tezą inwestycyjną.",
-        "- `bear_case`: TAK SAMO rygorystyczne argumenty PRZECIW tezie — nie wolno "
-        "ograniczyć się do ogólników ('ryzyko rynkowe'); szukaj najsilniejszego "
-        "kontrargumentu, jaki uczciwy sceptyk by przedstawił.",
-        "- `why_market_may_be_right`: napisz, dlaczego spadek ceny/wycena rynkowa MOŻE "
-        "być racjonalna i uzasadniona, a nie błędem rynku do wykorzystania. Jeśli nie "
-        "widzisz dobrego argumentu, napisz to wprost — nie wymyślaj słabego na siłę.",
-        "- `why_this_may_not_be_a_bargain`: napisz, dlaczego obecna cena może NIE być "
-        "okazją (np. wycena już uwzględnia realne ryzyko, margin of safety jest iluzoryczny "
-        "z powodu niepewnych założeń).",
-        f"- `thesis_invalidation`: {_THESIS_INVALIDATION_REQUIREMENT}",
-        "- `biggest_unknown`: najważniejsza rzecz, której NIE wiesz z dostarczonych danych "
-        "i źródeł, a która mogłaby zmienić ocenę.",
+        *(f"- `{name}`: {requirement}" for name, requirement in FIELD_REQUIREMENTS.items()),
         "- Te pola mają równą wagę z bull_case — ocena, która nie potrafi uczciwie "
         "argumentować przeciw samej sobie, jest bezużyteczna.",
         "",
@@ -224,49 +239,36 @@ def build_analysis_prompt(
     return "\n".join(lines), source_id_map
 
 
-def build_thesis_invalidation_repair_prompt(
+def build_fields_repair_prompt(
     *,
     ticker: str,
-    bull_case: list[str],
-    bear_case: list[str],
-    biggest_unknown: str,
-    why_market_may_be_right: list[str],
-    why_this_may_not_be_a_bargain: list[str],
+    fields: list[str],
+    analysis: dict,
     metrics: dict[str, float | None],
     current_price: float | None = None,
     decline_snapshot: PriceChangeSnapshot | None = None,
     valuation_result: ValuationResult | None = None,
 ) -> str:
-    """Faza 6h (TARGETED FIELD REPAIR) -- minimalny prompt dla dokładnie
-    JEDNEGO empirycznie potwierdzonego przypadku naprawy: cała reszta
-    analizy jest poprawna, zawodzi WYŁĄCZNIE `thesis_invalidation`.
-    Zwraca TYLKO tekst promptu (nie source_id_map) -- celowo NIE
-    zawiera listy źródeł/cytowań (`sources`), ponieważ
-    `thesis_invalidation` nie ma wymogu cytowania (patrz
-    `ThesisInvalidationRepair` -- jedno pole, bez `verification_items`).
-    Dostaje dokładnie ten kontekst, którego potrzebuje do sformułowania
-    warunku falsyfikacji tezy -- istniejącą treść analizy (bull_case/
-    bear_case/biggest_unknown/why_market_may_be_right/
-    why_this_may_not_be_a_bargain) plus te same deterministyczne
-    metrics/current_price/decline/valuation co prompt głównej analizy
-    -- nigdy cały pierwotny prompt/source payload."""
+    """Naprawa pól (2026-10-23, uogólnienie naprawy z Fazy 6h): model
+    uzupełnia WYŁĄCZNIE podane `fields` -- pola treści analizy, które były
+    puste/semantycznie puste. Pozostałe pola analizy są kontekstem
+    zaakceptowanym i nie są generowane ponownie. Bez listy źródeł: pola
+    treści nie mają wymogu cytowania. Te same deterministyczne wskaźniki
+    i kontekst ceny/wyceny co prompt głównej analizy."""
+    accepted = [name for name in FIELD_REQUIREMENTS if name not in fields]
+    field_list = ", ".join(f"`{name}`" for name in fields)
     lines = [
-        f"To jest TARGETED REPAIR dla spółki {ticker} -- naprawiasz WYŁĄCZNIE "
-        "jedno pole istniejącej analizy value investing (Warren Buffett), "
-        "`thesis_invalidation`, które w poprzedniej odpowiedzi było semantycznie "
-        "puste. Reszta analizy (poniżej, jako kontekst) jest już gotowa i "
-        "ZAAKCEPTOWANA -- nie zmieniasz jej, nie komentujesz jej, nie poprawiasz "
-        "niczego innego. Zwróć WYŁĄCZNIE pole `thesis_invalidation`.",
+        f"To jest NAPRAWA analizy spółki {ticker} (value investing, Warren Buffett). "
+        f"W poprzedniej odpowiedzi pola {field_list} były puste albo bez konkretnej treści. "
+        "Uzupełniasz WYŁĄCZNIE te pola. Pozostała część analizy (poniżej, jako kontekst) "
+        "jest ZAAKCEPTOWANA — nie zmieniasz jej, nie komentujesz jej i jej nie zwracasz.",
         "",
         "ISTNIEJĄCA ANALIZA (kontekst, nie do zmiany):",
-        f"  bull_case: {bull_case}",
-        f"  bear_case: {bear_case}",
-        f"  why_market_may_be_right: {why_market_may_be_right}",
-        f"  why_this_may_not_be_a_bargain: {why_this_may_not_be_a_bargain}",
-        f"  biggest_unknown: {biggest_unknown}",
-        "",
-        "DETERMINISTYCZNE WSKAŹNIKI FINANSOWE (policzone przez kod, nie przez Ciebie):",
     ]
+    for name in accepted:
+        lines.append(f"  {name}: {analysis.get(name)}")
+    lines.append("")
+    lines.append("DETERMINISTYCZNE WSKAŹNIKI FINANSOWE (policzone przez kod, nie przez Ciebie):")
     for key, value in metrics.items():
         lines.append(f"  {key}: {value}")
 
@@ -274,16 +276,13 @@ def build_thesis_invalidation_repair_prompt(
     lines.extend(_price_valuation_context_lines(current_price, decline_snapshot, valuation_result))
 
     lines.append("")
-    lines.append("ZADANIE:")
-    lines.append(f"- `thesis_invalidation`: {_THESIS_INVALIDATION_REQUIREMENT}")
+    lines.append("ZADANIE (każde pole MUSI mieć konkretną treść — nie \"\", nie \"brak\", nie \"N/A\"):")
+    for name in fields:
+        lines.append(f"- `{name}`: {FIELD_REQUIREMENTS[name]}")
     lines.append(
-        "- Warunek MUSI wynikać z powyższej istniejącej analizy i danych -- nie "
-        "wymyślaj nowych faktów, które nie są obecne w kontekście powyżej, i nie "
-        "wymyślaj arbitralnych progów liczbowych, których dane nie uzasadniają."
+        "- Treść MUSI wynikać z powyższej analizy i danych -- nie wymyślaj nowych faktów "
+        "spoza kontekstu i nie wymyślaj arbitralnych progów liczbowych, których dane nie uzasadniają. "
+        "Jeśli czegoś nie wiesz, napisz konkretnie, czego i dlaczego."
     )
-    lines.append(
-        '- Pole "ticker" nie istnieje w tym schemacie -- zwróć wyłącznie '
-        '"thesis_invalidation" jako listę co najmniej jednego konkretnego ciągu tekstowego.'
-    )
-
+    lines.append(f"- Zwróć wyłącznie pola: {field_list}.")
     return "\n".join(lines)

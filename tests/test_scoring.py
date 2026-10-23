@@ -131,6 +131,10 @@ def _analysis(*, bu_score=7, moat_score=12, mgmt_score=10, fear_classification="
             classification=fear_classification, confidence=fear_confidence, trigger="x", reasoning="y",
         ),
         dividend_trap_alert=DividendTrapAlert(triggered=False, reasoning=""),
+        # 2026-10-23: pola treści są obowiązkowe -- jawnie te same puste
+        # wartości, które wcześniej dawały wartości domyślne.
+        bull_case=[], bear_case=[], why_market_may_be_right=[], biggest_unknown="",
+        thesis_invalidation=[], why_this_may_not_be_a_bargain=[],
         cited_source_ids=[],
     )
 

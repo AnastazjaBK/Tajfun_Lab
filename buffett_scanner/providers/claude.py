@@ -22,7 +22,7 @@ from typing import TypeVar
 import anthropic
 from pydantic import BaseModel
 
-from buffett_scanner.analysis_schema import AnalysisOutput, ThesisInvalidationRepair
+from buffett_scanner.analysis_schema import AnalysisOutput, repair_model
 
 _OutputT = TypeVar("_OutputT", bound=BaseModel)
 
@@ -73,12 +73,10 @@ class ClaudeAnalysisResult:
 
 @dataclass(frozen=True)
 class ClaudeRepairResult:
-    """Wynik `repair_thesis_invalidation` (Faza 6h, TARGETED FIELD
-    REPAIR) -- analogiczne do `ClaudeAnalysisResult`, ale dla
-    minimalnego, dedykowanego schematu `ThesisInvalidationRepair`
-    (WYŁĄCZNIE to jedno pole, nigdy cała analiza)."""
+    """Wynik `repair_fields` -- WYŁĄCZNIE naprawiane pola (nazwa ->
+    wartość), nigdy cała analiza."""
 
-    output: ThesisInvalidationRepair
+    output: dict
     usage: ClaudeUsage
 
 
@@ -165,14 +163,10 @@ class ClaudeClient:
         output, usage = self._parse(prompt, AnalysisOutput)
         return ClaudeAnalysisResult(output=output, usage=usage)
 
-    def repair_thesis_invalidation(self, prompt: str) -> ClaudeRepairResult:
-        """Faza 6h, TARGETED FIELD REPAIR -- osobne, minimalne wywołanie
-        Claude API zwracające WYŁĄCZNIE `ThesisInvalidationRepair`
-        (jedno pole), nie całą `AnalysisOutput`. Zastępuje poprzedni
-        mechanizm pełnego ślepego/feedback retry (Faza 6f/6g) dla
-        dokładnie jednego, empirycznie potwierdzonego przypadku:
-        reszta analizy jest poprawna, zawodzi WYŁĄCZNIE
-        `thesis_invalidation`. Semantyka błędów identyczna jak
-        `generate_analysis` (patrz `_parse`)."""
-        output, usage = self._parse(prompt, ThesisInvalidationRepair)
-        return ClaudeRepairResult(output=output, usage=usage)
+    def repair_fields(self, prompt: str, fields: list[str]) -> ClaudeRepairResult:
+        """Osobne, minimalne wywołanie uzupełniające WYŁĄCZNIE `fields`
+        (schemat `repair_model(fields)` -- tylko te pola, wszystkie
+        obowiązkowe). Semantyka błędów identyczna jak `generate_analysis`
+        (patrz `_parse`)."""
+        output, usage = self._parse(prompt, repair_model(tuple(fields)))
+        return ClaudeRepairResult(output=output.model_dump(), usage=usage)

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import time
@@ -53,10 +54,22 @@ SNAPSHOT_ASSET_NAME = "live_scan_result.db"
 POINTER_ASSET_NAME = "pointer.json"
 
 
+# Jedyny status skanu, który wolno opublikować jako dane dla aplikacji
+# (diagnostyka 2026-10-23: run live-scan-2026-10-22T202049554465Z ze
+# statusem INCOMPLETE_LLM_ANALYSIS -- 2/24 analiz -- został opublikowany,
+# bo krok publikacji sprawdzał tylko kod wyjścia procesu).
+PUBLISHABLE_STATUS = "COMPLETE"
+
+
 class SnapshotPublishError(RuntimeError):
     """Błąd `gh` (sieć/uprawnienia/API GitHuba) -- nigdy nie łapany po
     cichu, workflow ma widocznie zawieść, żeby brak publikacji nie
     przeszedł niezauważony."""
+
+
+class IncompleteRunError(SnapshotPublishError):
+    """Skan nie jest COMPLETE -- publikacja odmówiona, poprzedni snapshot
+    (wskaźnik `scanner-snapshot-latest`) zostaje nietknięty."""
 
 
 @dataclass(frozen=True)
@@ -66,6 +79,7 @@ class RunSummary:
     universe_size: int
     decline_surfaced: int
     shortlist_size: int
+    status: str | None = None
 
 
 def compute_sha256(path: str | Path) -> str:
@@ -111,6 +125,7 @@ def read_latest_run_summary(db_path: str | Path) -> RunSummary | None:
         universe_size=row["universe_size"],
         decline_surfaced=row["decline_surfaced"],
         shortlist_size=row["shortlist_size"],
+        status=row["status"],
     )
 
 
@@ -159,6 +174,19 @@ class GhReleaseClient:
         )
         return result.returncode == 0
 
+    def release_sha256(self, tag: str) -> str | None:
+        """SHA256 snapshotu z notatek istniejącego release'u (zapisany tam
+        przez `build_release_notes`); None, gdy brak/nieczytelny."""
+        result = self._run(
+            ["gh", "release", "view", tag, "--json", "body", "-q", ".body", *self._repo_args()],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return None
+        match = re.search(r"SHA256 \(" + re.escape(SNAPSHOT_ASSET_NAME) + r"\): `([0-9a-f]{64})`",
+                          getattr(result, "stdout", "") or "")
+        return match.group(1) if match else None
+
     def create_release(self, tag: str, *, title: str, notes: str, asset_path: str) -> None:
         result = self._run(
             [
@@ -191,9 +219,19 @@ def publish_snapshot(
         return None
     if not should_publish_as_live_scan(summary.run_id):
         return None
+    if summary.status != PUBLISHABLE_STATUS:
+        raise IncompleteRunError(
+            f"Skan {summary.run_id} ma status {summary.status} (wymagany {PUBLISHABLE_STATUS}) -- "
+            "NIE publikuję; poprzedni snapshot w aplikacji zostaje bez zmian."
+        )
 
     sha256 = compute_sha256(db_path)
     release_tag = f"{RELEASE_TAG_PREFIX}{summary.run_id}"
+    # Release per run jest immutable: ten sam run_id z INNĄ zawartością
+    # (np. po wznowieniu analizy shortlisty) dostaje nowy tag z sumą
+    # kontrolną zamiast cichego wskazania na stary plik.
+    if gh_client.release_exists(release_tag) and gh_client.release_sha256(release_tag) != sha256:
+        release_tag = f"{release_tag}-{sha256[:12]}"
 
     # 1. Immutable release per run -- tworzony TYLKO jeśli jeszcze nie
     #    istnieje (ten sam run_id nigdy nie jest publikowany dwa razy

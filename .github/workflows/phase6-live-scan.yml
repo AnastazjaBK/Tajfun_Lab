@@ -120,7 +120,15 @@ jobs:
           SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      - name: Upload finalnego raportu i bazy
+      # Bramka kompletności (diagnostyka 2026-10-23, run #10): krok wyżej
+      # kończy się kodem 0 także przy INCOMPLETE_LLM_ANALYSIS -- dlatego
+      # status MERYTORYCZNY skanu jest sprawdzany osobno. Niekompletny
+      # skan = czerwony job, raport w artefakcie i w podsumowaniu joba,
+      # ZERO publikacji (poprzedni snapshot w aplikacji zostaje).
+      - name: Walidacja kompletności skanu
+        run: python -m buffett_scanner.cli --db live_scan_result.db verify-run-complete --report-out reports
+
+      - name: Upload finalnego raportu, raportu diagnostycznego i bazy
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -130,15 +138,12 @@ jobs:
             live_scan_result.db
           if-no-files-found: warn
 
-      # Faza 8 Etap B: trwała publikacja (NIE 30-dniowy artefakt wyżej)
-      # jako GitHub Release -- źródło danych SHARED dla hostowanej
-      # appki Streamlit (Etap C). Tylko gdy run-live-scan się powiodło
-      # (brak `if:` = domyślne `success()`) -- nigdy nie publikuje
-      # przerwanego/niekompletnego runu jako "najnowszy". `publish-
-      # snapshot` sam pomija runy inne niż `live-scan-*` (nigdy
-      # validation-*), więc jest bezpieczny nawet przy `rank_only`.
+      # Faza 8 Etap B: trwała publikacja jako GitHub Release -- źródło
+      # danych dla aplikacji. Wykonywana WYŁĄCZNIE gdy wszystkie kroki
+      # wyżej (w tym walidacja kompletności) się powiodły (domyślne
+      # `success()`); `publish-snapshot` sam też odmawia publikacji
+      # skanu innego niż COMPLETE (druga, niezależna blokada).
       - name: Publikacja snapshotu scannera (GitHub Release)
         run: python -m buffett_scanner.cli --db live_scan_result.db publish-snapshot
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          retention-days: 30

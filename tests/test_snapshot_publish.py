@@ -11,12 +11,13 @@ import sqlite3
 
 import pytest
 
-from buffett_scanner.db import SCHEMA, insert_live_scan_run
+from buffett_scanner.db import SCHEMA, insert_live_scan_run, update_live_scan_run_status
 from buffett_scanner.snapshot_publish import (
     POINTER_ASSET_NAME,
     RELEASE_TAG_PREFIX,
     SNAPSHOT_POINTER_TAG,
     GhReleaseClient,
+    IncompleteRunError,
     SnapshotPublishError,
     build_pointer_payload,
     build_release_notes,
@@ -28,9 +29,10 @@ from buffett_scanner.snapshot_publish import (
 
 
 class _FakeCompletedProcess:
-    def __init__(self, returncode: int, stderr: str = ""):
+    def __init__(self, returncode: int, stderr: str = "", stdout: str = ""):
         self.returncode = returncode
         self.stderr = stderr
+        self.stdout = stdout
 
 
 class _FakeGhCli:
@@ -38,16 +40,20 @@ class _FakeGhCli:
     "istnieją" -- wystarczające do sprawdzenia logiki orkiestracji bez
     prawdziwego `gh`."""
 
-    def __init__(self, *, existing_tags: set[str] | None = None, fail_create: bool = False):
+    def __init__(self, *, existing_tags: set[str] | None = None, fail_create: bool = False,
+                 release_bodies: dict[str, str] | None = None):
         self.calls: list[list[str]] = []
         self._existing_tags = set(existing_tags or set())
         self._fail_create = fail_create
+        self._bodies = dict(release_bodies or {})
 
     def __call__(self, argv, capture_output=True, text=True):
         self.calls.append(argv)
         if argv[1] == "release" and argv[2] == "view":
             tag = argv[3]
-            return _FakeCompletedProcess(0 if tag in self._existing_tags else 1)
+            if tag not in self._existing_tags:
+                return _FakeCompletedProcess(1)
+            return _FakeCompletedProcess(0, stdout=self._bodies.get(tag, "") if "--json" in argv else "")
         if argv[1] == "release" and argv[2] == "create":
             if self._fail_create:
                 return _FakeCompletedProcess(1, stderr="symulowany błąd gh release create")
@@ -67,12 +73,13 @@ def db_path(tmp_path):
     conn.close()
 
 
-def _seed_run(conn, *, run_id: str, shortlist_size: int = 5) -> None:
+def _seed_run(conn, *, run_id: str, shortlist_size: int = 5, status: str = "COMPLETE") -> None:
     insert_live_scan_run(
         conn, run_id=run_id, run_date="2026-10-07", config_version="v1",
         universe_size=501, decline_surfaced=156, prefilter_excluded=0,
         shortlist_limit=20, shortlist_size=shortlist_size,
     )
+    update_live_scan_run_status(conn, run_id, status)
     conn.commit()
 
 
@@ -232,3 +239,50 @@ def test_build_pointer_payload_shape(db_path):
     assert payload["sha256"] == "deadbeef"
     assert payload["shortlist_size"] == 9
     assert "published_at" in payload
+
+
+# --- 2026-10-23: blokada publikacji niekompletnego skanu, niezmienność release'ów ---
+
+
+@pytest.mark.parametrize("status", ["INCOMPLETE_LLM_ANALYSIS", "RANKED"])
+def test_incomplete_run_is_never_published_and_pointer_is_untouched(db_path, status):
+    path, conn = db_path
+    _seed_run(conn, run_id="live-scan-2026-10-22T202049554465Z", status=status)
+    fake_cli = _FakeGhCli(existing_tags={SNAPSHOT_POINTER_TAG})
+    with pytest.raises(IncompleteRunError, match=status):
+        publish_snapshot(path, gh_client=GhReleaseClient(repo="owner/repo", run=fake_cli), work_dir=path.parent)
+    assert fake_cli.calls == []  # zero wywołań gh: ani release, ani pointer
+    assert not (path.parent / POINTER_ASSET_NAME).exists()
+
+
+def test_same_run_id_with_different_content_gets_new_immutable_tag(db_path):
+    """Wznowiony skan (ten sam run_id, inna zawartość bazy) nie może
+    wskazywać na stary plik ani go nadpisać."""
+    path, conn = db_path
+    run_id = "live-scan-2026-10-22T202049554465Z"
+    _seed_run(conn, run_id=run_id)
+    old_tag = f"{RELEASE_TAG_PREFIX}{run_id}"
+    old_notes = build_release_notes(read_latest_run_summary(path), sha256="0" * 64)
+    fake_cli = _FakeGhCli(existing_tags={old_tag}, release_bodies={old_tag: old_notes})
+
+    result = publish_snapshot(path, gh_client=GhReleaseClient(repo="owner/repo", run=fake_cli), work_dir=path.parent)
+
+    sha = compute_sha256(path)
+    assert result["release_tag"] == f"{old_tag}-{sha[:12]}"
+    created = [c[3] for c in fake_cli.calls if c[1:3] == ["release", "create"]]
+    assert f"{old_tag}-{sha[:12]}" in created and old_tag not in created
+    assert not any(c[3] == old_tag for c in fake_cli.calls if c[1:3] == ["release", "upload"])
+
+
+def test_same_run_id_with_identical_content_reuses_existing_tag(db_path):
+    path, conn = db_path
+    run_id = "live-scan-2026-10-07T000000000000Z"
+    _seed_run(conn, run_id=run_id)
+    tag = f"{RELEASE_TAG_PREFIX}{run_id}"
+    notes = build_release_notes(read_latest_run_summary(path), sha256=compute_sha256(path))
+    fake_cli = _FakeGhCli(existing_tags={tag}, release_bodies={tag: notes})
+
+    result = publish_snapshot(path, gh_client=GhReleaseClient(repo="owner/repo", run=fake_cli), work_dir=path.parent)
+
+    assert result["release_tag"] == tag
+    assert not any(c[1:3] == ["release", "create"] and c[3].startswith(tag) for c in fake_cli.calls)

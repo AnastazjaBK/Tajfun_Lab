@@ -34,6 +34,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import statistics
 import sys
 from pathlib import Path
@@ -41,7 +42,8 @@ from pathlib import Path
 from buffett_scanner.analysis_schema import (
     AnalysisOutput,
     AnalysisValidationError,
-    is_only_thesis_invalidation_semantically_empty,
+    collect_validation_violations,
+    repairable_fields,
     validate_analysis_output,
 )
 from buffett_scanner.backfill import (
@@ -100,6 +102,7 @@ from buffett_scanner.db import (
     list_active_tickers,
     list_universe_membership_ciks,
     update_company_sector_profile,
+    insert_llm_rejected_output,
     update_live_scan_candidate_llm_status,
     update_live_scan_run_status,
     upsert_company,
@@ -132,7 +135,7 @@ from buffett_scanner.live_scan_pipeline import (
 from buffett_scanner.pit_fundamentals import build_annual_fundamentals_periods_as_of
 from buffett_scanner.point_in_time import find_first_matching_tag, value_as_of
 from buffett_scanner.price_history_plan import build_price_fetch_plan
-from buffett_scanner.prompt import build_analysis_prompt, build_thesis_invalidation_repair_prompt
+from buffett_scanner.prompt import build_analysis_prompt, build_fields_repair_prompt
 from buffett_scanner.providers.claude import ClaudeClient, ClaudeError, ClaudeUsage
 from buffett_scanner.providers.fmp import FMPClient, FMPError, normalize_fundamentals_rows
 from buffett_scanner.providers.sec_edgar import SecEdgarClient, SecEdgarError
@@ -142,7 +145,13 @@ from buffett_scanner.scanner import PriceBar, PriceChangeSnapshot, compute_price
 from buffett_scanner.scoring import compute_score
 from buffett_scanner.valuation import compute_valuation
 from buffett_scanner.sector_classification import classify_sic_to_sector_profile
-from buffett_scanner.snapshot_publish import GhReleaseClient, publish_snapshot
+from buffett_scanner.snapshot_publish import (
+    PUBLISHABLE_STATUS,
+    GhReleaseClient,
+    IncompleteRunError,
+    publish_snapshot,
+    read_latest_run_summary,
+)
 from buffett_scanner.sources import VerifiedSource, build_sec_source_packet
 from buffett_scanner.universe_cik_reconciliation import (
     MATCH_ALGORITHM_VERSION,
@@ -886,18 +895,110 @@ def cmd_analyze_live_scan_shortlist(args: argparse.Namespace) -> int:
     )
 
 
-# TARGETED FIELD REPAIR (Faza 6h, 2026-10-06): zastępuje full-response
-# retry z Faz 6f/6g. Dwa REALNE validation runy (validation-6f, po
-# bdfcc92 validation-6g) wykazały, że full-response retry (ślepy, i z
-# dołączonym konkretnym feedbackiem) NIE naprawiał rzetelnie pustego
-# `thesis_invalidation` -- 1/5 COMPLETE w obu runach, 10 pełnych Claude
-# calls dla 5 analiz w drugim. Wniosek architektoniczny właścicielki:
-# full-analysis retry jest niewłaściwym mechanizmem naprawczym dla
-# pojedynczego brakującego pola. Nowy flow (w `_analyze_shortlist_and_
-# report` niżej): maksymalnie 1 full analysis call + (TYLKO gdy jedynym
-# naruszeniem jest semantycznie pusty `thesis_invalidation`) 1 targeted
-# repair call -- nigdy więcej, i NIE generalizowany na inne pola (patrz
-# `is_only_thesis_invalidation_semantically_empty`, analysis_schema.py).
+# NAPRAWA PÓL (2026-10-23, uogólnienie TARGETED FIELD REPAIR z Fazy 6h).
+# Run live-scan-2026-10-22T202049554465Z: 22/24 analiz odrzuconych, bo
+# naprawa obejmowała tylko przypadek "puste wyłącznie thesis_invalidation",
+# a w praktyce puste było też biggest_unknown. Teraz: 1 pełna analiza +
+# najwyżej MAX_REPAIR_ATTEMPTS minimalnych wywołań, które uzupełniają
+# WYŁĄCZNIE semantycznie puste pola treści (pozostałe pola nie są
+# generowane ponownie). Błąd strukturalny (cytowania, zakres punktów) =
+# zawsze FAILED bez naprawy. Każda odrzucona odpowiedź jest zapisywana
+# w `llm_rejected_outputs`.
+MAX_REPAIR_ATTEMPTS = 2
+
+
+def _add_usage(total: ClaudeUsage | None, extra: ClaudeUsage | None) -> ClaudeUsage | None:
+    """Suma usage kolejnych prób naprawy (model/tier z ostatniej próby)."""
+    if extra is None:
+        return total
+    if total is None:
+        return extra
+
+    def add(a, b):
+        return None if a is None and b is None else (a or 0) + (b or 0)
+
+    return ClaudeUsage(
+        model=extra.model,
+        input_tokens=total.input_tokens + extra.input_tokens,
+        output_tokens=total.output_tokens + extra.output_tokens,
+        cache_creation_input_tokens=add(total.cache_creation_input_tokens, extra.cache_creation_input_tokens),
+        cache_read_input_tokens=add(total.cache_read_input_tokens, extra.cache_read_input_tokens),
+        thinking_tokens=add(total.thinking_tokens, extra.thinking_tokens),
+        service_tier=extra.service_tier,
+    )
+
+
+def _generate_validated_analysis(
+    conn, claude_client, *, run_id: str, cik: str, ticker: str, prompt: str, allowed_source_ids: set[str],
+    metrics: dict, current_price, decline_snapshot, valuation_result,
+):
+    """Pełna analiza + ograniczona naprawa pól. Zwraca (analiza albo None,
+    ClaudeError albo None, AnalysisValidationError albo None, usage pełnej
+    analizy, suma usage napraw, liczba prób naprawy)."""
+    repair_usage: ClaudeUsage | None = None
+    attempts = 0
+    try:
+        generated = claude_client.generate_analysis(prompt)
+    except ClaudeError as exc:
+        if exc.usage is not None:  # odpowiedź istniała (odmowa / nieparsowalny JSON)
+            insert_llm_rejected_output(
+                conn, run_id=run_id, cik=cik, ticker=ticker, call_kind="FULL_ANALYSIS", attempt=0,
+                raw_output=None, violations=[], error=str(exc), usage=exc.usage,
+            )
+        return None, exc, None, exc.usage, None, 0
+
+    usage = generated.usage
+    output = generated.output
+    violations = collect_validation_violations(
+        output, allowed_source_ids=allowed_source_ids, pdf_paginated_source_ids=set(),
+    )
+    if not violations:
+        return output, None, None, usage, None, 0
+    print(f"  {ticker}: pełna analiza nie przeszła walidacji: {' | '.join(v.message for v in violations)}")
+    insert_llm_rejected_output(
+        conn, run_id=run_id, cik=cik, ticker=ticker, call_kind="FULL_ANALYSIS", attempt=0,
+        raw_output=json.dumps(output.model_dump(), ensure_ascii=False),
+        violations=[v.message for v in violations], usage=usage,
+    )
+
+    while attempts < MAX_REPAIR_ATTEMPTS:
+        fields = repairable_fields(violations)
+        if fields is None:
+            print(f"  {ticker}: brak naprawy -- naruszenie strukturalne (naprawiane są tylko puste pola treści).")
+            break
+        attempts += 1
+        repair_prompt = build_fields_repair_prompt(
+            ticker=ticker, fields=fields, analysis=output.model_dump(), metrics=metrics,
+            current_price=current_price, decline_snapshot=decline_snapshot, valuation_result=valuation_result,
+        )
+        try:
+            repaired = claude_client.repair_fields(repair_prompt, fields)
+        except ClaudeError as exc:
+            repair_usage = _add_usage(repair_usage, exc.usage)
+            if exc.usage is not None:
+                insert_llm_rejected_output(
+                    conn, run_id=run_id, cik=cik, ticker=ticker, call_kind="FIELD_REPAIR", attempt=attempts,
+                    raw_output=None, violations=[], error=str(exc), usage=exc.usage,
+                )
+            return None, exc, None, usage, repair_usage, attempts
+        repair_usage = _add_usage(repair_usage, repaired.usage)
+        output = output.model_copy(update={name: repaired.output[name] for name in fields})
+        violations = collect_validation_violations(
+            output, allowed_source_ids=allowed_source_ids, pdf_paginated_source_ids=set(),
+        )
+        if not violations:
+            print(f"  {ticker}: naprawa pól {fields} skuteczna (próba {attempts}).")
+            return output, None, None, usage, repair_usage, attempts
+        print(f"  {ticker}: naprawa pól {fields} (próba {attempts}) nieskuteczna: "
+              f"{' | '.join(v.message for v in violations)}")
+        insert_llm_rejected_output(
+            conn, run_id=run_id, cik=cik, ticker=ticker, call_kind="FIELD_REPAIR", attempt=attempts,
+            raw_output=json.dumps(output.model_dump(), ensure_ascii=False),
+            violations=[v.message for v in violations], usage=repaired.usage,
+        )
+
+    error = AnalysisValidationError(" | ".join(v.message for v in violations), violations)
+    return None, None, error, usage, repair_usage, attempts
 
 
 def _analyze_shortlist_and_report(
@@ -1021,81 +1122,19 @@ def _analyze_shortlist_and_report(
                 # runów). ClaudeError (błąd API) -- na KTÓRYMKOLWIEK z
                 # dwóch wywołań -- zachowuje istniejący fail-fast (Faza
                 # 6c): zatrzymuje dalsze NOWE wywołania w tym przebiegu.
-                analysis = None
-                claude_error: ClaudeError | None = None
-                validation_error: AnalysisValidationError | None = None
-                usage: ClaudeUsage | None = None
-                repair_usage: ClaudeUsage | None = None
-
-                try:
-                    generated = claude_client.generate_analysis(prompt)
-                except ClaudeError as exc:
-                    claude_error = exc
-                    generated = None
-
-                if generated is not None:
-                    usage = generated.usage
-                    try:
-                        validate_analysis_output(
-                            generated.output, allowed_source_ids=set(source_id_map),
-                            pdf_paginated_source_ids=set(),
-                        )
-                    except AnalysisValidationError as exc:
-                        validation_error = exc
-                        print(f"  {ticker}: pełna analiza nie przeszła walidacji: {exc}")
-                    else:
-                        analysis = generated.output
-
-                    if (
-                        analysis is None
-                        and claude_error is None
-                        and is_only_thesis_invalidation_semantically_empty(generated.output)
-                    ):
-                        repair_prompt = build_thesis_invalidation_repair_prompt(
-                            ticker=ticker,
-                            bull_case=generated.output.bull_case,
-                            bear_case=generated.output.bear_case,
-                            biggest_unknown=generated.output.biggest_unknown,
-                            why_market_may_be_right=generated.output.why_market_may_be_right,
-                            why_this_may_not_be_a_bargain=generated.output.why_this_may_not_be_a_bargain,
-                            metrics=metrics, current_price=current_price,
-                            decline_snapshot=decline_snapshot_ctx,
-                            valuation_result=valuation_result_for_prompt,
-                        )
-                        try:
-                            repaired = claude_client.repair_thesis_invalidation(repair_prompt)
-                        except ClaudeError as exc:
-                            claude_error = exc
-                        else:
-                            repair_usage = repaired.usage
-                            merged = generated.output.model_copy(
-                                update={"thesis_invalidation": repaired.output.thesis_invalidation}
-                            )
-                            try:
-                                validate_analysis_output(
-                                    merged, allowed_source_ids=set(source_id_map),
-                                    pdf_paginated_source_ids=set(),
-                                )
-                            except AnalysisValidationError as exc2:
-                                validation_error = exc2
-                                print(
-                                    f"  {ticker}: targeted repair thesis_invalidation nie "
-                                    f"naprawił walidacji (bez kolejnego repair): {exc2}"
-                                )
-                            else:
-                                analysis = merged
-                                validation_error = None
-                    elif analysis is None and claude_error is None:
-                        print(
-                            f"  {ticker}: brak targeted repair -- naruszenie walidacji nie jest "
-                            "izolowanym, pustym thesis_invalidation."
-                        )
+                analysis, claude_error, validation_error, usage, repair_usage, repair_attempts = (
+                    _generate_validated_analysis(
+                        conn, claude_client, run_id=run_id, cik=cik, ticker=ticker, prompt=prompt,
+                        allowed_source_ids=set(source_id_map), metrics=metrics, current_price=current_price,
+                        decline_snapshot=decline_snapshot_ctx, valuation_result=valuation_result_for_prompt,
+                    )
+                )
 
                 if claude_error is not None:
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
                         llm_error=str(claude_error), cache_key=cache_key, usage=usage,
-                        repair_usage=repair_usage,
+                        repair_usage=repair_usage, repair_attempts=repair_attempts,
                     )
                     conn.commit()
                     print(f"  {ticker}: FAILED (Claude API error): {claude_error}")
@@ -1108,13 +1147,13 @@ def _analyze_shortlist_and_report(
                     continue
 
                 if analysis is None:
-                    # Kontrakt nie spełniony (walidacja i, jeśli zasadne,
-                    # targeted repair) -> FAILED, NIGDY COMPLETE (wymóg
-                    # właścicielki, BUGFIX V0 OUTPUT CONTRACT, punkt 3).
+                    # Kontrakt nie spełniony (walidacja i ograniczona naprawa
+                    # pól) -> FAILED, NIGDY COMPLETE (BUGFIX V0 OUTPUT
+                    # CONTRACT, punkt 3). Błąd zawiera WSZYSTKIE naruszenia.
                     update_live_scan_candidate_llm_status(
                         conn, run_id=run_id, cik=cik, llm_status="FAILED",
                         llm_error=str(validation_error), cache_key=cache_key, usage=usage,
-                        repair_usage=repair_usage,
+                        repair_usage=repair_usage, repair_attempts=repair_attempts,
                     )
                     conn.commit()
                     print(f"  {ticker}: FAILED (walidacja): {validation_error}")
@@ -1182,7 +1221,7 @@ def _analyze_shortlist_and_report(
                 update_live_scan_candidate_llm_status(
                     conn, run_id=run_id, cik=cik, llm_status="COMPLETE",
                     cache_key=cache_key, analysis_id=analysis_id, usage=usage,
-                    repair_usage=repair_usage,
+                    repair_usage=repair_usage, repair_attempts=repair_attempts,
                 )
                 conn.commit()
                 print(f"  {ticker}: COMPLETE (analysis_id={analysis_id})")
@@ -1205,7 +1244,7 @@ def _analyze_shortlist_and_report(
         # Faza 6h (TARGETED FIELD REPAIR) -- repair calls liczone i
         # raportowane ODRĘBNIE od full analysis calls (specyfikacja
         # właścicielki, punkt 3: musi być możliwe odróżnienie).
-        f"Targeted repair calls (thesis_invalidation): {usage_summary['repair_calls']}, "
+        f"Wywołania naprawy pól (wszystkie próby): {usage_summary['repair_calls']}, "
         f"repair input_tokens: {usage_summary['total_repair_input_tokens']}, "
         f"repair output_tokens: {usage_summary['total_repair_output_tokens']}\n"
         "(Brak wyliczonego kosztu $ — brak dziś zweryfikowanego cennika per-token, "
@@ -2342,7 +2381,11 @@ def cmd_publish_snapshot(args: argparse.Namespace) -> int:
     `live-scan-*`, nigdy `validation-*`). Zero zmian metodologii/
     scoringu -- czyta już gotowy plik bazy, nic nie przelicza."""
     client = GhReleaseClient(repo=args.repo)
-    result = publish_snapshot(args.db, gh_client=client, work_dir=args.work_dir)
+    try:
+        result = publish_snapshot(args.db, gh_client=client, work_dir=args.work_dir)
+    except IncompleteRunError as exc:
+        print(f"::error title=Publikacja zablokowana::{exc}")
+        return 1
     if result is None:
         print(
             f"Pominięto publikację: {args.db} nie zawiera prawdziwego live-scanu "
@@ -2353,6 +2396,67 @@ def cmd_publish_snapshot(args: argparse.Namespace) -> int:
         f"Opublikowano snapshot: run_id={result['run_id']} release_tag={result['release_tag']} "
         f"sha256={result['sha256']} shortlist_size={result['shortlist_size']}"
     )
+    return 0
+
+
+def build_run_status_report(db_path: str) -> tuple[str | None, str]:
+    """(status, raport markdown) najnowszego live-scanu w `db_path` --
+    raport diagnostyczny: status, liczby analiz, przyczyny odrzuceń i
+    liczba zapisanych odrzuconych odpowiedzi modelu."""
+    summary = read_latest_run_summary(db_path)
+    if summary is None:
+        return None, "## Skan: brak wiersza live_scan_runs w bazie\n"
+    conn = init_db(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT ticker, rank, llm_status, llm_error FROM live_scan_candidates "
+            "WHERE run_id = ? AND in_shortlist = 1 ORDER BY rank",
+            (summary.run_id,),
+        ).fetchall()
+        rejected = dict(conn.execute(
+            "SELECT ticker, COUNT(*) FROM llm_rejected_outputs WHERE run_id = ? GROUP BY ticker",
+            (summary.run_id,),
+        ).fetchall())
+    finally:
+        conn.close()
+    counts = {s: sum(1 for r in rows if r["llm_status"] == s) for s in ("COMPLETE", "FAILED", "PENDING")}
+    lines = [
+        f"## Skan {summary.run_id}: {summary.status}",
+        "",
+        f"- Data: {summary.run_date}",
+        f"- Analizy jakościowe: {counts['COMPLETE']}/{len(rows)} COMPLETE, {counts['FAILED']} FAILED, "
+        f"{counts['PENDING']} PENDING",
+        f"- Publikacja w aplikacji: {'dozwolona' if summary.status == PUBLISHABLE_STATUS else 'ZABLOKOWANA'}",
+        "",
+        "| # | Ticker | Status | Zapisane odrzucone odpowiedzi | Przyczyna |",
+        "|---|---|---|---|---|",
+    ]
+    for r in rows:
+        error = (r["llm_error"] or "").replace("|", "/").replace("\n", " ")
+        lines.append(f"| {r['rank']} | {r['ticker']} | {r['llm_status']} | {rejected.get(r['ticker'], 0)} | {error} |")
+    return summary.status, "\n".join(lines) + "\n"
+
+
+def cmd_verify_run_complete(args: argparse.Namespace) -> int:
+    """Bramka kompletności (diagnostyka 2026-10-23): kod wyjścia 1, gdy
+    skan nie jest COMPLETE -- workflow zgłasza niepowodzenie, a krok
+    publikacji się nie wykonuje. Raport trafia do `--report-out` (artefakt)
+    i do podsumowania joba GitHub (`GITHUB_STEP_SUMMARY`)."""
+    status, report = build_run_status_report(args.db)
+    print(report)
+    out_dir = Path(args.report_out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "run_status.md").write_text(report, encoding="utf-8")
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as f:
+            f.write(report + "\n")
+    if status != PUBLISHABLE_STATUS:
+        print(
+            f"::error title=Skan niekompletny::Status {status} -- wynik NIE jest gotowym rankingiem "
+            "i nie zostanie opublikowany. Baza i raport diagnostyczny są w artefakcie joba."
+        )
+        return 1
     return 0
 
 
@@ -2532,6 +2636,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Katalog roboczy na tymczasowy plik pointer.json przed uploadem.",
     )
     p_publish_snapshot.set_defaults(func=cmd_publish_snapshot)
+
+    p_verify = sub.add_parser("verify-run-complete")
+    p_verify.add_argument("--report-out", default="reports", help="Katalog na raport run_status.md.")
+    p_verify.set_defaults(func=cmd_verify_run_complete)
 
     return parser
 

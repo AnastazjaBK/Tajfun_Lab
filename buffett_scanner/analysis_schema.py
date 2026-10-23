@@ -32,15 +32,37 @@ milczące poprawianie halucynacji jest gorsze niż jawne odrzucenie.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from functools import lru_cache
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
 
 Confidence = Literal["HIGH", "MEDIUM", "LOW"]
 
 
 class AnalysisValidationError(RuntimeError):
-    pass
+    """`violations` -- WSZYSTKIE naruszenia (nie tylko pierwsze),
+    diagnostyka 2026-10-23: raportowanie tylko pierwszego ukryło, że
+    w 22/24 analizach puste było też `biggest_unknown`."""
+
+    def __init__(self, message: str, violations: list["Violation"] | None = None):
+        super().__init__(message)
+        self.violations = list(violations or [])
+
+
+@dataclass(frozen=True)
+class Violation:
+    """Jedno naruszenie walidacji. `field` != None -- semantycznie puste
+    pole treści, które wolno uzupełnić naprawą; `field` None -- błąd
+    strukturalny (cytowania, zakres punktów), zawsze odrzucenie."""
+
+    message: str
+    field: str | None = None
+
+    @property
+    def repairable(self) -> bool:
+        return self.field is not None
 
 
 class ScoredSection(BaseModel):
@@ -106,17 +128,6 @@ class HardFlagCandidate(BaseModel):
     quoted_text: str = ""
 
 
-class ThesisInvalidationRepair(BaseModel):
-    """Faza 6h (TARGETED FIELD REPAIR) — minimalny, dedykowany schemat dla
-    jednego, empirycznie potwierdzonego przypadku naprawy: cała reszta
-    analizy jest poprawna, zawodzi WYŁĄCZNIE `thesis_invalidation`.
-    Celowo NIE jest to `AnalysisOutput` ani jego podzbiór z większą
-    liczbą pól — repair call nie ma prawa (i nie ma możliwości w
-    schemacie) zwrócić/zmienić żadne inne pole analizy."""
-
-    thesis_invalidation: list[str] = Field(default_factory=list)
-
-
 class AnalysisOutput(BaseModel):
     ticker: str
     schema_version: str
@@ -126,12 +137,18 @@ class AnalysisOutput(BaseModel):
     management_capital_allocation: ManagementSection
     fear_analysis: FearAnalysis
     dividend_trap_alert: DividendTrapAlert
-    bull_case: list[str] = Field(default_factory=list)
-    bear_case: list[str] = Field(default_factory=list)
-    why_market_may_be_right: list[str] = Field(default_factory=list)
-    biggest_unknown: str = ""
-    thesis_invalidation: list[str] = Field(default_factory=list)
-    why_this_may_not_be_a_bargain: list[str] = Field(default_factory=list)
+    # 2026-10-23: sześć pól anti-confirmation-bias jest OBOWIĄZKOWYCH w
+    # schemacie JSON (bez wartości domyślnych). Wcześniej domyślne ""/[]
+    # robiły z nich pola opcjonalne -- model mógł je pominąć, a pydantic
+    # po cichu wstawiał puste wartości (run live-scan-2026-10-22: 22/24
+    # odrzuconych analiz). Obecność pola nie wystarcza -- treść nadal
+    # sprawdza walidacja semantyczna niżej.
+    bull_case: list[str]
+    bear_case: list[str]
+    why_market_may_be_right: list[str]
+    biggest_unknown: str
+    thesis_invalidation: list[str]
+    why_this_may_not_be_a_bargain: list[str]
     verification_items: list[VerificationItem] = Field(default_factory=list)
     cited_source_ids: list[str] = Field(default_factory=list)
     hard_flag_candidates: list[HardFlagCandidate] = Field(default_factory=list)
@@ -178,83 +195,109 @@ def _is_semantically_empty(text: str) -> bool:
     return len(normalized) < _MIN_SUBSTANTIVE_LENGTH
 
 
-def validate_analysis_output(
+def collect_validation_violations(
     result: AnalysisOutput,
     *,
     allowed_source_ids: set[str],
     pdf_paginated_source_ids: set[str],
-) -> None:
-    """Rzuca `AnalysisValidationError` przy pierwszym naruszeniu reguł
-    sekcji 8. Nic nie zwraca — brak wyjątku oznacza rekord poprawny."""
+) -> list[Violation]:
+    """WSZYSTKIE naruszenia reguł sekcji 8 (pusta lista = rekord poprawny),
+    w kolejności: strukturalne, potem semantycznie puste pola treści."""
+    violations: list[Violation] = []
     cited = set(result.cited_source_ids)
     unknown_cited = cited - allowed_source_ids
     if unknown_cited:
-        raise AnalysisValidationError(
+        violations.append(Violation(
             f"cited_source_ids zawiera id spoza dostarczonej listy: {sorted(unknown_cited)}"
-        )
+        ))
 
     for item in result.verification_items:
         if item.source_id not in allowed_source_ids:
-            raise AnalysisValidationError(
+            violations.append(Violation(
                 f"verification_items zawiera source_id spoza dostarczonej listy: {item.source_id}"
-            )
+            ))
         if item.page is not None and item.source_id not in pdf_paginated_source_ids:
-            raise AnalysisValidationError(
+            violations.append(Violation(
                 f"page={item.page} podane dla source_id={item.source_id}, które nie jest "
                 "PDF z potwierdzoną paginacją (BLOCKER 4)"
-            )
+            ))
 
     for flag in result.hard_flag_candidates:
         if flag.evidence_source_id not in allowed_source_ids:
-            raise AnalysisValidationError(
+            violations.append(Violation(
                 "hard_flag_candidates zawiera evidence_source_id spoza dostarczonej listy: "
                 f"{flag.evidence_source_id}"
-            )
+            ))
 
     for name in _SCORED_SECTIONS:
         section = getattr(result, name)
         if section.score > section.max_score:
-            raise AnalysisValidationError(
+            violations.append(Violation(
                 f"{name}.score ({section.score}) > max_score ({section.max_score}) — reject, nie clamp"
-            )
+            ))
         if section.score < 0:
-            raise AnalysisValidationError(f"{name}.score ({section.score}) jest ujemny")
+            violations.append(Violation(f"{name}.score ({section.score}) jest ujemny"))
 
     # BUGFIX V0 OUTPUT CONTRACT (Faza 6f) -- semantyczna niepustość pól
     # anti-confirmation-bias (patrz docstring modułu, punkt 4).
     for field_name in _REQUIRED_NONEMPTY_LIST_FIELDS:
         values = getattr(result, field_name)
         if not values or all(_is_semantically_empty(v) for v in values):
-            raise AnalysisValidationError(
+            violations.append(Violation(
                 f"{field_name} jest semantycznie pusty — wymagany co najmniej jeden "
-                "konkretny punkt (nie \"\"/null/[]/\"brak\"/\"N/A\")"
-            )
+                "konkretny punkt (nie \"\"/null/[]/\"brak\"/\"N/A\")",
+                field=field_name,
+            ))
     if _is_semantically_empty(result.biggest_unknown):
-        raise AnalysisValidationError(
+        violations.append(Violation(
             "biggest_unknown jest semantycznie pusty — wymagany konkretny, materialny "
-            "unknown (nie \"\"/\"brak\"/\"N/A\")"
-        )
+            "unknown (nie \"\"/\"brak\"/\"N/A\")",
+            field="biggest_unknown",
+        ))
+    return violations
 
 
-def is_only_thesis_invalidation_semantically_empty(result: AnalysisOutput) -> bool:
-    """Faza 6h (TARGETED FIELD REPAIR) -- True wyłącznie gdy JEDYNYM
-    naruszeniem semantic completeness w `result` jest `thesis_invalidation`
-    (wszystkie pozostałe wymagane pola -- bull_case/bear_case/
-    why_market_may_be_right/why_this_may_not_be_a_bargain/biggest_unknown
-    -- są semantycznie niepuste). Sprawdza WSZYSTKIE pola niezależnie
-    (nie zatrzymuje się na pierwszym naruszeniu, w przeciwieństwie do
-    `validate_analysis_output`), żeby targeted repair nigdy nie był
-    próbowany, gdy zawodzi więcej niż jedno pole (specyfikacja
-    właścicielki, punkt 2: "jeżeli brakuje/inwalidne jest [inne pole]
-    ... zachowaj bezpieczny FAILED"). Nie sprawdza reguł strukturalnych
-    (cited_source_ids/page/score) -- te mają zawsze iść prosto do
-    FAILED, obsługiwane osobno przez wywołującego."""
-    other_fields = [name for name in _REQUIRED_NONEMPTY_LIST_FIELDS if name != "thesis_invalidation"]
-    for field_name in other_fields:
-        values = getattr(result, field_name)
-        if not values or all(_is_semantically_empty(v) for v in values):
-            return False
-    if _is_semantically_empty(result.biggest_unknown):
-        return False
-    values = result.thesis_invalidation
-    return not values or all(_is_semantically_empty(v) for v in values)
+def validate_analysis_output(
+    result: AnalysisOutput,
+    *,
+    allowed_source_ids: set[str],
+    pdf_paginated_source_ids: set[str],
+) -> None:
+    """Rzuca `AnalysisValidationError` z WSZYSTKIMI naruszeniami reguł
+    sekcji 8 (`.violations`). Brak wyjątku oznacza rekord poprawny."""
+    violations = collect_validation_violations(
+        result, allowed_source_ids=allowed_source_ids, pdf_paginated_source_ids=pdf_paginated_source_ids,
+    )
+    if violations:
+        raise AnalysisValidationError(" | ".join(v.message for v in violations), violations)
+
+
+# Pola, które naprawa uzupełnia osobnym, minimalnym wywołaniem (typy jak
+# w `AnalysisOutput`).
+REPAIRABLE_FIELDS: dict[str, type] = {
+    "bull_case": list[str],
+    "bear_case": list[str],
+    "why_market_may_be_right": list[str],
+    "why_this_may_not_be_a_bargain": list[str],
+    "thesis_invalidation": list[str],
+    "biggest_unknown": str,
+}
+
+
+def repairable_fields(violations: list[Violation]) -> list[str] | None:
+    """Pola do uzupełnienia naprawą -- albo None, gdy którekolwiek
+    naruszenie jest strukturalne (takiej analizy nie naprawiamy)."""
+    if not violations or any(not v.repairable for v in violations):
+        return None
+    return [name for name in REPAIRABLE_FIELDS if any(v.field == name for v in violations)]
+
+
+@lru_cache(maxsize=None)
+def repair_model(fields: tuple[str, ...]) -> type[BaseModel]:
+    """Schemat odpowiedzi naprawy: WYŁĄCZNIE podane pola, wszystkie
+    obowiązkowe -- naprawa nie ma możliwości zwrócić ani zmienić żadnej
+    innej części analizy (poprawne pola nie są generowane ponownie)."""
+    return create_model(
+        "AnalysisFieldsRepair_" + "_".join(fields),
+        **{name: (REPAIRABLE_FIELDS[name], ...) for name in fields},
+    )

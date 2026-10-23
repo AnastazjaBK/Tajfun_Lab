@@ -566,10 +566,35 @@ CREATE TABLE IF NOT EXISTS live_scan_candidates (
     llm_repair_cache_read_input_tokens     INTEGER,
     llm_repair_thinking_tokens             INTEGER,
     llm_repair_service_tier                TEXT,
+    -- 2026-10-23: liczba wywołań naprawy pól (0..MAX_REPAIR_ATTEMPTS);
+    -- kolumny llm_repair_* wyżej sumują wtedy usage WSZYSTKICH prób.
+    llm_repair_attempts                    INTEGER,
     PRIMARY KEY (run_id, cik)
 );
 CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_run_id ON live_scan_candidates(run_id);
 CREATE INDEX IF NOT EXISTS idx_live_scan_candidates_cache_key ON live_scan_candidates(cache_key);
+
+-- 2026-10-23 (diagnostyka runu live-scan-2026-10-22T202049554465Z:
+-- 22 opłacone odpowiedzi odrzucone i NIGDZIE niezapisane) -- każda
+-- odrzucona odpowiedź modelu (pełna analiza albo próba naprawy pól) z
+-- WSZYSTKIMI przyczynami odrzucenia i realnym usage. Tylko INSERT.
+CREATE TABLE IF NOT EXISTS llm_rejected_outputs (
+    rejected_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL,
+    cik             TEXT NOT NULL,
+    ticker          TEXT NOT NULL,
+    call_kind       TEXT NOT NULL CHECK (call_kind IN ('FULL_ANALYSIS', 'FIELD_REPAIR')),
+    attempt         INTEGER NOT NULL,
+    raw_output      TEXT,             -- JSON odpowiedzi (po naprawie: analiza scalona); NULL gdy brak
+    violations_json TEXT NOT NULL,    -- lista komunikatów (wszystkie naruszenia)
+    error           TEXT,             -- błąd wywołania (np. odmowa/nieparsowalny JSON), jeśli był
+    response_model  TEXT,
+    input_tokens    INTEGER,
+    output_tokens   INTEGER,
+    thinking_tokens INTEGER,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_llm_rejected_outputs_run_id ON llm_rejected_outputs(run_id);
 
 -- Faza 7 (UI + PORTFOLIO V0) -- decyzje użytkownika na kandydatach
 -- scannera (SHARED analiza spółki, USER-SCOPED decyzja -- sekcja 1.1
@@ -770,6 +795,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("live_scan_candidates", "llm_repair_cache_read_input_tokens", "INTEGER"),
     ("live_scan_candidates", "llm_repair_thinking_tokens", "INTEGER"),
     ("live_scan_candidates", "llm_repair_service_tier", "TEXT"),
+    ("live_scan_candidates", "llm_repair_attempts", "INTEGER"),  # 2026-10-23
     # Faza 7 (2026-10-06, UI + PORTFOLIO V0) — zarezerwowana na przyszłość
     # kolumna z docelowego schematu (sekcja 16 design review), dodana
     # PO tym, jak `sale_transactions` mogła już istnieć w plikach DB
@@ -1749,6 +1775,7 @@ def update_live_scan_candidate_llm_status(
     analysis_id: int | None = None,
     usage: ClaudeUsage | None = None,
     repair_usage: ClaudeUsage | None = None,
+    repair_attempts: int | None = None,
 ) -> None:
     """`usage` (Faza 6e): realny `ClaudeUsage` gdy API faktycznie
     odpowiedziało w TYM wywołaniu (sukces, albo FAILED przez refusal/
@@ -1775,7 +1802,7 @@ def update_live_scan_candidate_llm_status(
             llm_repair_response_model = ?, llm_repair_input_tokens = ?,
             llm_repair_output_tokens = ?, llm_repair_cache_creation_input_tokens = ?,
             llm_repair_cache_read_input_tokens = ?, llm_repair_thinking_tokens = ?,
-            llm_repair_service_tier = ?
+            llm_repair_service_tier = ?, llm_repair_attempts = ?
         WHERE run_id = ? AND cik = ?
         """,
         (
@@ -1794,9 +1821,38 @@ def update_live_scan_candidate_llm_status(
             repair_usage.cache_read_input_tokens if repair_usage else None,
             repair_usage.thinking_tokens if repair_usage else None,
             repair_usage.service_tier if repair_usage else None,
+            repair_attempts,
             run_id, cik,
         ),
     )
+
+
+def insert_llm_rejected_output(
+    conn: sqlite3.Connection, *, run_id: str, cik: str, ticker: str, call_kind: str, attempt: int,
+    raw_output: str | None, violations: list[str], error: str | None = None, usage: ClaudeUsage | None = None,
+) -> int:
+    """Odrzucona odpowiedź modelu -- materiał diagnostyczny z opłaconego
+    wywołania (nigdy nie wchodzi do wyniku)."""
+    cur = conn.execute(
+        """
+        INSERT INTO llm_rejected_outputs (
+            run_id, cik, ticker, call_kind, attempt, raw_output, violations_json, error,
+            response_model, input_tokens, output_tokens, thinking_tokens
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            run_id, cik, ticker, call_kind, attempt, raw_output, json.dumps(violations, ensure_ascii=False), error,
+            usage.model if usage else None, usage.input_tokens if usage else None,
+            usage.output_tokens if usage else None, usage.thinking_tokens if usage else None,
+        ),
+    )
+    return cur.lastrowid
+
+
+def get_llm_rejected_outputs(conn: sqlite3.Connection, run_id: str) -> list[sqlite3.Row]:
+    return conn.execute(
+        "SELECT * FROM llm_rejected_outputs WHERE run_id = ? ORDER BY rejected_id", (run_id,),
+    ).fetchall()
 
 
 def update_live_scan_run_status(conn: sqlite3.Connection, run_id: str, status: str) -> None:
@@ -1830,7 +1886,8 @@ def get_live_scan_run_usage_summary(conn: sqlite3.Connection, run_id: str) -> di
             SUM(llm_cache_creation_input_tokens) AS total_cache_creation_input_tokens,
             SUM(llm_cache_read_input_tokens) AS total_cache_read_input_tokens,
             SUM(llm_thinking_tokens) AS total_thinking_tokens,
-            SUM(CASE WHEN llm_repair_input_tokens IS NOT NULL THEN 1 ELSE 0 END) AS repair_calls,
+            SUM(COALESCE(llm_repair_attempts,
+                CASE WHEN llm_repair_input_tokens IS NOT NULL THEN 1 ELSE 0 END)) AS repair_calls,
             SUM(llm_repair_input_tokens) AS total_repair_input_tokens,
             SUM(llm_repair_output_tokens) AS total_repair_output_tokens,
             SUM(llm_repair_cache_creation_input_tokens) AS total_repair_cache_creation_input_tokens,

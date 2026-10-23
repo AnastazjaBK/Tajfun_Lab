@@ -80,3 +80,54 @@ def test_glossary_entries_are_nonempty_term_and_explanation_pairs():
         assert term.strip()
         assert explanation.strip()
         assert len(explanation) > 20  # nie goła etykieta bez wyjaśnienia
+
+
+# --- 2026-10-23: status skanu i wyniki częściowe -----------------------
+
+from buffett_scanner.config import load_config  # noqa: E402
+from buffett_scanner.ui.labels import (  # noqa: E402
+    deterministic_points_label,
+    missing_components_label,
+    run_status_banner,
+)
+
+_WEIGHTS = load_config().scoring.weights.model_dump()
+
+
+def test_run_status_banner_complete_shows_date_and_counts():
+    ok, text = run_status_banner("COMPLETE", "2026-10-06", 5, 5)
+    assert ok is True
+    assert "COMPLETE" in text and "2026-10-06" in text and "5/5" in text
+    assert "nie jest gotowy ranking" not in text
+
+
+def test_run_status_banner_incomplete_warns_not_investment_ranking():
+    """Przypadek skanu 22.10: 2 z 24 analiz ukończone."""
+    ok, text = run_status_banner("INCOMPLETE_LLM_ANALYSIS", "2026-10-22", 2, 24)
+    assert ok is False
+    assert "INCOMPLETE" in text and "2026-10-22" in text and "2/24" in text
+    assert "nie jest gotowy ranking inwestycyjny" in text
+
+
+def test_run_status_banner_unknown_status_is_never_treated_as_complete():
+    for status in ("RANKED", "SOMETHING_NEW"):
+        ok, text = run_status_banner(status, "2026-10-22", 0, 20)
+        assert ok is False
+        assert "INCOMPLETE" in text
+
+
+def test_partial_score_45_of_45_never_reads_as_100():
+    label = deterministic_points_label(45.0, ["safety", "valuation", "dividend"], _WEIGHTS)
+    assert label == "45.0 / 45 pkt (z 100)"
+    assert "100%" not in label and "100 / 100" not in label
+
+
+def test_partial_score_25_of_25_when_valuation_missing():
+    assert deterministic_points_label(25.0, ["safety", "dividend"], _WEIGHTS) == "25.0 / 25 pkt (z 100)"
+
+
+def test_missing_components_label_lists_components_with_their_weights():
+    label = missing_components_label(["business_quality", "fear", "valuation"], _WEIGHTS)
+    assert label == "jakość biznesu (45), strach/okazja (10), wycena (20)"
+    assert missing_components_label([], _WEIGHTS) == "—"
+    assert missing_components_label(["new_component"], _WEIGHTS) == "new_component"

@@ -163,6 +163,10 @@ def test_synthesis_rows_includes_complete_and_failed_with_translatable_status(co
     assert payx["current_price"] == 145.0
     assert payx["margin_of_safety_pct"] == 10.0  # fallback na deterministyczny MoS (brak analysis_id)
     assert payx["deterministic_score_pct"] == 50.0
+    # Surowe punkty i komponenty dla prezentacji "zdobyte / dostępne".
+    assert payx["deterministic_partial_score"] == 22.0
+    assert payx["available_components"] == ["safety"]
+    assert payx["missing_components"] == []
     # Pola jakościowe niedostępne -- UI pokaże "Analiza jakościowa niekompletna".
     assert payx["bull_case_first"] is None
     assert payx["biggest_risk"] is None

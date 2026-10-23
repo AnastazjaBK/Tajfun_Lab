@@ -160,3 +160,69 @@ def acquisition_types_label(acquisition_types: tuple[str, ...]) -> str:
     if not acquisition_types:
         return "—"
     return " + ".join(ACQUISITION_TYPE_LABELS.get(t, t) for t in acquisition_types)
+
+
+# 2026-10-23 (decyzja właścicielki po skanie 22.10): status CAŁEGO skanu
+# (`live_scan_runs.status`) pokazany wprost. Tylko COMPLETE jest gotowym
+# wynikiem; każdy inny status to wynik diagnostyczny.
+RUN_STATUS_LABELS: dict[str, str] = {
+    "COMPLETE": "COMPLETE",
+    "INCOMPLETE_LLM_ANALYSIS": "INCOMPLETE — niekompletne analizy jakościowe",
+    "RANKED": "INCOMPLETE — bez analiz jakościowych",
+}
+
+
+def run_status_banner(status: str, run_date: str, completed: int, total: int) -> tuple[bool, str]:
+    """`(kompletny, tekst)` banera statusu skanu. `completed`/`total` to
+    liczba analiz jakościowych COMPLETE / liczba spółek na shortliście."""
+    label = RUN_STATUS_LABELS.get(status, f"INCOMPLETE — {status}")
+    counts = f"analizy jakościowe ukończone: {completed}/{total}"
+    if status == "COMPLETE":
+        return True, f"Skan z {run_date}: {label} · {counts}."
+    return False, (
+        f"Skan z {run_date}: {label} · {counts}. "
+        "To nie jest gotowy ranking inwestycyjny — wynik diagnostyczny. Pełny wynik "
+        "i finaliści są liczeni tylko dla spółek z ukończoną analizą jakościową."
+    )
+
+
+# Nazwy komponentów dokładnie jak w `available_components_json` /
+# `missing_components_json` (backtest_harness.compute_deterministic_score)
+# -> pole wag w `config.scoring.weights`.
+SCORE_COMPONENT_WEIGHT_FIELDS: dict[str, str] = {
+    "business_quality": "business_quality",
+    "safety": "financial_safety",
+    "valuation": "valuation",
+    "fear": "fear_opportunity",
+    "dividend": "dividend_shareholder_return",
+}
+
+SCORE_COMPONENT_LABELS: dict[str, str] = {
+    "business_quality": "jakość biznesu",
+    "safety": "bezpieczeństwo finansowe",
+    "valuation": "wycena",
+    "fear": "strach/okazja",
+    "dividend": "dywidendy i zwrot dla akcjonariuszy",
+}
+
+
+def deterministic_points_label(
+    earned: float, available: list[str], weights: dict[str, float],
+) -> str:
+    """Np. "45.0 / 45 pkt (z 100)" -- zdobyte punkty / maksimum DOSTĘPNYCH
+    komponentów, na tle pełnej skali. Nic nie przelicza: `earned` to
+    zapisany `deterministic_partial_score`."""
+    max_available = sum(weights[SCORE_COMPONENT_WEIGHT_FIELDS[c]] for c in available)
+    full_scale = sum(weights.values())
+    return f"{earned:.1f} / {max_available:g} pkt (z {full_scale:g})"
+
+
+def missing_components_label(missing: list[str], weights: dict[str, float]) -> str:
+    """Np. "jakość biznesu (45), strach/okazja (10)"; "—" gdy niczego nie brakuje."""
+    if not missing:
+        return "—"
+    return ", ".join(
+        f"{SCORE_COMPONENT_LABELS.get(c, c)} ({weights[SCORE_COMPONENT_WEIGHT_FIELDS[c]]:g})"
+        if c in SCORE_COMPONENT_WEIGHT_FIELDS else c
+        for c in missing
+    )

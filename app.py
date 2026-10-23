@@ -51,6 +51,7 @@ import streamlit as st
 from streamlit.runtime.scriptrunner import get_script_run_ctx
 
 from buffett_scanner import portfolio_backend
+from buffett_scanner.config import load_config
 from buffett_scanner.db import get_fundamentals_periods, init_db
 from buffett_scanner.shareholder_returns import payout_ratio
 from buffett_scanner.ui.dividends import (
@@ -128,7 +129,10 @@ from buffett_scanner.ui.labels import (
     broker_label,
     decision_status_label,
     decline_flags_label,
+    deterministic_points_label,
     holding_action_label,
+    missing_components_label,
+    run_status_banner,
 )
 from buffett_scanner.ui.price_changes import (
     PERIODS,
@@ -406,24 +410,27 @@ def _render_user_picker(portfolio_conn) -> dict | None:
     return next(u for u in users if u["display_name"] == selected)
 
 
-def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, list[dict]]:
+def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, list[dict], bool]:
     """Sekcja 4 specyfikacji: tabela SYNTEZY ostatniego WŁAŚCIWEGO
     live-scanu (nigdy walidacji technicznej -- patrz `ui/queries.
     get_latest_live_scan_run`). FAILED to status RAPORTU jakościowego,
     nie ocena spółki -- deterministyczne dane/cena/wycena pozostają
-    widoczne niezależnie od statusu analizy LLM. Zwraca `(run_id, rows)`
+    widoczne niezależnie od statusu analizy LLM. Zwraca `(run_id, rows, is_complete)`
     -- `run_id` reużywany przez karty kandydatów, żeby nie odpytywać
     "najnowszego skanu" drugi raz per zakładkę."""
     run = get_latest_live_scan_run(scanner_conn)
     if run is None:
         st.info("Brak jeszcze ukończonego live-scan rynku.")
-        return None, []
+        return None, [], False
 
     st.subheader(f"Co scanner znalazł — skan z {run['run_date']}")
     rows = get_synthesis_rows(scanner_conn, run["run_id"])
+    completed = sum(1 for r in rows if r["llm_status"] == "COMPLETE")
+    is_complete, banner = run_status_banner(run["status"], run["run_date"], completed, len(rows))
+    (st.success if is_complete else st.error)(banner)
     if not rows:
         st.info("Ten skan nie wytypował żadnych kandydatów (to prawidłowy wynik).")
-        return run["run_id"], rows
+        return run["run_id"], rows, is_complete
 
     for r in rows:
         warning = data_quality_warning(run["run_id"], r["cik"])
@@ -437,12 +444,13 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
     if view == "Zmiany cen":
         _render_top20_price_changes(scanner_conn, portfolio_conn, run, rows)
         st.caption(METHODOLOGY_DISCLAIMER)
-        return run["run_id"], rows
+        return run["run_id"], rows, is_complete
     if view == "Dywidendy":
         _render_top20_dividends(portfolio_conn, run, rows)
         st.caption(METHODOLOGY_DISCLAIMER)
-        return run["run_id"], rows
+        return run["run_id"], rows, is_complete
 
+    weights = load_config().scoring.weights.model_dump()
     table_data = [
         {
             "Ticker": r["ticker"],
@@ -450,8 +458,11 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
             "Spółka": r["company_name"],
             "Cena": r["current_price"],
             "Dlaczego spadła": decline_flags_label(r["triggered_decline_flags"]),
-            "Wynik": r["full_score"] if r["full_score"] is not None else "—",
-            "Wynik deterministyczny (%)": r["deterministic_score_pct"],
+            "Wynik": f"{r['full_score']:.1f} / 100" if r["full_score"] is not None else "—",
+            "Punkty deterministyczne": deterministic_points_label(
+                r["deterministic_partial_score"], r["available_components"], weights,
+            ),
+            "Brakujące komponenty": missing_components_label(r["missing_components"], weights),
             "Margines bezpieczeństwa (BASE)": (
                 f"{r['margin_of_safety_pct']:.1f}%" if r["margin_of_safety_pct"] is not None else "—"
             ),
@@ -463,8 +474,13 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
     ]
     _show_table(_name_first(table_data))
     st.caption("★ = finaliści skanu (pierwsza piątka raportu wg pełnego wyniku).")
+    st.caption(
+        "Punkty deterministyczne = punkty zdobyte / maksimum komponentów, które dało się policzyć bez "
+        "analizy jakościowej; pełna skala wyniku to 100 pkt. 45/45 nie oznacza 100/100 — brakujące "
+        "komponenty (w nawiasie ich waga) nie zostały ocenione."
+    )
     st.caption(METHODOLOGY_DISCLAIMER)
-    return run["run_id"], rows
+    return run["run_id"], rows, is_complete
 
 
 _TOP20_VIEWS = ("Scoring", "Zmiany cen", "Dywidendy")
@@ -868,7 +884,9 @@ def _render_decision_buttons(portfolio_conn, *, user_id: int, cik: str) -> None:
             st.rerun()
 
 
-def _render_candidate_card(scanner_conn, portfolio_conn, run_id: str, cik: str, *, user_id: int) -> None:
+def _render_candidate_card(
+    scanner_conn, portfolio_conn, run_id: str, cik: str, *, user_id: int, run_complete: bool = True,
+) -> None:
     """Sekcja 15 specyfikacji UI -- pełna karta kandydata PO POLSKU.
     Deterministyczne sekcje (decline/wycena) zawsze renderowane; sekcje
     zależne od analizy LLM (`analysis`) pokazują jawnie "Analiza
@@ -879,6 +897,8 @@ def _render_candidate_card(scanner_conn, portfolio_conn, run_id: str, cik: str, 
     analysis = detail["analysis"]
 
     st.header(f"{detail['ticker']} — {detail['company_name']}")
+    if not run_complete:
+        st.error("Skan niekompletny (INCOMPLETE) — to nie jest gotowy ranking inwestycyjny, wynik diagnostyczny.")
     warning = data_quality_warning(run_id, cik)
     if warning:
         st.warning(f"⚠ {warning}")
@@ -2916,7 +2936,7 @@ def main() -> None:
     _render_glossary()
     user = _render_user_picker(portfolio_conn)
 
-    latest_run_id, synthesis_rows = _render_synthesis_table(scanner_conn, portfolio_conn)
+    latest_run_id, synthesis_rows, run_complete = _render_synthesis_table(scanner_conn, portfolio_conn)
 
     if user is None:
         return
@@ -2939,6 +2959,7 @@ def main() -> None:
         with tab:
             _render_candidate_card(
                 scanner_conn, portfolio_conn, run_id=latest_run_id, cik=row["cik"], user_id=user["user_id"],
+                run_complete=run_complete,
             )
 
 
