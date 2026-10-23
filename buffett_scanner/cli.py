@@ -52,7 +52,11 @@ from buffett_scanner.data_quality import (
     DataQuality,
     DataQualityThresholds,
     bar_for,
+    dcf_absence_kind,
+    filter_available_fundamentals,
+    input_gaps,
     last_bar_problem,
+    session_close_utc,
     session_volume_ratio,
 )
 from buffett_scanner.backfill import (
@@ -709,7 +713,6 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
         print("OSTRZEŻENIE: brak --session-date -- kontrola świeżości i kompletności danych WYŁĄCZONA.")
     dq_thresholds = DataQualityThresholds(
         min_universe_size=args.min_universe_size, min_price_coverage_pct=args.min_price_coverage_pct,
-        min_volume_ratio_median=args.min_volume_ratio_median,
         max_fundamentals_failure_pct=args.max_fundamentals_failure_pct,
     )
 
@@ -765,6 +768,13 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
 
     probe: list[str] = []
     if dq is not None:
+        earliest = session_close_utc(session_day) + dt.timedelta(hours=args.min_hours_after_close)
+        if _now() < earliest:
+            dq.errors.append(
+                f"Za wcześnie: skan sesji {run_date} najwcześniej od {earliest:%Y-%m-%d %H:%M} UTC "
+                f"({args.min_hours_after_close:g} h po zamknięciu NYSE)."
+            )
+            return data_gate_failed()
         dq.universe_size = len(tickers)
         if not args.sample and not dq.check_universe(dq_thresholds):
             return data_gate_failed()
@@ -862,6 +872,10 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
                     dq.fundamentals_problems[ticker] = f"błąd FMP: {str(exc)[:120]}"
                 continue
             fund_rows = normalize_fundamentals_rows(income, balance, cashflow)
+            if dq is not None and fund_rows:
+                fund_rows, dropped = filter_available_fundamentals(fund_rows, run_date)
+                if dropped:
+                    dq.dropped_periods[ticker] = dropped
             if not fund_rows:
                 if dq is not None:
                     dq.fundamentals_problems[ticker] = "brak danych finansowych w odpowiedzi FMP"
@@ -879,6 +893,8 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
             prefilter_result = evaluate_prefilter(metrics, config.prefilter)
             if prefilter_result.excludes:
                 prefilter_excluded += 1
+                if dq is not None:
+                    dq.prefilter_excluded[ticker] = list(prefilter_result.excludes)
                 print(f"  WYKLUCZONO {ticker} (prefilter): {prefilter_result.excludes}")
                 continue
             survivors.append((ticker, cik, snapshot, flags))
@@ -920,6 +936,36 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
     ranked = rank_all_candidates(ranked)
     shortlist = select_shortlist(ranked, limit=args.shortlist_limit)
     shortlist_ciks = {c.cik for c in shortlist}
+
+    # 2026-10-23: przed jakimkolwiek wywołaniem Claude -- (1) shortlista musi
+    # mieć komplet danych wejściowych (brak danych źródłowych != uzasadniony
+    # brak DCF), (2) limit wywołań musi pokryć najgorszy przypadek całej
+    # shortlisty z remisami (pełna analiza + MAX_REPAIR_ATTEMPTS napraw).
+    if dq is not None and not args.rank_only:
+        gaps_found = {}
+        for c in shortlist:
+            gaps = input_gaps(get_fundamentals_periods(conn, c.cik))
+            if gaps:
+                gaps_found[c.ticker] = gaps
+            kind = dcf_absence_kind(gaps, c.score.valuation_result)
+            if kind is not None:
+                dq.shortlist_dcf[c.ticker] = f"{kind}: {c.score.valuation_result.reason}"
+        if gaps_found:
+            dq.errors.append(
+                "Spółki z shortlisty bez kompletnych danych wejściowych: "
+                + "; ".join(f"{t} ({', '.join(g)})" for t, g in gaps_found.items())
+            )
+            return data_gate_failed()
+        if args.max_claude_calls is not None:
+            worst_case = len(shortlist) * (1 + MAX_REPAIR_ATTEMPTS)
+            if worst_case > args.max_claude_calls:
+                dq.errors.append(
+                    f"Limit wywołań Claude {args.max_claude_calls} nie pokrywa najgorszego przypadku "
+                    f"shortlisty: {len(shortlist)} spółek x {1 + MAX_REPAIR_ATTEMPTS} = {worst_case}. "
+                    "Skan przerwany przed Claude, żeby nie skończył się niekompletny w połowie."
+                )
+                return data_gate_failed()
+        _write_data_quality(args.data_quality_out, dq)
 
     insert_live_scan_run(
         conn, run_id=run_id, run_date=run_date, config_version=config_version,
@@ -969,8 +1015,12 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
     )
 
 
-# Podmieniane w testach (test stabilności czeka kilka minut).
+# Podmieniane w testach (test stabilności czeka kilka minut; zegar).
 _sleep = time.sleep
+
+
+def _now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
 
 
 def _fetch_session_bars(fmp_key: str, tickers: list[str], session_day: dt.date) -> dict[str, dict | None]:
@@ -2685,7 +2735,8 @@ def build_validation_summary(
                 current_price=r["current_price"], config=config.valuation,
             )
             if not valuation.implemented:
-                no_dcf.append((r["ticker"], valuation.reason))
+                kind = dcf_absence_kind(input_gaps(get_fundamentals_periods(conn, r["cik"])), valuation)
+                no_dcf.append((r["ticker"], f"{kind}: {valuation.reason}"))
         ciks = [r["cik"] for r in shortlist]
         marks = ",".join("?" * len(ciks))
         max_price = conn.execute(f"SELECT MAX(date) FROM price_daily WHERE cik IN ({marks})", ciks).fetchone()[0]
@@ -2908,6 +2959,25 @@ def build_scan_report(
         ]
         lines += [f"- BŁĄD: {e}" for e in dq["errors"]]
         lines += [f"- Ostrzeżenie: {w}" for w in dq["warnings"]]
+        lines += ["", "### Wszystkie wykluczenia i ich przyczyny", ""]
+        exclusions = (
+            [("brak kompletnego notowania sesji", t, why) for t, why in sorted(dq["price_problems"].items())]
+            + [("brak danych finansowych", t, why) for t, why in sorted(dq["fundamentals_problems"].items())]
+            + [("prefilter", t, ", ".join(why)) for t, why in sorted(dq["prefilter_excluded"].items())]
+        )
+        if exclusions:
+            lines += ["| Etap | Spółka | Przyczyna |", "|---|---|---|"]
+            lines += [f"| {stage} | {t} | {why} |" for stage, t, why in exclusions]
+        else:
+            lines.append("Brak wykluczonych spółek.")
+        if dq["dropped_periods"]:
+            lines += ["", "Okresy finansowe pominięte (niedostępne w dniu sesji -- ochrona przed look-ahead):"]
+            lines += [f"- {t}: " + "; ".join(f"{p} ({why})" for p, why in periods.items())
+                      for t, periods in sorted(dq["dropped_periods"].items())]
+        if dq["shortlist_dcf"]:
+            lines += ["", "Brak DCF na shortliście (BRAK_DANYCH = brak danych źródłowych, "
+                      "REGUŁA_WYCENY = dane kompletne, wycenę wyłącza reguła metody):"]
+            lines += [f"- {t}: {why}" for t, why in sorted(dq["shortlist_dcf"].items())]
         lines.append("")
 
     usage = json.loads(Path(usage_json).read_text(encoding="utf-8")) if usage_json and Path(usage_json).exists() else None
@@ -3069,7 +3139,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_live_scan.add_argument("--min-universe-size", type=int, default=480)
     p_live_scan.add_argument("--min-price-coverage-pct", type=float, default=98.0)
-    p_live_scan.add_argument("--min-volume-ratio-median", type=float, default=0.5)
+    p_live_scan.add_argument(
+        "--min-hours-after-close", type=float, default=3.0,
+        help="Skan sesji najwcześniej tyle godzin po zamknięciu NYSE (16:00 czasu nowojorskiego).",
+    )
     p_live_scan.add_argument("--max-fundamentals-failure-pct", type=float, default=5.0)
     p_live_scan.add_argument("--data-quality-out", default=None, help="Plik JSON z wynikiem kontroli danych.")
     p_live_scan.add_argument(

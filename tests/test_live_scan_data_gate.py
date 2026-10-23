@@ -57,15 +57,47 @@ def test_price_checks_error_below_coverage_and_on_partial_volume():
     assert any("Pokrycie cen" in e for e in dq.errors)
     assert any("X (brak notowań)" in w for w in dq.warnings)  # pominięte spółki zawsze wymienione
 
-    partial = DataQuality(session_date=SESSION, universe_size=10, price_ok=[f"T{i}" for i in range(10)],
-                          volume_ratios=[0.3] * 10)
-    assert partial.check_prices(DataQualityThresholds()) is False
-    assert any("niepełny dzień" in e for e in partial.errors)
-
+    # Niski wolumen to tylko ostrzeżenie: tak wyglądają prawidłowe sesje
+    # skrócone/świąteczne (historia: 0,29-0,41), finalizację sprawdza test stabilności.
     low = DataQuality(session_date=SESSION, universe_size=10, price_ok=[f"T{i}" for i in range(10)],
-                      volume_ratios=[0.7] * 10)
+                      volume_ratios=[0.3] * 10)
     assert low.check_prices(DataQualityThresholds()) is True
-    assert any("niska" in w for w in low.warnings)
+    assert not low.errors and any("niska" in w for w in low.warnings)
+
+
+def test_period_availability_uses_filing_date_and_10k_deadline():
+    from buffett_scanner.data_quality import filter_available_fundamentals, period_availability_problem
+
+    assert period_availability_problem("2024-06-30", "2024-08-15", SESSION) is None
+    assert "po dniu sesji" in period_availability_problem("2024-06-30", "2024-09-19 16:05:00", SESSION)
+    assert period_availability_problem("2024-06-30", "2024-09-18 16:05:00", SESSION) is None  # ten sam dzień
+    # Data złożenia = koniec okresu (FMP po spin-offie) -> niewiarygodna; przyjęta tylko po terminie 10-K.
+    assert period_availability_problem("2023-12-31", "2023-12-31", SESSION) is None
+    assert "niewiarygodna" in period_availability_problem("2024-08-31", "2024-08-31", SESSION)
+    assert "brak daty złożenia" in period_availability_problem("2024-07-31", None, SESSION)
+    rows = [{"fiscal_period": "2023-FY", "period_end_date": "2023-12-31", "filed_date": "2024-02-01"},
+            {"fiscal_period": "2024-FY", "period_end_date": "2024-12-31", "filed_date": "2025-02-01"}]
+    kept, dropped = filter_available_fundamentals(rows, SESSION)
+    assert [r["fiscal_period"] for r in kept] == ["2023-FY"] and list(dropped) == ["2024-FY"]
+
+
+def test_input_gaps_and_dcf_absence_kind():
+    from buffett_scanner.data_quality import dcf_absence_kind, input_gaps
+    from buffett_scanner.valuation import ValuationResult
+
+    from tests.test_live_scan import _period
+
+    full = dict(revenue=1, net_income=1, ebitda=1, operating_cash_flow=1, capital_expenditure=1,
+                total_debt=1, cash_and_equivalents=1, total_current_assets=1, total_current_liabilities=1,
+                dividends_paid=0, share_buybacks=0, diluted_shares_outstanding=1)
+    periods = [_period("FY2023", **full), _period("FY2024", **full)]
+    assert input_gaps(periods) == []
+    rule = ValuationResult(sector_profile="GENERAL", method="dcf_owner_earnings", implemented=False, reason="x")
+    assert dcf_absence_kind([], rule) == "REGUŁA_WYCENY"
+    gap = input_gaps([_period("FY2023", **full), _period("FY2024", **{**full, "total_debt": None})])
+    assert gap == ["total_debt (najnowszy okres FY2024)"]
+    assert dcf_absence_kind(gap, rule) == "BRAK_DANYCH"
+    assert input_gaps(periods[:1]) == ["za mało okresów finansowych (1, potrzeba co najmniej 2)"]
 
 
 def test_fundamentals_check_warns_or_errors_by_threshold():
@@ -84,7 +116,32 @@ class _SecBeforeSession(t._FakeSecEdgarClient):
                  "report_date": "2024-06-29", "primary_document": "aapl10k.htm"}]
 
 
-def _setup(monkeypatch, fmp=t._FakeFMPClient):
+def _shift_back_a_year(rows):
+    """Okresy atrapy przesunięte o rok (FY2022/FY2023) z datą złożenia 45 dni
+    po końcu okresu -- spójne z sesją 2024-09-18 (bez danych z przyszłości)."""
+    import datetime as _dt
+
+    out = []
+    for r in rows:
+        end = _dt.date.fromisoformat(r["date"]).replace(year=int(r["date"][:4]) - 1)
+        out.append({**r, "date": end.isoformat(), "fiscalYear": r["fiscalYear"] - 1,
+                    "filingDate": (end + _dt.timedelta(days=45)).isoformat()})
+    return out
+
+
+class _SessionConsistentFMP(t._FakeFMPClient):
+    def get_income_statement(self, symbol):
+        return _shift_back_a_year(super().get_income_statement(symbol))
+
+    def get_balance_sheet_statement(self, symbol):
+        return _shift_back_a_year(super().get_balance_sheet_statement(symbol))
+
+    def get_cash_flow_statement(self, symbol):
+        return _shift_back_a_year(super().get_cash_flow_statement(symbol))
+
+
+def _setup(monkeypatch, fmp=None):
+    fmp = fmp or _SessionConsistentFMP
     t._use_counting_claude(monkeypatch)
     monkeypatch.setattr(cli, "FMPClient", fmp)
     monkeypatch.setattr(cli, "SecEdgarClient", _SecBeforeSession)
@@ -133,7 +190,7 @@ def test_stale_session_aborts_before_any_claude_call(tmp_path, monkeypatch, caps
     assert _runs(db) == []
 
 
-class _ChangingFMP(t._FakeFMPClient):
+class _ChangingFMP(_SessionConsistentFMP):
     """Notowanie sesji jeszcze się zmienia: wolumen rośnie przy każdym pobraniu."""
 
     calls = {"n": 0}
@@ -154,24 +211,73 @@ def test_session_bar_still_changing_aborts(tmp_path, monkeypatch, capsys):
     assert t._CountingClaudeClient.call_count["n"] == 0 and _runs(db) == []
 
 
-class _PartialVolumeFMP(t._FakeFMPClient):
+class _PartialVolumeFMP(_SessionConsistentFMP):
     def get_historical_prices(self, symbol, *, from_date, to_date):
         rows = t._flat_then_drop_price_rows()
         rows[-1] = {**rows[-1], "volume": 100_000}  # 0,1 średniej -> niepełny dzień
         return rows
 
 
-def test_partial_day_volume_aborts(tmp_path, monkeypatch, capsys):
+def test_low_session_volume_is_a_warning_not_an_abort(tmp_path, monkeypatch, capsys):
     _setup(monkeypatch, _PartialVolumeFMP)
     code, db, dq = _scan(tmp_path, "--session-date", SESSION, "--stability-wait-minutes", "0")
     capsys.readouterr()
-    assert code == 1
-    assert any("niepełny dzień" in e for e in dq["errors"])
+    assert code == 0 and dq["passed"] is True
+    assert any("niska" in w for w in dq["warnings"])
     assert any("pominięty" in w for w in dq["warnings"])  # pominięty test stabilności jest jawny
+
+
+def test_scan_before_minimum_time_after_close_aborts(tmp_path, monkeypatch, capsys):
+    import datetime as _dt
+
+    _setup(monkeypatch)
+    # 2024-09-18 16:00 New York = 20:00 UTC; 3 h po zamknięciu = 23:00 UTC.
+    monkeypatch.setattr(cli, "_now", lambda: _dt.datetime(2024, 9, 18, 22, 30, tzinfo=_dt.timezone.utc))
+    code, db, dq = _scan(tmp_path, "--session-date", SESSION)
+    capsys.readouterr()
+    assert code == 1
+    assert "Za wcześnie: skan sesji 2024-09-18 najwcześniej od 2024-09-18 23:00 UTC" in dq["errors"][0]
     assert t._CountingClaudeClient.call_count["n"] == 0
 
 
-class _NoFundamentalsFMP(t._FakeFMPClient):
+class _LateFilingFMP(_SessionConsistentFMP):
+    """Najnowszy okres złożony dzień PO sesji -- nie może trafić do skanu."""
+
+    def _late(self, rows):
+        return [{**r, "filingDate": "2024-09-19"} if r["fiscalYear"] == 2023 else r for r in rows]
+
+    def get_income_statement(self, symbol):
+        return self._late(super().get_income_statement(symbol))
+
+    def get_balance_sheet_statement(self, symbol):
+        return self._late(super().get_balance_sheet_statement(symbol))
+
+    def get_cash_flow_statement(self, symbol):
+        return self._late(super().get_cash_flow_statement(symbol))
+
+
+def test_fundamentals_filed_after_session_are_dropped_and_reported(tmp_path, monkeypatch, capsys):
+    """Po odrzuceniu okresu złożonego po sesji zostaje 1 okres -> spółka z
+    shortlisty bez kompletnych danych -> skan przerwany przed Claude."""
+    _setup(monkeypatch, _LateFilingFMP)
+    code, db, dq = _scan(tmp_path, "--session-date", SESSION)
+    capsys.readouterr()
+    assert dq["dropped_periods"] == {"AAPL": {"2023-FY": "złożony 2024-09-19, po dniu sesji"}}
+    assert code == 1
+    assert "Spółki z shortlisty bez kompletnych danych wejściowych: AAPL (za mało okresów" in dq["errors"][0]
+    assert t._CountingClaudeClient.call_count["n"] == 0 and _runs(db) == []
+
+
+def test_call_cap_must_cover_worst_case_of_whole_shortlist(tmp_path, monkeypatch, capsys):
+    _setup(monkeypatch)
+    code, db, dq = _scan(tmp_path, "--session-date", SESSION, "--max-claude-calls", "2")
+    capsys.readouterr()
+    assert code == 1
+    assert "Limit wywołań Claude 2 nie pokrywa najgorszego przypadku shortlisty: 1 spółek x 3 = 3" in dq["errors"][0]
+    assert t._CountingClaudeClient.call_count["n"] == 0 and _runs(db) == []
+
+
+class _NoFundamentalsFMP(_SessionConsistentFMP):
     def get_income_statement(self, symbol):
         raise FMPError("500 Internal Server Error")
 
@@ -228,6 +334,8 @@ def test_scan_report_covers_data_ranking_analyses_cost_and_methodology(tmp_path,
         "- Ceny i wolumen sesji: 1/1 (100.0%)",
         "- Test stabilności notowań: przed skanem: 1 spółek, zmiany: 0; po pobraniu cen: 1 spółek, zmiany: 0",
         "- Dane finansowe wytypowanych spółek: 1/1",
+        "### Wszystkie wykluczenia i ich przyczyny",
+        "Brak wykluczonych spółek.",
         "- W rankingu: 1, na shortliście: 1",
         "- Status skanu: COMPLETE",
         "- Wywołania Claude w tym przebiegu: 1",
