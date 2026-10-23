@@ -282,6 +282,18 @@ class _FakeSecEdgarClient:
     def fetch_and_hash_document(self, url):
         return {"url": url, "content_hash": "a" * 64, "content_length": 100}
 
+    # 2026-10-23: skan na żywo klasyfikuje sektor z SIC (jak backtest) i
+    # weryfikuje zerowy CAPEX w SEC XBRL. Domyślnie: spółka technologiczna
+    # (SIC 3571 -> GENERAL), bez faktów XBRL.
+    sic = "3571"
+    company_facts: dict = {}
+
+    def get_sic_classification(self, cik):
+        return {"sic": self.sic, "sic_description": None}
+
+    def get_company_facts(self, cik):
+        return self.company_facts
+
 
 class _FakeClaudeClient:
     def __init__(self, api_key, *, model, max_output_tokens=4000):
@@ -665,6 +677,7 @@ def _set_live_scan_env(monkeypatch):
 def test_run_live_scan_rank_only_stops_before_claude(tmp_path, monkeypatch, capsys):
     _set_live_scan_env(monkeypatch)
     monkeypatch.setattr(cli, "FMPClient", _FakeFMPClient)
+    monkeypatch.setattr(cli, "SecEdgarClient", _FakeSecEdgarClient)  # klasyfikacja SIC przed rankingiem
 
     db_path = tmp_path / "test.db"
     exit_code = cli.main([

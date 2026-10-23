@@ -70,8 +70,22 @@ def _rank_key(candidate: RankedCandidate) -> tuple[int, float]:
     są liczone dla każdego kandydata z fundamentals, ale nigdy nie
     zgadujemy) ląduje na końcu, nigdy w shortliście."""
     if candidate.score.deterministic_score_pct is not None:
-        return (0, -candidate.score.deterministic_score_pct)
-    return (1, 0.0)
+        return (0, -candidate.score.deterministic_score_pct, candidate.ticker)
+    return (1, 0.0, candidate.ticker)
+
+
+def competition_ranks(ranked: list[RankedCandidate]) -> list[int]:
+    """Pozycje z remisami (1, 1, 1, 4, ...): równy wynik = ta sama pozycja.
+    2026-10-23 (błąd logiczny nr 4): wcześniej pozycją był numer porządkowy,
+    więc przy remisie o miejscu decydował alfabet. Kolejność w obrębie
+    remisu (ticker) jest tylko porządkiem wyświetlania, nie przewagą."""
+    ranks: list[int] = []
+    for i, c in enumerate(ranked):
+        if i and _rank_key(c)[:2] == _rank_key(ranked[i - 1])[:2]:
+            ranks.append(ranks[-1])
+        else:
+            ranks.append(i + 1)
+    return ranks
 
 
 def rank_all_candidates(candidates: list[RankedCandidate]) -> list[RankedCandidate]:
@@ -130,11 +144,14 @@ def render_full_ranking_table(ranked: list[RankedCandidate]) -> str:
     screening + prefilter, nie tylko shortlist (Decyzja właścicielki:
     "Przed wywołaniem Claude pokaż i zapisz pełny ranking wszystkich")."""
     lines = [
-        "| # | Ticker | score_pct | partial_score | safety | valuation | dividend | "
+        "| # (= remis) | Ticker | score_pct | partial_score | safety | valuation | dividend | "
         "MoS (BASE) | hard_gate (deterministic) | decline trigger |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for i, c in enumerate(ranked, start=1):
+    ranks = competition_ranks(ranked)
+    tied = {r for r in ranks if ranks.count(r) > 1}
+    for c, i in zip(ranked, ranks):
+        i = f"{i}=" if i in tied else str(i)
         s = c.score
         pct = f"{s.deterministic_score_pct:.2f}" if s.deterministic_score_pct is not None else "N/A"
         val = f"{s.valuation_score:.1f}" if s.valuation_score is not None else "N/A"

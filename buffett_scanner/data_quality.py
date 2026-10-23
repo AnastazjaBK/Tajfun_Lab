@@ -149,6 +149,10 @@ class DataQuality:
     dropped_periods: dict[str, dict[str, str]] = field(default_factory=dict)
     prefilter_excluded: dict[str, list[str]] = field(default_factory=dict)
     shortlist_dcf: dict[str, str] = field(default_factory=dict)
+    sector_profiles: dict[str, str] = field(default_factory=dict)
+    sector_problems: dict[str, str] = field(default_factory=dict)
+    sic_missing: list[str] = field(default_factory=list)
+    capex_zero: dict[str, dict[str, str]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
@@ -221,6 +225,28 @@ class DataQuality:
         self.warnings.append(text)
         return True
 
+    def check_sectors(self, t: DataQualityThresholds) -> bool:
+        """Spółki bez klasyfikacji sektorowej (błąd SEC) są poza rankingiem;
+        ponad próg -> skan przerwany. Brak kodu SIC w odpowiedzi SEC ->
+        GENERAL jak w backteście, ale jawnie w raporcie."""
+        if self.sic_missing:
+            self.warnings.append(
+                "Brak kodu SIC w SEC (profil GENERAL, jak w backteście): " + ", ".join(sorted(self.sic_missing))
+            )
+        if not self.sector_problems:
+            return True
+        total = len(self.sector_problems) + len(self.sector_profiles)
+        failed_pct = 100.0 * len(self.sector_problems) / total if total else 0.0
+        text = (
+            f"{len(self.sector_problems)}/{total} spółek bez klasyfikacji sektorowej -- poza rankingiem: "
+            + "; ".join(f"{k} ({v})" for k, v in sorted(self.sector_problems.items()))
+        )
+        if failed_pct > t.max_fundamentals_failure_pct:
+            self.errors.append(text + f" (limit {t.max_fundamentals_failure_pct:g}%).")
+            return False
+        self.warnings.append(text)
+        return True
+
     def to_dict(self) -> dict:
         return {
             "session_date": self.session_date,
@@ -239,6 +265,10 @@ class DataQuality:
             "dropped_periods": self.dropped_periods,
             "prefilter_excluded": self.prefilter_excluded,
             "shortlist_dcf": self.shortlist_dcf,
+            "sector_profiles": self.sector_profiles,
+            "sector_problems": self.sector_problems,
+            "sic_missing": self.sic_missing,
+            "capex_zero": self.capex_zero,
             "errors": self.errors,
             "warnings": self.warnings,
             "passed": not self.errors,
@@ -286,3 +316,53 @@ def dcf_absence_kind(gaps: list[str], valuation) -> str | None:
     dcf_fields = ("operating_cash_flow", "capital_expenditure", "total_debt", "cash_and_equivalents",
                   "diluted_shares_outstanding", "za mało okresów")
     return "BRAK_DANYCH" if any(g.startswith(dcf_fields) for g in gaps) else "REGUŁA_WYCENY"
+
+
+# --- Zerowe nakłady inwestycyjne (CAPEX) z FMP --------------------------
+#
+# FMP zapisuje brak pozycji jako 0 u części spółek (np. finansowych), a
+# wtedy FCF = cały przepływ operacyjny. Zero jest przyjmowane tylko, gdy
+# potwierdza je SEC XBRL albo gdy profil (bank/ubezpieczyciel/REIT) nie
+# używa CAPEX do wyceny; zero sprzeczne z SEC albo niepotwierdzone u spółki
+# operacyjnej jest traktowane jako brak danych (nigdy jako prawdziwe zero).
+
+CAPEX_CONFIRMED_ZERO = "POTWIERDZONE_ZERO"
+CAPEX_SUSPICIOUS = "PODEJRZANE"
+CAPEX_UNVERIFIED_ACCEPTED = "NIEZWERYFIKOWANE_PRZYJĘTE"
+NON_OPERATING_PROFILES = ("BANK", "INSURER", "REIT")
+
+
+def sec_annual_value(company_facts: dict | None, concept: str, period_end: str, session_date: str) -> float | None:
+    """Roczna wartość konceptu z SEC XBRL dla okresu kończącego się
+    `period_end` (±7 dni, czas trwania >= 330 dni), złożona najpóźniej w
+    dniu sesji. None, gdy SEC nie ma takiego faktu."""
+    from buffett_scanner.point_in_time import find_first_matching_tag
+
+    if not company_facts:
+        return None
+    found = find_first_matching_tag(company_facts, concept)
+    if found is None:
+        return None
+    end = dt.date.fromisoformat(period_end[:10])
+    candidates = []
+    for f in found[1]:
+        if f.start is None or f.filed[:10] > session_date:
+            continue
+        f_end, f_start = dt.date.fromisoformat(f.end), dt.date.fromisoformat(f.start)
+        if abs((f_end - end).days) <= 7 and (f_end - f_start).days >= 330:
+            candidates.append(f)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda f: f.filed).val
+
+
+def capex_zero_state(sector_profile: str, sec_value: float | None) -> tuple[str, str]:
+    """(stan, opis) dla CAPEX = 0 z FMP."""
+    if sec_value is not None:
+        if sec_value == 0:
+            return CAPEX_CONFIRMED_ZERO, "SEC XBRL też podaje 0"
+        return CAPEX_SUSPICIOUS, f"sprzeczne z SEC XBRL ({sec_value:,.0f} USD) -- traktowane jako brak danych"
+    if sector_profile in NON_OPERATING_PROFILES:
+        return (CAPEX_UNVERIFIED_ACCEPTED,
+                f"brak potwierdzenia w SEC; profil {sector_profile} nie używa CAPEX do wyceny -- przyjęte 0")
+    return CAPEX_SUSPICIOUS, "spółka operacyjna, brak potwierdzenia w SEC -- traktowane jako brak danych"

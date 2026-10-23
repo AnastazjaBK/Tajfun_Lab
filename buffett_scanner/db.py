@@ -1739,11 +1739,11 @@ def get_live_scan_candidates(
 ) -> list[sqlite3.Row]:
     if only_shortlist:
         return conn.execute(
-            "SELECT * FROM live_scan_candidates WHERE run_id = ? AND in_shortlist = 1 ORDER BY rank",
+            "SELECT * FROM live_scan_candidates WHERE run_id = ? AND in_shortlist = 1 ORDER BY rank, ticker",
             (run_id,),
         ).fetchall()
     return conn.execute(
-        "SELECT * FROM live_scan_candidates WHERE run_id = ? ORDER BY rank", (run_id,)
+        "SELECT * FROM live_scan_candidates WHERE run_id = ? ORDER BY rank, ticker", (run_id,)
     ).fetchall()
 
 

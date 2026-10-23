@@ -79,6 +79,25 @@ class ValuationResult:
     scenarios: dict[str, ScenarioValuation] = field(default_factory=dict)
 
 
+def _cagr_unavailable_reason(periods: list[FundamentalsPeriod]) -> str:
+    """Opis zgodny z regułą `historical_owner_earnings_cagr_pct`: wzrost
+    liczony WYŁĄCZNIE między pierwszym a ostatnim okresem okna, oba muszą
+    mieć dodatni FCF (2026-10-23: wcześniejszy komunikat mówił o "co
+    najmniej 2 okresach z dodatnim FCF", czego reguła nie sprawdza)."""
+    if len(periods) < 2:
+        return "Tylko jeden okres finansowy -- tempo wzrostu FCF (CAGR) wymaga co najmniej dwóch."
+
+    def fmt(period: FundamentalsPeriod) -> str:
+        fcf = owner_earnings_proxy_fcf(period)
+        return f"{period.fiscal_period}: " + ("brak danych" if fcf is None else f"{fcf:,.0f} USD")
+
+    return (
+        "Tempo wzrostu FCF (CAGR) liczone jest wyłącznie między pierwszym a ostatnim okresem okna "
+        f"i wymaga dodatniego FCF w obu; pierwszy okres ({fmt(periods[0])}) tego warunku nie spełnia. "
+        "Lata pośrednie nie są brane pod uwagę."
+    )
+
+
 def _not_implemented(sector_profile: str, method: str | None, reason: str) -> ValuationResult:
     return ValuationResult(
         sector_profile=sector_profile, method=method, implemented=False, reason=reason,
@@ -107,11 +126,7 @@ def _compute_dcf_owner_earnings(
 
     historical_cagr = historical_owner_earnings_cagr_pct(periods)
     if historical_cagr is None:
-        return _not_implemented(
-            sector_profile, method,
-            "Niewystarczające dane historyczne (potrzeba >=2 okresów z jednoznacznie "
-            "dodatnim owner_earnings_proxy_fcf) do wyznaczenia tempa wzrostu bez zgadywania.",
-        )
+        return _not_implemented(sector_profile, method, _cagr_unavailable_reason(periods))
 
     net_debt_value = net_debt(latest)
     if net_debt_value is None:

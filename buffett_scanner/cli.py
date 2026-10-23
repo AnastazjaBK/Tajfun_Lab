@@ -52,10 +52,13 @@ from buffett_scanner.data_quality import (
     DataQuality,
     DataQualityThresholds,
     bar_for,
+    CAPEX_SUSPICIOUS,
+    capex_zero_state,
     dcf_absence_kind,
     filter_available_fundamentals,
     input_gaps,
     last_bar_problem,
+    sec_annual_value,
     session_close_utc,
     session_volume_ratio,
 )
@@ -139,6 +142,7 @@ from buffett_scanner.live_scan_pipeline import (
     DEFAULT_SHORTLIST_LIMIT,
     RankedCandidate,
     build_cache_key,
+    competition_ranks,
     rank_all_candidates,
     render_full_ranking_table,
     render_shortlist_status_table,
@@ -901,8 +905,74 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
 
     print(f"Prefilter: {len(survivors)} przeszło, {prefilter_excluded} wykluczonych.")
 
+    # 2026-10-23 (błąd logiczny nr 1): profil sektorowy z kodu SIC, ta sama
+    # logika co w backteście (`classify-sector-profiles`). Wcześniej skan na
+    # żywo zostawiał wszystkim GENERAL, więc banki/ubezpieczyciele/REIT-y
+    # dostawały DCF, którego konfiguracja dla nich nie przewiduje. Błąd SEC
+    # NIE oznacza GENERAL -- spółka nie trafia do rankingu i jest raportowana.
+    classified: list[tuple[str, str, object, dict[str, bool]]] = []
+    with SecEdgarClient(user_agent) as sec_client:
+        for item in survivors:
+            ticker, cik = item[0], item[1]
+            try:
+                sic_info = sec_client.get_sic_classification(cik)
+            except SecEdgarError as exc:
+                reason = f"brak klasyfikacji sektorowej (błąd SEC: {str(exc)[:120]})"
+                print(f"{ticker}: {reason} -- poza rankingiem.", file=sys.stderr)
+                if dq is not None:
+                    dq.sector_problems[ticker] = reason
+                continue
+            profile = classify_sic_to_sector_profile(sic_info["sic"])
+            update_company_sector_profile(conn, cik=cik, sector_profile=profile)
+            if dq is not None:
+                dq.sector_profiles[ticker] = profile
+                if sic_info["sic"] is None:
+                    dq.sic_missing.append(ticker)
+            classified.append(item)
+    conn.commit()
+    survivors = classified
+
+    # 2026-10-23 (błąd logiczny nr 2): CAPEX = 0 z FMP nie jest automatycznie
+    # prawdziwym zerem -- patrz `data_quality.capex_zero_state`. Zero
+    # podejrzane trafia do modelu jako brak danych (NULL), oryginał w raporcie.
+    capex_zero_rows = {}
+    for ticker, cik, _snapshot, _flags in survivors:
+        rows = conn.execute(
+            "SELECT fiscal_period, period_end_date FROM fundamentals_raw "
+            "WHERE cik = ? AND line_item = 'capital_expenditure' AND value = 0",
+            (cik,),
+        ).fetchall()
+        if rows:
+            capex_zero_rows[(ticker, cik)] = rows
+    if capex_zero_rows:
+        with SecEdgarClient(user_agent) as sec_client:
+            for (ticker, cik), rows in capex_zero_rows.items():
+                profile = conn.execute("SELECT sector_profile FROM companies WHERE cik = ?", (cik,)).fetchone()[0]
+                try:
+                    facts = sec_client.get_company_facts(cik)
+                except SecEdgarError as exc:
+                    print(f"{ticker}: SEC XBRL niedostępne do weryfikacji CAPEX ({exc}).", file=sys.stderr)
+                    facts = None
+                states = {}
+                for r in rows:
+                    sec_value = sec_annual_value(facts, "capital_expenditure", r["period_end_date"], run_date)
+                    state, why = capex_zero_state(profile, sec_value)
+                    states[r["fiscal_period"]] = f"{state}: {why}"
+                    if state == CAPEX_SUSPICIOUS:
+                        conn.execute(
+                            "UPDATE fundamentals_raw SET value = NULL WHERE cik = ? AND fiscal_period = ? "
+                            "AND line_item = 'capital_expenditure' AND value = 0",
+                            (cik, r["fiscal_period"]),
+                        )
+                print(f"  CAPEX = 0 ({ticker}): " + "; ".join(f"{p}: {v}" for p, v in states.items()))
+                if dq is not None:
+                    dq.capex_zero[ticker] = states
+        conn.commit()
+
     if dq is not None:
         if not dq.check_fundamentals(dq_thresholds):
+            return data_gate_failed()
+        if not dq.check_sectors(dq_thresholds):
             return data_gate_failed()
         _write_data_quality(args.data_quality_out, dq)
         for warning in dq.warnings:
@@ -973,7 +1043,7 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
         prefilter_excluded=prefilter_excluded, shortlist_limit=args.shortlist_limit,
         shortlist_size=len(shortlist),
     )
-    for i, c in enumerate(ranked, start=1):
+    for i, c in zip(competition_ranks(ranked), ranked):
         insert_live_scan_candidate(
             conn, run_id=run_id, cik=c.cik, ticker=c.ticker, rank=i, current_price=c.current_price,
             decline_flags=c.triggered_decline_flags,
@@ -2676,7 +2746,7 @@ def build_run_status_report(db_path: str) -> tuple[str | None, str]:
     try:
         rows = conn.execute(
             "SELECT ticker, rank, llm_status, llm_error FROM live_scan_candidates "
-            "WHERE run_id = ? AND in_shortlist = 1 ORDER BY rank",
+            "WHERE run_id = ? AND in_shortlist = 1 ORDER BY rank, ticker",
             (summary.run_id,),
         ).fetchall()
         rejected = dict(conn.execute(
@@ -2964,6 +3034,7 @@ def build_scan_report(
             [("brak kompletnego notowania sesji", t, why) for t, why in sorted(dq["price_problems"].items())]
             + [("brak danych finansowych", t, why) for t, why in sorted(dq["fundamentals_problems"].items())]
             + [("prefilter", t, ", ".join(why)) for t, why in sorted(dq["prefilter_excluded"].items())]
+            + [("klasyfikacja sektorowa", t, why) for t, why in sorted(dq.get("sector_problems", {}).items())]
         )
         if exclusions:
             lines += ["| Etap | Spółka | Przyczyna |", "|---|---|---|"]
@@ -2974,6 +3045,17 @@ def build_scan_report(
             lines += ["", "Okresy finansowe pominięte (niedostępne w dniu sesji -- ochrona przed look-ahead):"]
             lines += [f"- {t}: " + "; ".join(f"{p} ({why})" for p, why in periods.items())
                       for t, periods in sorted(dq["dropped_periods"].items())]
+        profiles = dq.get("sector_profiles", {})
+        if profiles:
+            other = sorted((t, p) for t, p in profiles.items() if p != "GENERAL")
+            lines += ["", f"Profile sektorowe z kodu SIC (spółki w rankingu): "
+                      + ", ".join(f"{p}={sum(1 for v in profiles.values() if v == p)}"
+                                  for p in sorted(set(profiles.values())))
+                      + (" -- bez DCF z powodu profilu: " + ", ".join(f"{t} ({p})" for t, p in other) if other else "")]
+        if dq.get("capex_zero"):
+            lines += ["", "CAPEX = 0 w danych FMP (stan po weryfikacji z SEC XBRL):"]
+            lines += [f"- {t}: " + "; ".join(f"{p} -- {why}" for p, why in periods.items())
+                      for t, periods in sorted(dq["capex_zero"].items())]
         if dq["shortlist_dcf"]:
             lines += ["", "Brak DCF na shortliście (BRAK_DANYCH = brak danych źródłowych, "
                       "REGUŁA_WYCENY = dane kompletne, wycenę wyłącza reguła metody):"]

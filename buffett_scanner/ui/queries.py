@@ -74,7 +74,7 @@ def get_synthesis_rows(scanner_conn: sqlite3.Connection, run_id: str) -> list[di
         FROM live_scan_candidates lsc
         JOIN companies c ON c.cik = lsc.cik
         WHERE lsc.run_id = ? AND lsc.in_shortlist = 1
-        ORDER BY lsc.rank
+        ORDER BY lsc.rank, lsc.ticker
         """,
         (run_id,),
     ).fetchall()
