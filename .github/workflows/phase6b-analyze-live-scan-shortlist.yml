@@ -16,6 +16,16 @@ name: Phase 6b Analyze Live Scan Shortlist (resume, Faza 6c)
 # Finalny raport (0-N kandydatow) generowany TYLKO, gdy CALA shortlist
 # jest COMPLETE -- w przeciwnym razie status INCOMPLETE_LLM_ANALYSIS,
 # nigdy partial top-N.
+#
+# Decyzja wlascicielki 2026-10-23:
+# - dokumenty SEC wylacznie zlozone najpozniej w dniu skanu (zawsze
+#   wlaczone, brak look-ahead przy wznowieniu po kilku dniach);
+# - ZADNEJ automatycznej publikacji, nawet gdy wszystko jest COMPLETE.
+#   Najpierw raport (analizy, naprawy, odrzucenia, tokeny i koszt, spolki
+#   bez DCF, look-ahead, kompletnosc rankingu). Publikacja dopiero po
+#   zatwierdzeniu: workflow "Backfill - publikacja istniejacego snapshotu"
+#   z source_run_id = ID TEGO uruchomienia (publish-snapshot dalej
+#   odrzuca kazdy skan bez statusu COMPLETE).
 
 on:
   workflow_dispatch:
@@ -36,11 +46,26 @@ on:
         description: "Maks. liczba finalnych kandydatow w raporcie (domyslnie 5)"
         required: false
         default: "5"
+      max_claude_calls:
+        description: "Twardy limit wywolan Claude (pelne + naprawy); 22 spolki x najgorszy przypadek 3 = 66"
+        required: true
+        default: "66"
+      price_input_per_mtok:
+        description: "Cena USD za mln tokenow input (do raportu kosztu)"
+        required: true
+        default: "2"
+      price_output_per_mtok:
+        description: "Cena USD za mln tokenow output (do raportu kosztu)"
+        required: true
+        default: "10"
 
 jobs:
   analyze-shortlist:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    permissions:
+      contents: read  # bez publikacji -- token nie moze utworzyc release'u
+      actions: read   # pobranie artefaktu z innego uruchomienia
     steps:
       - uses: actions/checkout@v4
 
@@ -66,11 +91,32 @@ jobs:
 
       - name: Wznowienie analizy shortlisty (TYLKO PENDING/FAILED, resumable + cache)
         run: |
+          set -o pipefail
+          mkdir -p reports
           python -m buffett_scanner.cli --db live_scan_result.db analyze-live-scan-shortlist \
-            --run-id "${{ inputs.run_id }}" --limit ${{ inputs.limit }} --markdown-out reports
+            --run-id "$RUN_ID" --limit "$LIMIT" --markdown-out reports \
+            --max-claude-calls "$MAX_CALLS" --sources-until-run-date --usage-out reports/usage.json \
+            | tee reports/resume_log.txt
         env:
           SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          RUN_ID: ${{ inputs.run_id }}
+          LIMIT: ${{ inputs.limit }}
+          MAX_CALLS: ${{ inputs.max_claude_calls }}
+
+      - name: Raport wznowienia (analizy, naprawy, odrzucenia, tokeny, koszt, DCF, look-ahead)
+        if: always()
+        env:
+          PRICE_IN: ${{ inputs.price_input_per_mtok }}
+          PRICE_OUT: ${{ inputs.price_output_per_mtok }}
+        run: |
+          python -m buffett_scanner.cli --db live_scan_result.db validation-summary \
+            --usage-json reports/usage.json \
+            --price-input-per-mtok "$PRICE_IN" --price-output-per-mtok "$PRICE_OUT" --report-out reports
+
+      - name: Walidacja kompletności skanu
+        if: always()
+        run: python -m buffett_scanner.cli --db live_scan_result.db verify-run-complete --report-out reports
 
       - name: Upload wyniku (raport jesli COMPLETE + baza do dalszego resume, jesli trzeba)
         if: always()
