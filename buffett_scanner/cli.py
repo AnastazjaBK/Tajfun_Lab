@@ -37,6 +37,7 @@ import json
 import os
 import statistics
 import sys
+import time
 from pathlib import Path
 
 from buffett_scanner.analysis_schema import (
@@ -45,6 +46,14 @@ from buffett_scanner.analysis_schema import (
     collect_validation_violations,
     repairable_fields,
     validate_analysis_output,
+)
+from buffett_scanner.data_quality import (
+    PROBE_TICKERS,
+    DataQuality,
+    DataQualityThresholds,
+    bar_for,
+    last_bar_problem,
+    session_volume_ratio,
 )
 from buffett_scanner.backfill import (
     backfill_fundamentals_for_cik,
@@ -681,7 +690,37 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
     claude_key = config.llm.resolve_api_key()
     conn = init_db(args.db)
     thresholds = config.decline_scanner.thresholds
-    run_date = dt.date.today().isoformat()
+    # 2026-10-23: data skanu = data sesji, której dotyczą dane (nie data
+    # zegara serwera -- skan po północy UTC nie może udawać nowej sesji),
+    # a ceny pobierane są najwyżej do tej sesji. Bez --session-date
+    # kontrola danych jest wyłączona (tylko testy / ręczne próby).
+    if args.session_date:
+        try:
+            session_day = dt.date.fromisoformat(args.session_date)
+        except ValueError:
+            print(f"BŁĄD: --session-date '{args.session_date}' nie jest datą YYYY-MM-DD.", file=sys.stderr)
+            return 1
+        run_date = session_day.isoformat()
+        dq: DataQuality | None = DataQuality(session_date=run_date)
+    else:
+        session_day = dt.date.today()
+        run_date = session_day.isoformat()
+        dq = None
+        print("OSTRZEŻENIE: brak --session-date -- kontrola świeżości i kompletności danych WYŁĄCZONA.")
+    dq_thresholds = DataQualityThresholds(
+        min_universe_size=args.min_universe_size, min_price_coverage_pct=args.min_price_coverage_pct,
+        min_volume_ratio_median=args.min_volume_ratio_median,
+        max_fundamentals_failure_pct=args.max_fundamentals_failure_pct,
+    )
+
+    def data_gate_failed() -> int:
+        """Przerwanie skanu przed jakimkolwiek wywołaniem Claude."""
+        _write_data_quality(args.data_quality_out, dq)
+        for error in dq.errors:
+            print(f"::error title=Dane niekompletne::{error}")
+        print("\nSKAN PRZERWANY przed analizą Claude -- dane rynkowe niekompletne albo nieostateczne. "
+              "Zero wywołań Claude, nic nie zostało zapisane jako wynik skanu.", file=sys.stderr)
+        return 1
 
     upsert_scoring_model_version(
         conn,
@@ -721,14 +760,40 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
         tickers = [t for t in tickers if t in sample]
     print(f"Uniwersum: {len(tickers)} tickerów.")
 
-    to_date = dt.date.today()
+    to_date = session_day
     from_date = to_date - dt.timedelta(days=args.price_days)
 
+    probe: list[str] = []
+    if dq is not None:
+        dq.universe_size = len(tickers)
+        if not args.sample and not dq.check_universe(dq_thresholds):
+            return data_gate_failed()
+        probe = [t for t in PROBE_TICKERS if t in tickers] or tickers[:5]
+        if args.stability_wait_minutes > 0:
+            first = _fetch_session_bars(fmp_key, probe, session_day)
+            available = sum(1 for bar in first.values() if bar is not None)
+            if available < len(probe):
+                dq.errors.append(
+                    f"Notowanie sesji {run_date} dostępne dla {available}/{len(probe)} spółek próbki "
+                    "-- dane sesji jeszcze niekompletne."
+                )
+                return data_gate_failed()
+            print(f"Test stabilności: czekam {args.stability_wait_minutes} min i porównuję notowania "
+                  f"{len(probe)} spółek...")
+            _sleep(args.stability_wait_minutes * 60)
+            if not dq.check_stability("przed skanem", first, _fetch_session_bars(fmp_key, probe, session_day)):
+                return data_gate_failed()
+        else:
+            dq.warnings.append("Test stabilności notowań pominięty (--stability-wait-minutes 0).")
+
+    session_bars: dict[str, dict | None] = {}
     surfaced: list[tuple[str, str, object, dict[str, bool]]] = []
     with FMPClient(fmp_key) as client:
         for ticker in tickers:
             cik = _resolve_cik(conn, ticker)
             if cik is None:
+                if dq is not None:
+                    dq.price_problems[ticker] = "brak CIK"
                 continue
             try:
                 rows = client.get_historical_prices(
@@ -736,7 +801,22 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
                 )
             except FMPError as exc:
                 print(f"{ticker}: BŁĄD pobierania cen: {exc}", file=sys.stderr)
+                if dq is not None:
+                    dq.price_problems[ticker] = f"błąd FMP: {str(exc)[:120]}"
                 continue
+            if dq is not None:
+                problem = last_bar_problem(rows, run_date)
+                if problem is not None:
+                    dq.price_problems[ticker] = problem
+                    if rows:
+                        insert_price_rows(conn, cik, source="fmp", rows=rows)
+                        conn.commit()
+                    continue
+                dq.price_ok.append(ticker)
+                session_bars[ticker] = bar_for(rows, run_date)
+                ratio = session_volume_ratio(rows)
+                if ratio is not None:
+                    dq.volume_ratios.append(ratio)
             if not rows:
                 continue
             insert_price_rows(conn, cik, source="fmp", rows=rows)
@@ -759,6 +839,15 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
 
     print(f"Decline/opportunity screening: {len(surfaced)}/{len(tickers)} wytypowanych.")
 
+    if dq is not None:
+        if args.stability_wait_minutes > 0:
+            stored = {t: session_bars.get(t) for t in probe}
+            if not dq.check_stability("po pobraniu cen", stored, _fetch_session_bars(fmp_key, probe, session_day)):
+                return data_gate_failed()
+        if not dq.check_prices(dq_thresholds):
+            return data_gate_failed()
+        dq.surfaced = len(surfaced)
+
     prefilter_excluded = 0
     survivors: list[tuple[str, str, object, dict[str, bool]]] = []
     with FMPClient(fmp_key) as client:
@@ -769,15 +858,23 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
                 cashflow = client.get_cash_flow_statement(ticker)
             except FMPError as exc:
                 print(f"{ticker}: BŁĄD pobierania fundamentów: {exc}", file=sys.stderr)
+                if dq is not None:
+                    dq.fundamentals_problems[ticker] = f"błąd FMP: {str(exc)[:120]}"
                 continue
             fund_rows = normalize_fundamentals_rows(income, balance, cashflow)
             if not fund_rows:
+                if dq is not None:
+                    dq.fundamentals_problems[ticker] = "brak danych finansowych w odpowiedzi FMP"
                 continue
             insert_fundamentals_rows(conn, cik, source="fmp", rows=fund_rows)
             conn.commit()
             periods = get_fundamentals_periods(conn, cik)
             if not periods:
+                if dq is not None:
+                    dq.fundamentals_problems[ticker] = "brak okresów po normalizacji"
                 continue
+            if dq is not None:
+                dq.fundamentals_ok += 1
             metrics = compute_metrics(periods)
             prefilter_result = evaluate_prefilter(metrics, config.prefilter)
             if prefilter_result.excludes:
@@ -787,6 +884,15 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
             survivors.append((ticker, cik, snapshot, flags))
 
     print(f"Prefilter: {len(survivors)} przeszło, {prefilter_excluded} wykluczonych.")
+
+    if dq is not None:
+        if not dq.check_fundamentals(dq_thresholds):
+            return data_gate_failed()
+        _write_data_quality(args.data_quality_out, dq)
+        for warning in dq.warnings:
+            print(f"::warning title=Dane::{warning}")
+        print(f"Kontrola danych sesji {run_date}: OK (pokrycie cen {dq.price_coverage_pct:.1f}%, "
+              f"ostrzeżenia: {len(dq.warnings)}).")
 
     # --- Etap 1: deterministic ranking WSZYSTKICH survivors, zero LLM ---
     ranked: list[RankedCandidate] = []
@@ -858,8 +964,39 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
     return _analyze_shortlist_and_report(
         conn, run_id=run_id, config=config, config_version=config_version,
         user_agent=user_agent, claude_key=claude_key, final_limit=args.limit,
-        markdown_out=args.markdown_out,
+        markdown_out=args.markdown_out, max_claude_calls=args.max_claude_calls,
+        sources_filed_on_or_before=run_date, usage_out=args.usage_out,
     )
+
+
+# Podmieniane w testach (test stabilności czeka kilka minut).
+_sleep = time.sleep
+
+
+def _fetch_session_bars(fmp_key: str, tickers: list[str], session_day: dt.date) -> dict[str, dict | None]:
+    """Notowanie sesji `session_day` dla każdej spółki próbki (None, gdy
+    brak albo błąd FMP) -- do testu stabilności danych."""
+    bars: dict[str, dict | None] = {}
+    with FMPClient(fmp_key) as client:
+        for ticker in tickers:
+            try:
+                rows = client.get_historical_prices(
+                    ticker, from_date=(session_day - dt.timedelta(days=7)).isoformat(),
+                    to_date=session_day.isoformat(),
+                )
+            except FMPError:
+                bars[ticker] = None
+                continue
+            bars[ticker] = bar_for(rows, session_day.isoformat())
+    return bars
+
+
+def _write_data_quality(path: str | None, dq: DataQuality | None) -> None:
+    if not path or dq is None:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(dq.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
 
 
 def cmd_analyze_live_scan_shortlist(args: argparse.Namespace) -> int:
@@ -2673,6 +2810,163 @@ def cmd_validation_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+def methodology_warnings(db_path: str, run_id: str) -> list[str]:
+    """Znane właściwości metodologii (zamrożonej -- NIE poprawiane tutaj),
+    policzone dla shortlisty tego skanu, żeby było widać, jak bardzo
+    wpływają na ranking."""
+    from buffett_scanner.fundamentals import free_cash_flow
+    from buffett_scanner.scoring import DIVIDEND_SHAREHOLDER_RETURN_MAX
+    from buffett_scanner.shareholder_returns import evaluate_dividend_shareholder_return
+
+    config = load_config()
+    dcf = config.valuation.dcf_owner_earnings
+    conn = init_db(db_path)
+    try:
+        shortlist = get_live_scan_candidates(conn, run_id, only_shortlist=True)
+        renormalized, growth_capped, full_mos, dividend_nonpayers, misleading_reason = [], [], [], [], []
+        for r in shortlist:
+            periods = get_fundamentals_periods(conn, r["cik"])
+            if not periods:
+                continue
+            sector = conn.execute("SELECT sector_profile FROM companies WHERE cik = ?", (r["cik"],)).fetchone()
+            valuation = compute_valuation(
+                sector["sector_profile"] if sector else "GENERAL", periods,
+                current_price=r["current_price"], config=config.valuation,
+            )
+            if "valuation" in json.loads(r["missing_components_json"]):
+                renormalized.append(r["ticker"])
+            base = valuation.scenarios.get("base") if valuation.implemented else None
+            if base is not None and base.projected_growth_rate_pct >= dcf.max_projected_growth_rate_pct:
+                growth_capped.append(r["ticker"])
+            if base is not None and base.margin_of_safety_pct is not None \
+                    and base.margin_of_safety_pct >= dcf.mos_pct_for_full_score:
+                full_mos.append(r["ticker"])
+            dividend = evaluate_dividend_shareholder_return(
+                periods, current_price=r["current_price"], config=config.dividend_shareholder_return,
+            )
+            if not dividend.dividend_per_share_latest and dividend.raw_score >= DIVIDEND_SHAREHOLDER_RETURN_MAX:
+                dividend_nonpayers.append(r["ticker"])
+            fcf = [free_cash_flow(p) for p in periods]
+            positive = sum(1 for v in fcf if v is not None and v > 0)
+            if not valuation.implemented and positive >= 2 and (fcf[0] is None or fcf[0] <= 0):
+                misleading_reason.append(f"{r['ticker']} ({positive}/{len(fcf)} lat z dodatnim FCF)")
+    finally:
+        conn.close()
+
+    n = len(shortlist)
+
+    def listed(names: list[str]) -> str:
+        return ", ".join(names) if names else "brak"
+
+    return [
+        f"Wynik deterministyczny w % liczony od dostępnych komponentów: {len(renormalized)}/{n} spółek "
+        f"shortlisty bez wyceny DCF ma bazę 25 zamiast 45 pkt, więc np. 25/25 ma ten sam % co 45/45 "
+        f"i wpływa tak samo na wybór shortlisty: {listed(renormalized)}.",
+        f"Wzrost w scenariuszu BASE na suficie {dcf.max_projected_growth_rate_pct:g}%: {len(growth_capped)}/{n}: "
+        f"{listed(growth_capped)}.",
+        f"MoS BASE >= {dcf.mos_pct_for_full_score:g}% (pełne punkty za wycenę): {len(full_mos)}/{n}: "
+        f"{listed(full_mos)}.",
+        f"Pełne punkty za dywidendy i zwrot dla akcjonariuszy mimo braku dywidendy: {len(dividend_nonpayers)}/{n}: "
+        f"{listed(dividend_nonpayers)}.",
+        "Brak DCF przez ujemny PIERWSZY okres w oknie (CAGR liczony tylko od pierwszego do ostatniego "
+        f"okresu), mimo co najmniej 2 lat z dodatnim FCF -- komunikat o powodzie jest mylący: "
+        f"{listed(misleading_reason)}.",
+        "Model nie wykazał przewagi w backteście 2022-2026 (zamrożone ograniczenie metodologiczne).",
+    ]
+
+
+def build_scan_report(
+    db_path: str, *, data_quality_json: str | None, usage_json: str | None,
+    price_input_per_mtok: float, price_output_per_mtok: float,
+) -> tuple[bool, str]:
+    """(OK, raport markdown) pełnego skanu dla właścicielki przed decyzją o
+    publikacji. OK = dane kompletne, skan COMPLETE i brak look-ahead."""
+    lines = ["# Raport pełnego skanu", ""]
+    ok = True
+    dq = None
+    if data_quality_json and Path(data_quality_json).exists():
+        dq = json.loads(Path(data_quality_json).read_text(encoding="utf-8"))
+    if dq is None:
+        ok = False
+        lines += ["## Dane rynkowe: BRAK RAPORTU KONTROLI DANYCH", ""]
+    else:
+        ok &= dq["passed"]
+        stability = "; ".join(
+            f"{st['etap']}: {st['spolki']} spółek, zmiany: {len(st['zmiany'])}" for st in dq["stability"]
+        ) or "nie wykonano"
+        lines += [
+            f"## Dane rynkowe -- sesja {dq['session_date']}: {'OK' if dq['passed'] else 'NIEKOMPLETNE'}",
+            "",
+            f"- Uniwersum: {dq['universe_size']} spółek",
+            f"- Ceny i wolumen sesji: {dq['price_ok']}/{dq['universe_size']} ({dq['price_coverage_pct']}%), "
+            f"pominięte: {len(dq['price_problems'])}",
+            f"- Mediana wolumen sesji / średnia 20 sesji: {dq['volume_ratio_median']} "
+            f"(z {dq['volume_ratio_samples']} spółek)",
+            f"- Test stabilności notowań: {stability}",
+            f"- Dane finansowe wytypowanych spółek: {dq['fundamentals_ok']}/{dq['surfaced']}, "
+            f"braki: {len(dq['fundamentals_problems'])}",
+        ]
+        lines += [f"- BŁĄD: {e}" for e in dq["errors"]]
+        lines += [f"- Ostrzeżenie: {w}" for w in dq["warnings"]]
+        lines.append("")
+
+    usage = json.loads(Path(usage_json).read_text(encoding="utf-8")) if usage_json and Path(usage_json).exists() else None
+    summary = read_latest_run_summary(db_path)
+    if summary is None:
+        lines += ["## Skan: PRZERWANY przed zapisaniem wyniku -- brak rankingu i analiz, zero wywołań Claude.", ""]
+        return False, "\n".join(lines) + "\n"
+
+    conn = init_db(db_path)
+    try:
+        run = get_live_scan_run(conn, summary.run_id)
+        ranked = len(get_live_scan_candidates(conn, summary.run_id))
+    finally:
+        conn.close()
+    lines += [
+        f"## Ranking ({summary.run_id})",
+        "",
+        f"- Wytypowane po spadku: {run['decline_surfaced']}, wykluczone przez prefilter: {run['prefilter_excluded']}",
+        f"- W rankingu: {ranked}, na shortliście: {run['shortlist_size']} (limit {run['shortlist_limit']})",
+        f"- Status skanu: {'COMPLETE' if run['status'] == PUBLISHABLE_STATUS else 'INCOMPLETE'} ({run['status']})",
+        "",
+    ]
+    ok &= run["status"] == PUBLISHABLE_STATUS
+    if usage is None:
+        ok = False
+        lines += ["## Analizy jakościowe: brak pliku zużycia (analiza Claude nie została wykonana).", ""]
+    else:
+        summary_ok, summary_text = build_validation_summary(
+            db_path, usage_json=usage_json, tickers=None,
+            price_input_per_mtok=price_input_per_mtok, price_output_per_mtok=price_output_per_mtok,
+        )
+        ok &= summary_ok
+        lines += [summary_text.replace("## ", "### "), ""]
+    lines += ["## Ostrzeżenia metodologiczne (bez zmian w metodologii)", ""]
+    lines += [f"- {w}" for w in methodology_warnings(db_path, summary.run_id)]
+    lines += [
+        "",
+        f"**Wynik: {'OK -- gotowy do Twojej kontroli' if ok else 'NIE -- nie publikować'}.** "
+        "Publikacja nie jest automatyczna: dopiero po Twojej zgodzie (workflow publikacji snapshotu).",
+    ]
+    return ok, "\n".join(lines) + "\n"
+
+
+def cmd_scan_report(args: argparse.Namespace) -> int:
+    ok, report = build_scan_report(
+        args.db, data_quality_json=args.data_quality_json, usage_json=args.usage_json,
+        price_input_per_mtok=args.price_input_per_mtok, price_output_per_mtok=args.price_output_per_mtok,
+    )
+    print(report)
+    out_dir = Path(args.report_out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "scan_report.md").write_text(report, encoding="utf-8")
+    step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
+    if step_summary:
+        with open(step_summary, "a", encoding="utf-8") as f:
+            f.write(report)
+    return 0 if ok else 1
+
+
 def cmd_verify_run_complete(args: argparse.Namespace) -> int:
     """Bramka kompletności (diagnostyka 2026-10-23): kod wyjścia 1, gdy
     skan nie jest COMPLETE -- workflow zgłasza niepowodzenie, a krok
@@ -2764,6 +3058,27 @@ def build_parser() -> argparse.ArgumentParser:
         "Użyj 'analyze-live-scan-shortlist --run-id <id>' do kontynuacji.",
     )
     p_live_scan.add_argument("--markdown-out", default=None, help="Katalog na finalny raport .md")
+    p_live_scan.add_argument(
+        "--session-date", default=None,
+        help="Data sesji (YYYY-MM-DD), której dotyczy skan -- włącza kontrolę świeżości i kompletności "
+        "danych; ceny pobierane najwyżej do tej sesji, data skanu = data sesji.",
+    )
+    p_live_scan.add_argument(
+        "--stability-wait-minutes", type=float, default=10.0,
+        help="Odstęp między dwoma pobraniami notowań próbki spółek (test, że dane są ostateczne); 0 = pomiń.",
+    )
+    p_live_scan.add_argument("--min-universe-size", type=int, default=480)
+    p_live_scan.add_argument("--min-price-coverage-pct", type=float, default=98.0)
+    p_live_scan.add_argument("--min-volume-ratio-median", type=float, default=0.5)
+    p_live_scan.add_argument("--max-fundamentals-failure-pct", type=float, default=5.0)
+    p_live_scan.add_argument("--data-quality-out", default=None, help="Plik JSON z wynikiem kontroli danych.")
+    p_live_scan.add_argument(
+        "--max-claude-calls", type=int, default=None,
+        help="Twardy limit wywołań Claude (pełne analizy + naprawy) w tym skanie.",
+    )
+    p_live_scan.add_argument(
+        "--usage-out", default=None, help="Plik JSON z wywołaniami Claude tego skanu (raport kosztu).",
+    )
     p_live_scan.set_defaults(func=cmd_run_live_scan)
 
     p_analyze_shortlist = sub.add_parser("analyze-live-scan-shortlist")
@@ -2891,6 +3206,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify = sub.add_parser("verify-run-complete")
     p_verify.add_argument("--report-out", default="reports", help="Katalog na raport run_status.md.")
     p_verify.set_defaults(func=cmd_verify_run_complete)
+
+    p_srep = sub.add_parser("scan-report")
+    p_srep.add_argument("--data-quality-json", default=None)
+    p_srep.add_argument("--usage-json", default=None)
+    p_srep.add_argument("--price-input-per-mtok", type=float, required=True, help="USD za mln tokenów input.")
+    p_srep.add_argument("--price-output-per-mtok", type=float, required=True, help="USD za mln tokenów output.")
+    p_srep.add_argument("--report-out", default="reports", help="Katalog na scan_report.md.")
+    p_srep.set_defaults(func=cmd_scan_report)
 
     p_vsum = sub.add_parser("validation-summary")
     p_vsum.add_argument("--usage-json", required=True, help="Plik z --usage-out polecenia analizy.")
