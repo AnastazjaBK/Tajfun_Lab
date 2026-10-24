@@ -41,7 +41,7 @@ def test_run_baseline_walk_forward_fails_fast_on_duplicate_cik_in_universe_membe
 
     with pytest.raises(RuntimeError, match="FAIL FAST"):
         cli.main([
-            "--db", str(db_path), "run-baseline-walk-forward",
+            "--db", str(db_path), "run-baseline-walk-forward", "--sector-profiles", "current",
             "--window-start", "2015-01-01", "--window-end", "2015-02-01",
         ])
 
@@ -55,7 +55,7 @@ def test_run_calibration_candidate_unknown_round_is_an_error(tmp_path, capsys):
     db_path = tmp_path / "test.db"
     init_db(db_path).close()
     exit_code = cli.main([
-        "--db", str(db_path), "run-calibration-candidate", "--round", "99", "--candidate", "baseline",
+        "--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current", "--round", "99", "--candidate", "baseline",
     ])
     assert exit_code == 1
     assert "nieznana runda" in capsys.readouterr().err
@@ -65,7 +65,7 @@ def test_run_calibration_candidate_unknown_candidate_is_an_error(tmp_path, capsy
     db_path = tmp_path / "test.db"
     init_db(db_path).close()
     exit_code = cli.main([
-        "--db", str(db_path), "run-calibration-candidate", "--round", "1", "--candidate", "nope",
+        "--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current", "--round", "1", "--candidate", "nope",
     ])
     assert exit_code == 1
     assert "nieznany kandydat" in capsys.readouterr().err
@@ -90,7 +90,7 @@ def test_run_calibration_candidate_fails_fast_on_duplicate_cik(tmp_path):
     conn.close()
 
     with pytest.raises(RuntimeError, match="FAIL FAST"):
-        cli.main(["--db", str(db_path), "run-calibration-candidate", "--round", "1", "--candidate", "baseline"])
+        cli.main(["--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current", "--round", "1", "--candidate", "baseline"])
 
 
 def test_run_calibration_candidate_baseline_smoke_test_on_empty_db(tmp_path, capsys):
@@ -100,7 +100,7 @@ def test_run_calibration_candidate_baseline_smoke_test_on_empty_db(tmp_path, cap
     db_path = tmp_path / "test.db"
     init_db(db_path).close()
     exit_code = cli.main([
-        "--db", str(db_path), "run-calibration-candidate", "--round", "1", "--candidate", "baseline",
+        "--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current", "--round", "1", "--candidate", "baseline",
     ])
     assert exit_code == 0
     out = capsys.readouterr().out
@@ -126,7 +126,7 @@ def test_run_calibration_candidate_round_2_without_subround_is_an_error(tmp_path
     db_path = tmp_path / "test.db"
     init_db(db_path).close()
     exit_code = cli.main([
-        "--db", str(db_path), "run-calibration-candidate", "--round", "2", "--candidate", "2a_default",
+        "--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current", "--round", "2", "--candidate", "2a_default",
     ])
     assert exit_code == 1
     assert "--subround" in capsys.readouterr().err
@@ -136,7 +136,7 @@ def test_run_calibration_candidate_round_2a_unknown_candidate_is_an_error(tmp_pa
     db_path = tmp_path / "test.db"
     init_db(db_path).close()
     exit_code = cli.main([
-        "--db", str(db_path), "run-calibration-candidate", "--round", "2", "--subround", "a", "--candidate", "nope",
+        "--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current", "--round", "2", "--subround", "a", "--candidate", "nope",
     ])
     assert exit_code == 1
     assert "nieznany kandydat" in capsys.readouterr().err
@@ -149,7 +149,7 @@ def test_run_calibration_candidate_round_2a_smoke_test_on_empty_db(tmp_path, cap
     db_path = tmp_path / "test.db"
     init_db(db_path).close()
     exit_code = cli.main([
-        "--db", str(db_path), "run-calibration-candidate",
+        "--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current",
         "--round", "2", "--subround", "a", "--candidate", "2a_default",
     ])
     assert exit_code == 0
@@ -174,7 +174,7 @@ def test_run_calibration_candidate_round_2b_smoke_test_on_empty_db(tmp_path, cap
     db_path = tmp_path / "test.db"
     init_db(db_path).close()
     exit_code = cli.main([
-        "--db", str(db_path), "run-calibration-candidate",
+        "--db", str(db_path), "run-calibration-candidate", "--sector-profiles", "current",
         "--round", "2", "--subround", "b", "--candidate", "2b_valuation_0",
     ])
     assert exit_code == 0

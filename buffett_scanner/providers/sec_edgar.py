@@ -277,6 +277,45 @@ class SecEdgarClient:
         sic = data.get("sic") or None
         return {"sic": sic, "sic_description": data.get("sicDescription") or None}
 
+    def get_submissions_pages(self, cik: str, *, filed_from: str) -> tuple[list[dict], list[str]]:
+        """Główna strona Submissions API + strony archiwalne (`filings.files`)
+        obejmujące zgłoszenia od `filed_from`. Zwraca (strony, błędy stron
+        archiwalnych). Błąd strony głównej -> `SecEdgarError`. Używane do
+        SIC point-in-time (`sic_history.py`): `filings.recent` obejmuje u
+        dużych spółek tylko ostatnie lata."""
+        url = SUBMISSIONS_URL.format(cik10=_pad_cik(cik))
+        resp = self._get(url)
+        if resp.status_code != 200:
+            raise SecEdgarError(f"SEC EDGAR zwrócił status {resp.status_code} dla submissions CIK={cik}.")
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise SecEdgarError(f"SEC EDGAR zwrócił niepoprawny JSON dla CIK={cik}") from exc
+        pages, errors = [data], []
+        for f in data.get("filings", {}).get("files", []):
+            if f.get("filingTo", "9999") < filed_from:
+                continue
+            page = self._get(SUBMISSIONS_URL.rsplit("/", 1)[0] + "/" + f["name"])
+            if page.status_code != 200:
+                errors.append(f"{f['name']}: HTTP {page.status_code}")
+                continue
+            pages.append(page.json())
+        return pages, errors
+
+    def get_filing_header(self, cik: str, accession_number: str) -> tuple[str | None, str]:
+        """Nagłówek zgłoszenia (SIC z dnia złożenia): `.hdr.sgml`, a gdy
+        go brak -- `-index-headers.html`. Zwraca (tekst albo None, źródło
+        albo status HTTP)."""
+        base = (f"{ARCHIVES_BASE_URL}/{int(cik)}/{accession_number.replace('-', '')}/"
+                f"{accession_number}")
+        status = None
+        for suffix in (".hdr.sgml", "-index-headers.html"):
+            resp = self._get(base + suffix)
+            if resp.status_code == 200:
+                return resp.text, suffix
+            status = resp.status_code
+        return None, f"HTTP {status}"
+
     def get_company_tickers(self) -> dict[str, str]:
         """Aktualne (DZISIEJSZE, nie point-in-time) mapowanie ticker->CIK
         — podzbiór `get_company_tickers_full()` bez `title`, zachowany

@@ -76,6 +76,11 @@ jobs:
         env:
           SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
 
+      - name: Historia SIC point-in-time z naglowkow 10-K (decyzja wlascicielki 2026-10-24, tylko SEC)
+        run: python -m buffett_scanner.cli --db calibration_result.db build-sector-profile-history
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+
       - name: Pobranie cen SPY -- SECONDARY benchmark
         run: python -m buffett_scanner.cli --db calibration_result.db fetch-spy-benchmark-prices --cutoff 2012-01-01
         env:

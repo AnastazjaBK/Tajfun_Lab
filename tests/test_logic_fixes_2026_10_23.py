@@ -81,14 +81,17 @@ class _NoSicSec(g._SecBeforeSession):
     sic = None
 
 
-def test_missing_sic_follows_backtest_rule_but_is_reported(tmp_path, monkeypatch, capsys):
+def test_missing_sic_is_unknown_and_excluded_never_general(tmp_path, monkeypatch, capsys):
+    """Zmiana 2026-10-24 (decyzja właścicielki nr 9): brak kodu SIC ->
+    NIEZNANY, spółka poza rankingiem z przyczyną (wcześniej GENERAL)."""
     g._setup(monkeypatch)
     monkeypatch.setattr(cli, "SecEdgarClient", _NoSicSec)
     code, db, dq = g._scan(tmp_path, "--session-date", SESSION)
     capsys.readouterr()
-    assert code == 0
-    assert dq["sector_profiles"] == {"AAPL": "GENERAL"} and dq["sic_missing"] == ["AAPL"]
-    assert any("Brak kodu SIC w SEC" in w for w in dq["warnings"])
+    assert code == 1  # 1/1 spółek bez klasyfikacji > limit 5% -> skan przerwany przed Claude
+    assert dq["sector_profiles"] == {} and dq["sic_missing"] == ["AAPL"]
+    assert dq["sector_problems"] == {"AAPL": "brak kodu SIC w SEC -- profil NIEZNANY"}
+    assert t._CountingClaudeClient.call_count["n"] == 0
 
 
 # --- 2. Zerowy CAPEX ----------------------------------------------------------------

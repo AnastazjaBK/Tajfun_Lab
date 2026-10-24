@@ -26,86 +26,29 @@ Użycie: python scripts/diag_sic_and_sample_sizes.py --calibration-db X --snapsh
 from __future__ import annotations
 
 import argparse
-import html
 import json
 import os
-import re
 import sqlite3
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from buffett_scanner.providers.fmp import FMPClient, FMPError  # noqa: E402
 from buffett_scanner.providers.sec_edgar import ARCHIVES_BASE_URL, SecEdgarClient, SecEdgarError  # noqa: E402
 from buffett_scanner.sector_classification import classify_sic_to_sector_profile  # noqa: E402
+from buffett_scanner.sic_history import annual_filings, norm_cik, parse_header_sic, pit_sic  # noqa: E402,F401
 
 SUBMISSIONS_BASE = "https://data.sec.gov/submissions/"
-ANNUAL_FORMS = ("10-K", "10-K405", "10-KT")
 OOS_YEARS = (2016, 2017, 2018, 2019, 2020, 2021)
 # Liczebności opublikowane w design review (5.4a, 5.4c) -- kontrola zgodności.
 DOCUMENTED_FULL = {2016: 879, 2017: 481, 2018: 741, 2019: 1042, 2020: 2113, 2021: 578}
 DOCUMENTED_VALUATION = {2016: 177, 2017: 108, 2018: 138, 2019: 229, 2020: 365, 2021: 94}
 UNKNOWN = "NIEZNANY"
 
-_CIK_RE = re.compile(r"(?:<CIK>|CENTRAL INDEX KEY:)\s*0*(\d+)")
-_SIC_RE = re.compile(r"(?:<ASSIGNED-SIC>\s*(\d{3,4})|STANDARD INDUSTRIAL CLASSIFICATION:[^\n\[]*\[(\d{3,4})\])")
-
-
-def norm_cik(cik) -> str:
-    return str(int(str(cik)))
-
-
 def profile_of(sic: str | None) -> str:
     """Reguła zatwierdzona 2026-10-24: brak kodu SIC -> NIEZNANY (nie GENERAL)."""
     return UNKNOWN if not sic else classify_sic_to_sector_profile(sic)
-
-
-def parse_header_sic(text: str, cik: str) -> tuple[str | None, str]:
-    """SIC filera o danym CIK z nagłówka zgłoszenia (format SGML .hdr.sgml
-    albo tekstowy). Każdy kod SIC przypisany do najbliższego wcześniejszego
-    CIK w nagłówku. Zwraca (sic, status)."""
-    text = html.unescape(text)
-    ciks = [(m.start(), m.group(1)) for m in _CIK_RE.finditer(text)]
-    sics = [(m.start(), m.group(1) or m.group(2)) for m in _SIC_RE.finditer(text)]
-    if not sics:
-        return None, "BRAK_SIC_W_NAGLOWKU"
-    target = norm_cik(cik)
-    for pos, sic in sics:
-        owner = None
-        for cpos, c in ciks:
-            if cpos < pos:
-                owner = c
-        if owner == target:
-            return sic, "OK"
-    return None, "BRAK_DOPASOWANIA_CIK"
-
-
-def pit_sic(headers: list[dict], decision_date: str) -> str | None | bool:
-    """SIC z najnowszego nagłówka 10-K złożonego najpóźniej w dniu decyzji.
-    False = brak takiego nagłówka (nie da się ustalić point-in-time)."""
-    best = None
-    for h in headers:
-        if h["filing_date"] <= decision_date and h["status"] == "OK":
-            if best is None or h["filing_date"] > best["filing_date"]:
-                best = h
-    return False if best is None else best["sic"]
-
-
-def annual_filings(submissions_pages: list[dict]) -> list[dict]:
-    out, seen = [], set()
-    for page in submissions_pages:
-        cols = page.get("filings", {}).get("recent", page)
-        forms = cols.get("form", [])
-        for i, form in enumerate(forms):
-            if form not in ANNUAL_FORMS:
-                continue
-            acc = cols["accessionNumber"][i]
-            if acc in seen:
-                continue
-            seen.add(acc)
-            out.append({"form": form, "accession": acc, "filing_date": cols["filingDate"][i]})
-    return sorted(out, key=lambda f: f["filing_date"])
 
 
 class SecFetcher:

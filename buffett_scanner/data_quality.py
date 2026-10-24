@@ -152,6 +152,10 @@ class DataQuality:
     sector_profiles: dict[str, str] = field(default_factory=dict)
     sector_problems: dict[str, str] = field(default_factory=dict)
     sic_missing: list[str] = field(default_factory=list)
+    profile_review: dict[str, str] = field(default_factory=dict)
+    # 2026-10-24 (poprawka nr 7): weryfikacja dywidend na akcje zwykłe.
+    dividend_checks: dict[str, dict[str, str]] = field(default_factory=dict)
+    dividend_unknown: list[str] = field(default_factory=list)
     capex_zero: dict[str, dict[str, str]] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -226,12 +230,12 @@ class DataQuality:
         return True
 
     def check_sectors(self, t: DataQualityThresholds) -> bool:
-        """Spółki bez klasyfikacji sektorowej (błąd SEC) są poza rankingiem;
-        ponad próg -> skan przerwany. Brak kodu SIC w odpowiedzi SEC ->
-        GENERAL jak w backteście, ale jawnie w raporcie."""
-        if self.sic_missing:
+        """Spółki bez klasyfikacji sektorowej (błąd SEC albo brak kodu SIC
+        -> profil NIEZNANY, decyzja właścicielki 2026-10-24) są poza
+        rankingiem z przyczyną w raporcie; ponad próg -> skan przerwany."""
+        if self.profile_review:
             self.warnings.append(
-                "Brak kodu SIC w SEC (profil GENERAL, jak w backteście): " + ", ".join(sorted(self.sic_missing))
+                "Profil do weryfikacji: " + "; ".join(f"{k} ({v})" for k, v in sorted(self.profile_review.items()))
             )
         if not self.sector_problems:
             return True
@@ -268,6 +272,9 @@ class DataQuality:
             "sector_profiles": self.sector_profiles,
             "sector_problems": self.sector_problems,
             "sic_missing": self.sic_missing,
+            "profile_review": self.profile_review,
+            "dividend_checks": self.dividend_checks,
+            "dividend_unknown": self.dividend_unknown,
             "capex_zero": self.capex_zero,
             "errors": self.errors,
             "warnings": self.warnings,

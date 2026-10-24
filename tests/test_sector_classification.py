@@ -3,7 +3,7 @@ Decyzja właścicielki 2026-10-04). Zakresy dokładnie jak w specyfikacji."""
 
 from __future__ import annotations
 
-from buffett_scanner.sector_classification import classify_sic_to_sector_profile
+from buffett_scanner.sector_classification import classify_sic_to_sector_profile, profile_review_note
 
 
 def test_bank_ranges():
@@ -17,8 +17,16 @@ def test_insurer_range():
 
 
 def test_reit_codes():
-    assert classify_sic_to_sector_profile(6500) == "REIT"
     assert classify_sic_to_sector_profile(6798) == "REIT"
+
+
+def test_sic_6500_real_estate_is_not_reit_but_flagged_for_review():
+    """2026-10-24: CBRE (SIC 6500) to firma usług nieruchomościowych, nie REIT."""
+    assert classify_sic_to_sector_profile(6500) == "GENERAL"
+    assert "sprawdź" in profile_review_note("6500")
+    assert profile_review_note(6798) is None
+    assert profile_review_note(3571) is None
+    assert profile_review_note(None) is None
 
 
 def test_codes_just_outside_ranges_are_general():
@@ -41,11 +49,11 @@ def test_string_sic_is_accepted():
     assert classify_sic_to_sector_profile(" 6798 ") == "REIT"
 
 
-def test_none_sic_is_general_not_error():
-    assert classify_sic_to_sector_profile(None) == "GENERAL"
+def test_none_sic_is_unknown_never_general():
+    assert classify_sic_to_sector_profile(None) == "NIEZNANY"
 
 
-def test_malformed_sic_is_general_not_error():
-    assert classify_sic_to_sector_profile("") == "GENERAL"
-    assert classify_sic_to_sector_profile("N/A") == "GENERAL"
-    assert classify_sic_to_sector_profile("60a2") == "GENERAL"
+def test_malformed_sic_is_unknown_never_general():
+    assert classify_sic_to_sector_profile("") == "NIEZNANY"
+    assert classify_sic_to_sector_profile("N/A") == "NIEZNANY"
+    assert classify_sic_to_sector_profile("60a2") == "NIEZNANY"

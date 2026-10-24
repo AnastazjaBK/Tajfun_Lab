@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 
 from buffett_scanner.analysis_schema import AnalysisOutput, FearAnalysis
 from buffett_scanner.config import AppConfig
-from buffett_scanner.fundamentals import FundamentalsPeriod, compute_metrics
+from buffett_scanner.fundamentals import FundamentalsPeriod, compute_metrics, low_leverage
 from buffett_scanner.shareholder_returns import (
     DividendShareholderReturnResult,
     evaluate_dividend_shareholder_return,
@@ -82,12 +82,9 @@ def financial_quality_score(
     if healthy_margin:
         score += w.fcf_margin_healthy
 
-    leverage = metrics["net_debt_to_ebitda"]
-    low_leverage = (
-        leverage is not None and leverage <= fq_config.net_debt_to_ebitda_low_leverage_threshold
-    )
-    breakdown["low_leverage"] = low_leverage
-    if low_leverage:
+    leverage_ok = low_leverage(periods[-1], fq_config.net_debt_to_ebitda_low_leverage_threshold)
+    breakdown["low_leverage"] = leverage_ok
+    if leverage_ok:
         score += w.low_leverage
 
     liquidity = metrics["current_ratio"]

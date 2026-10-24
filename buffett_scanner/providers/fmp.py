@@ -353,7 +353,7 @@ def normalize_fundamentals_rows(
     rows: list[dict] = []
     # Pola cash-outflow, gdzie FMP prawdopodobnie raportuje wartość ujemną —
     # zapisujemy dodatnią kwotę zgodnie z konwencją FundamentalsPeriod.
-    _CASH_OUTFLOW_FIELDS = {"capital_expenditure", "dividends_paid", "share_buybacks"}
+    _CASH_OUTFLOW_FIELDS = {"capital_expenditure", "dividends_paid", "share_buybacks", "preferred_dividends_paid"}
 
     def _emit(source_rows: list[dict], field_map: dict[str, str]) -> None:
         for r in source_rows:
@@ -410,6 +410,12 @@ def normalize_fundamentals_rows(
             # na akcjach zwykłych (diluted_shares_outstanding).
             "dividends_paid": "commonDividendsPaid",
             "share_buybacks": "commonStockRepurchased",  # POTWIERDZONE — nazwa zgadła
+            # 2026-10-24 (poprawka nr 7): pola POTWIERDZONE w surowym JSON
+            # (diagnostyka run 40098265387, 802 lata obrotowe 162 spółek).
+            # `commonDividendsPaid` bywa sumą z uprzywilejowanymi (BA FY2025),
+            # więc te pola są tylko śladem do weryfikacji w SEC.
+            "preferred_dividends_paid": "preferredDividendsPaid",
+            "preferred_stock_issuance_net": "netPreferredStockIssuance",
         },
     )
     return rows

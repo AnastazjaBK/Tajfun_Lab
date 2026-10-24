@@ -61,10 +61,28 @@ def net_debt(period: FundamentalsPeriod) -> float | None:
 
 
 def net_debt_to_ebitda(period: FundamentalsPeriod) -> float | None:
+    """None, gdy iloraz nie ma sensu ekonomicznego: brak danych albo
+    EBITDA <= 0 (decyzja właścicielki 2026-10-24, błąd znaku: przy ujemnej
+    EBITDA iloraz wychodził ujemny i wyglądał jak niska dźwignia). Ocena
+    dźwigni przy EBITDA <= 0 -- patrz `low_leverage`."""
     nd = net_debt(period)
-    if nd is None or period.ebitda is None or period.ebitda == 0:
+    if nd is None or period.ebitda is None or period.ebitda <= 0:
         return None
     return nd / period.ebitda
+
+
+def low_leverage(period: FundamentalsPeriod, threshold: float) -> bool:
+    """Niska dźwignia (rdzeń wypłacalności, sekcja 3.2 rundy 4):
+    gotówka netto (dług netto <= 0) -> spełnia niezależnie od EBITDA;
+    dług netto > 0 wymaga EBITDA > 0 i dług netto/EBITDA <= próg.
+    Brak danych o długu lub gotówce -> nie spełnia (bez kredytu za brak)."""
+    nd = net_debt(period)
+    if nd is None:
+        return False
+    if nd <= 0:
+        return True
+    ratio = net_debt_to_ebitda(period)
+    return ratio is not None and ratio <= threshold
 
 
 def current_ratio(period: FundamentalsPeriod) -> float | None:

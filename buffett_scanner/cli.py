@@ -95,6 +95,7 @@ from buffett_scanner.db import (
     get_analysis_sources,
     get_cik_for_active_ticker,
     get_companies_sector_profiles,
+    get_sector_profile_history,
     get_fundamentals_periods,
     get_live_scan_candidates,
     get_live_scan_run,
@@ -118,6 +119,7 @@ from buffett_scanner.db import (
     list_active_tickers,
     list_universe_membership_ciks,
     update_company_sector_profile,
+    replace_sector_profile_history,
     insert_llm_rejected_output,
     update_live_scan_candidate_llm_status,
     update_live_scan_run_status,
@@ -161,7 +163,13 @@ from buffett_scanner.report import render_markdown_report
 from buffett_scanner.scanner import PriceBar, PriceChangeSnapshot, compute_price_changes, evaluate_decline_flags
 from buffett_scanner.scoring import compute_score
 from buffett_scanner.valuation import compute_valuation
-from buffett_scanner.sector_classification import classify_sic_to_sector_profile
+from buffett_scanner.dividend_verification import DIV_UNKNOWN, verify_with_sec
+from buffett_scanner.sic_history import PointInTimeProfiles, fetch_sic_history
+from buffett_scanner.sector_classification import (
+    UNKNOWN_PROFILE,
+    classify_sic_to_sector_profile,
+    profile_review_note,
+)
 from buffett_scanner.snapshot_publish import (
     PUBLISHABLE_STATUS,
     GhReleaseClient,
@@ -924,10 +932,19 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
                 continue
             profile = classify_sic_to_sector_profile(sic_info["sic"])
             update_company_sector_profile(conn, cik=cik, sector_profile=profile)
+            if profile == UNKNOWN_PROFILE:
+                # 2026-10-24: brak kodu SIC nie jest dowodem profilu GENERAL.
+                reason = "brak kodu SIC w SEC -- profil NIEZNANY"
+                print(f"{ticker}: {reason} -- poza rankingiem.", file=sys.stderr)
+                if dq is not None:
+                    dq.sector_problems[ticker] = reason
+                    dq.sic_missing.append(ticker)
+                continue
             if dq is not None:
                 dq.sector_profiles[ticker] = profile
-                if sic_info["sic"] is None:
-                    dq.sic_missing.append(ticker)
+                note = profile_review_note(sic_info["sic"])
+                if note:
+                    dq.profile_review[ticker] = note
             classified.append(item)
     conn.commit()
     survivors = classified
@@ -968,6 +985,12 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
                 if dq is not None:
                     dq.capex_zero[ticker] = states
         conn.commit()
+
+    # 2026-10-24 (poprawka nr 7): FMP `commonDividendsPaid` bywa sumą z
+    # dywidendami uprzywilejowanymi (BA FY2025). Każda wypłata > 0 jest
+    # weryfikowana w SEC XBRL (`dividend_verification.verify_with_sec`);
+    # brak potwierdzenia przy śladach akcji uprzywilejowanych -> NIEZNANE.
+    _verify_common_dividends(conn, survivors, user_agent=user_agent, run_date=run_date, dq=dq)
 
     if dq is not None:
         if not dq.check_fundamentals(dq_thresholds):
@@ -1015,6 +1038,11 @@ def cmd_run_live_scan(args: argparse.Namespace) -> int:
         gaps_found = {}
         for c in shortlist:
             gaps = input_gaps(get_fundamentals_periods(conn, c.cik))
+            if c.ticker in dq.dividend_unknown:
+                # Dywidendy nieznane po weryfikacji (poprawka nr 7): kryteria
+                # dywidendowe bez kredytu, zapis w raporcie -- nie brak danych
+                # wymagający zatrzymania skanu.
+                gaps = [g for g in gaps if not g.startswith("dividends_paid")]
             if gaps:
                 gaps_found[c.ticker] = gaps
             kind = dcf_absence_kind(gaps, c.score.valuation_result)
@@ -2241,10 +2269,16 @@ def cmd_classify_sector_profiles(args: argparse.Namespace) -> int:
             try:
                 sic_info = sec_client.get_sic_classification(cik)
             except SecEdgarError as exc:
-                print(f"  [{i}/{len(all_ciks)}] CIK={cik}: BŁĄD SEC ({exc}) — sector_profile niezmieniony.")
+                # 2026-10-24: błąd SEC nigdy nie zostawia GENERAL -- NIEZNANY,
+                # spółka poza ocenianym rankingiem backtestu, przyczyna w logu.
+                print(f"  [{i}/{len(all_ciks)}] CIK={cik}: BŁĄD SEC ({exc}) — profil NIEZNANY.")
+                update_company_sector_profile(conn, cik=cik, sector_profile=UNKNOWN_PROFILE)
+                counts[UNKNOWN_PROFILE] = counts.get(UNKNOWN_PROFILE, 0) + 1
                 errors.append(cik)
                 continue
             sector_profile = classify_sic_to_sector_profile(sic_info["sic"])
+            if sector_profile == UNKNOWN_PROFILE:
+                print(f"  [{i}/{len(all_ciks)}] CIK={cik}: brak kodu SIC w SEC — profil NIEZNANY.")
             update_company_sector_profile(conn, cik=cik, sector_profile=sector_profile)
             counts[sector_profile] = counts.get(sector_profile, 0) + 1
             if i % 50 == 0 or i == len(all_ciks):
@@ -2255,9 +2289,141 @@ def cmd_classify_sector_profiles(args: argparse.Namespace) -> int:
     print("\n== Podsumowanie ==")
     print("  " + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())))
     if errors:
-        print(f"  BŁĘDY SEC (sector_profile niezmieniony, zachowany poprzedni stan): {len(errors)} CIK: {errors}")
+        print(f"  BŁĘDY SEC (profil NIEZNANY, poza ocenianym rankingiem): {len(errors)} CIK: {errors}")
 
     return 0
+
+
+def cmd_build_sector_profile_history(args: argparse.Namespace) -> int:
+    """2026-10-24 (decyzja właścicielki nr 13): historia SIC z nagłówków
+    raportów rocznych EDGAR dla wszystkich CIK `universe_membership` --
+    wejście backtestu w trybie point-in-time (`sic_history.py`). Tylko SEC
+    (bezpłatne, throttling klienta). Błąd SEC dla CIK -> brak historii ->
+    w backteście profil NIEZNANY (raportowany), nigdy GENERAL."""
+    config = load_config()
+    try:
+        user_agent = config.sources.sec_edgar.resolve_user_agent()
+    except RuntimeError as exc:
+        print(f"BŁĄD: {exc}", file=sys.stderr)
+        return 1
+    conn = init_db(args.db)
+    all_ciks = list_universe_membership_ciks(conn, UNIVERSE_MEMBERSHIP_INDEX_NAME)
+    if args.sample:
+        sample_set = {c.strip() for c in args.sample.split(",") if c.strip()}
+        all_ciks = [c for c in all_ciks if c in sample_set]
+    if not all_ciks:
+        print("BŁĄD: zero CIK w zakresie (sprawdź --sample / universe_membership).", file=sys.stderr)
+        return 1
+    print(f"Historia SIC z nagłówków 10-K (od {args.filed_from}) dla {len(all_ciks)} CIK ...")
+    statuses: dict[str, int] = {}
+    sec_errors: list[str] = []
+    without_headers: list[str] = []
+    with SecEdgarClient(user_agent, min_interval_s=0.15) as sec_client:
+        for i, cik in enumerate(all_ciks, 1):
+            try:
+                rows, page_errors = fetch_sic_history(sec_client, cik, filed_from=args.filed_from)
+            except SecEdgarError as exc:
+                print(f"  CIK={cik}: BŁĄD SEC ({str(exc)[:120]}) -- brak historii, w backteście NIEZNANY.")
+                sec_errors.append(cik)
+                replace_sector_profile_history(conn, cik=cik, rows=[])
+                continue
+            for e in page_errors:
+                print(f"  CIK={cik}: strona archiwalna niedostępna ({e}).")
+            for r in rows:
+                key = r["status"].split(" ")[0]
+                statuses[key] = statuses.get(key, 0) + 1
+            if not any(r["status"] == "OK" for r in rows):
+                without_headers.append(cik)
+            replace_sector_profile_history(conn, cik=cik, rows=rows)
+            if i % 25 == 0 or i == len(all_ciks):
+                conn.commit()
+                print(f"  [{i}/{len(all_ciks)}]")
+    conn.commit()
+    print("\n== Podsumowanie ==")
+    print(f"  nagłówki: {statuses}")
+    print(f"  CIK bez odczytanego nagłówka (w backteście NIEZNANY we wszystkich datach): {len(without_headers)}")
+    if sec_errors:
+        print(f"  BŁĘDY SEC: {len(sec_errors)} CIK: {sec_errors}")
+    return 0
+
+
+def _verify_common_dividends(conn, survivors, *, user_agent: str, run_date: str, dq) -> None:
+    """Weryfikacja `dividends_paid` (FMP) faktami SEC dla spółek, które
+    cokolwiek wypłacały. Zmienia WYŁĄCZNIE wiersze `dividends_paid`:
+    korekta do wartości SEC dla akcji zwykłych albo NULL (nieznane)."""
+    payers = []
+    for ticker, cik, _snapshot, _flags in survivors:
+        rows = conn.execute(
+            "SELECT fiscal_period, period_end_date, value FROM fundamentals_raw "
+            "WHERE cik = ? AND line_item = 'dividends_paid' AND value > 0 ORDER BY period_end_date", (cik,),
+        ).fetchall()
+        if rows:
+            payers.append((ticker, cik, rows))
+    if not payers:
+        return
+    with SecEdgarClient(user_agent) as sec_client:
+        for ticker, cik, rows in payers:
+            pref = {r["fiscal_period"]: r for r in conn.execute(
+                "SELECT fiscal_period, period_end_date, line_item, value FROM fundamentals_raw WHERE cik = ? "
+                "AND line_item IN ('preferred_dividends_paid', 'preferred_stock_issuance_net') AND value <> 0",
+                (cik,),
+            )}
+            try:
+                facts = sec_client.get_company_facts(cik)
+            except SecEdgarError as exc:
+                print(f"{ticker}: SEC XBRL niedostępne do weryfikacji dywidend ({exc}).", file=sys.stderr)
+                facts = None
+            states = {}
+            for r in rows:
+                fmp_evidence = any(p["period_end_date"] <= r["period_end_date"] for p in pref.values())
+                value, state, why = verify_with_sec(
+                    reported=r["value"], facts=facts, period_end=r["period_end_date"], as_of=run_date,
+                    source_preferred_evidence=fmp_evidence,
+                )
+                if value != r["value"]:
+                    conn.execute(
+                        "UPDATE fundamentals_raw SET value = ? WHERE cik = ? AND fiscal_period = ? "
+                        "AND line_item = 'dividends_paid'", (value, cik, r["fiscal_period"]),
+                    )
+                if why:
+                    states[r["fiscal_period"]] = f"{state}: {why}"
+                if state == DIV_UNKNOWN and dq is not None and ticker not in dq.dividend_unknown:
+                    dq.dividend_unknown.append(ticker)
+            if states:
+                print(f"  Dywidendy ({ticker}): " + "; ".join(f"{p}: {v}" for p, v in states.items()))
+                if dq is not None:
+                    dq.dividend_checks[ticker] = states
+    conn.commit()
+
+
+_PROFILE_MODES = ("point-in-time", "current")
+
+
+def _backtest_profile_resolver(conn, mode: str):
+    """(funkcja cik, data -> profil, opis trybu). Domyślnie point-in-time
+    (decyzja właścicielki 2026-10-24, nr 13). Tryb `current` = dawna
+    reguła (bieżący SIC dla wszystkich dat), wyłącznie do odtworzenia
+    wcześniejszych wyników -- zawiera wiedzę z przyszłości."""
+    if mode == "current":
+        profiles = get_companies_sector_profiles(conn)
+        return (lambda cik, _date: profiles.get(cik, "GENERAL")), \
+            "bieżący SIC dla wszystkich dat (tryb odtworzeniowy, wiedza z przyszłości)"
+    history = get_sector_profile_history(conn)
+    if not history:
+        raise SystemExit(
+            "BŁĄD: brak historii SIC (tabela sector_profile_history pusta). Uruchom najpierw "
+            "`build-sector-profile-history` albo jawnie `--sector-profiles current`."
+        )
+    return PointInTimeProfiles(history).profile_at, "SIC point-in-time z nagłówków 10-K"
+
+
+def _report_unknown_profiles(unknown: dict[str, int]) -> None:
+    if unknown:
+        print(f"\nWykluczone z ocenianego rankingu -- profil NIEZNANY (brak SIC z dnia decyzji albo błąd SEC): "
+              f"{sum(unknown.values())} obserwacji, {len(unknown)} CIK: "
+              + ", ".join(f"{c} ({n})" for c, n in sorted(unknown.items())))
+    else:
+        print("\nProfil NIEZNANY: 0 obserwacji.")
 
 
 def cmd_fetch_spy_benchmark_prices(args: argparse.Namespace) -> int:
@@ -2342,7 +2508,9 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
         all_ciks = [c for c in all_ciks if c in sample_set]
     print(f"CIK w zakresie (universe_membership, kiedykolwiek): {len(all_ciks)}")
 
-    sector_profiles = get_companies_sector_profiles(conn)
+    resolve_profile, profile_mode = _backtest_profile_resolver(conn, args.sector_profiles)
+    print(f"Profil sektorowy: {profile_mode}")
+    unknown_profiles: dict[str, int] = {}
 
     print("Wczytywanie cen i fundamentals per CIK (raz, z lokalnej bazy) ...")
     price_bars_by_cik: dict[str, list[PriceBar]] = {}
@@ -2425,11 +2593,15 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
                 excl_fund += 1
             if not (has_price and has_fund):
                 continue
+            profile = resolve_profile(cik, decision_date)
+            if profile == UNKNOWN_PROFILE:
+                unknown_profiles[cik] = unknown_profiles.get(cik, 0) + 1
+                continue
             scanned += 1
 
             result = evaluate_candidate_at_date(
                 cik=cik, ticker_as_of_date=cik, decision_date=decision_date,
-                bars=bars, periods=periods, sector_profile=sector_profiles.get(cik, "GENERAL"),
+                bars=bars, periods=periods, sector_profile=profile,
                 config=config, run_id=run_id, config_version=config_version,
                 universe_provenance="universe_membership_as_of",
             )
@@ -2511,6 +2683,7 @@ def cmd_run_baseline_walk_forward(args: argparse.Namespace) -> int:
             f"SPY mean={spy_mean} (n_dates={len(spy_vals)})"
         )
 
+    _report_unknown_profiles(unknown_profiles)
     print(f"\nrun_id={run_id} — wyniki w backtest_coverage/backtest_candidates/backtest_benchmark ({args.db}).")
     print(f"Łącznie kandydatów (CANDIDATE): {n_candidates}")
 
@@ -2581,7 +2754,9 @@ def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
         sample_set = {c.strip() for c in args.sample.split(",") if c.strip()}
         all_ciks = [c for c in all_ciks if c in sample_set]
         print(f"  --sample ograniczenie: {len(all_ciks)} CIK.")
-    sector_profiles = get_companies_sector_profiles(conn)
+    resolve_profile, profile_mode = _backtest_profile_resolver(conn, args.sector_profiles)
+    print(f"Profil sektorowy: {profile_mode}")
+    unknown_profiles: dict[str, int] = {}
     price_bars_by_cik: dict[str, list[PriceBar]] = {}
     company_facts_by_cik: dict[str, dict] = {}
     for cik in all_ciks:
@@ -2627,9 +2802,13 @@ def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
                 pit_ciks_with_sufficient_price.append(cik)
             if not (has_price and has_fund):
                 continue
+            profile = resolve_profile(cik, decision_date)
+            if profile == UNKNOWN_PROFILE:
+                unknown_profiles[cik] = unknown_profiles.get(cik, 0) + 1
+                continue
             result = evaluate_candidate_at_date(
                 cik=cik, ticker_as_of_date=cik, decision_date=decision_date,
-                bars=bars, periods=periods, sector_profile=sector_profiles.get(cik, "GENERAL"),
+                bars=bars, periods=periods, sector_profile=profile,
                 config=config, run_id=calibration_run_id, config_version=config_hash,
                 universe_provenance="calibration",
             )
@@ -2652,6 +2831,7 @@ def cmd_run_calibration_candidate(args: argparse.Namespace) -> int:
 
     conn.commit()
     print(f"Łącznie kandydatów na oknie kalibracyjnym: {len(all_candidates)}")
+    _report_unknown_profiles(unknown_profiles)
 
     evaluation = evaluate_candidate_configuration(
         candidate_name=candidate.name, round=candidate.round, description=candidate.description,
@@ -3052,6 +3232,10 @@ def build_scan_report(
                       + ", ".join(f"{p}={sum(1 for v in profiles.values() if v == p)}"
                                   for p in sorted(set(profiles.values())))
                       + (" -- bez DCF z powodu profilu: " + ", ".join(f"{t} ({p})" for t, p in other) if other else "")]
+        if dq.get("dividend_checks"):
+            lines += ["", "Dywidendy na akcje zwykłe (weryfikacja z SEC XBRL, poprawka 2026-10-24):"]
+            lines += [f"- {t}: " + "; ".join(f"{p} {why}" for p, why in periods.items())
+                      for t, periods in sorted(dq["dividend_checks"].items())]
         if dq.get("capex_zero"):
             lines += ["", "CAPEX = 0 w danych FMP (stan po weryfikacji z SEC XBRL):"]
             lines += [f"- {t}: " + "; ".join(f"{p} -- {why}" for p, why in periods.items())
@@ -3306,6 +3490,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sector_profiles.set_defaults(func=cmd_classify_sector_profiles)
 
+    p_sic_history = sub.add_parser("build-sector-profile-history")
+    p_sic_history.add_argument("--sample", default=None, help="Lista CIK po przecinku (mały test).")
+    p_sic_history.add_argument(
+        "--filed-from", default="2009-01-01",
+        help="Najstarsza data złożenia raportu rocznego (domyślnie 2009-01-01, przed oknem 2012+).",
+    )
+    p_sic_history.set_defaults(func=cmd_build_sector_profile_history)
+
     p_spy = sub.add_parser("fetch-spy-benchmark-prices")
     p_spy.add_argument(
         "--cutoff", default="2012-01-01",
@@ -3326,6 +3518,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--sample", default=None,
         help="Lista CIK po przecinku — ogranicza zakres (np. mały test przed pełnym runem).",
     )
+    p_baseline.add_argument(
+        "--sector-profiles", choices=_PROFILE_MODES, default="point-in-time",
+        help="Profil sektorowy: point-in-time (domyślnie, historia SIC z nagłówków 10-K) albo current "
+             "(bieżący SIC, tylko do odtworzenia wcześniejszych wyników).",
+    )
     p_baseline.set_defaults(func=cmd_run_baseline_walk_forward)
 
     p_calibration = sub.add_parser("run-calibration-candidate")
@@ -3344,6 +3541,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_calibration.add_argument(
         "--sample", default=None,
         help="Lista CIK po przecinku — ogranicza zakres (mały test przed pełnym kandydatem).",
+    )
+    p_calibration.add_argument(
+        "--sector-profiles", choices=_PROFILE_MODES, default="point-in-time",
+        help="Profil sektorowy: point-in-time (domyślnie, historia SIC z nagłówków 10-K) albo current "
+             "(bieżący SIC, tylko do odtworzenia wcześniejszych wyników).",
     )
     p_calibration.set_defaults(func=cmd_run_calibration_candidate)
 

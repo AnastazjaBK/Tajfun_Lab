@@ -42,7 +42,12 @@ _BALANCE_SHEET_ITEMS = {
     "total_debt", "cash_and_equivalents",
     "total_current_assets", "total_current_liabilities",
 }
-_CASH_FLOW_ITEMS = {"operating_cash_flow", "capital_expenditure", "dividends_paid", "share_buybacks"}
+_CASH_FLOW_ITEMS = {
+    "operating_cash_flow", "capital_expenditure", "dividends_paid", "share_buybacks",
+    # 2026-10-24 (poprawka nr 7): ślady akcji uprzywilejowanych -- tylko do
+    # weryfikacji `dividends_paid`, nie wchodzą do FundamentalsPeriod.
+    "preferred_dividends_paid", "preferred_stock_issuance_net",
+}
 
 LINE_ITEM_STATEMENT_TYPE = {
     **{k: "INCOME_STATEMENT" for k in _INCOME_STATEMENT_ITEMS},
@@ -58,9 +63,22 @@ CREATE TABLE IF NOT EXISTS companies (
     industry        TEXT,
     sub_industry    TEXT,
     sector_profile  TEXT NOT NULL DEFAULT 'GENERAL'
-                    CHECK (sector_profile IN ('GENERAL','BANK','INSURER','REIT','BIOTECH')),
+                    CHECK (sector_profile IN ('GENERAL','BANK','INSURER','REIT','BIOTECH','NIEZNANY')),
     is_active       INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- 2026-10-24 (decyzja właścicielki nr 13): SIC point-in-time z nagłówków
+-- raportów rocznych EDGAR -- patrz `sic_history.py`.
+CREATE TABLE IF NOT EXISTS sector_profile_history (
+    cik             TEXT NOT NULL,
+    accession       TEXT NOT NULL,
+    form            TEXT NOT NULL,
+    filing_date     TEXT NOT NULL,
+    sic             TEXT,
+    status          TEXT NOT NULL,
+    fetched_at      TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (cik, accession)
 );
 
 CREATE TABLE IF NOT EXISTS ticker_history (
@@ -884,9 +902,35 @@ def _apply_column_migrations(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
+def _migrate_companies_unknown_profile(conn: sqlite3.Connection) -> None:
+    """2026-10-24 (decyzja właścicielki nr 9): profil NIEZNANY. Starsze pliki
+    DB mają CHECK bez tej wartości -- SQLite nie zmienia CHECK przez ALTER,
+    więc tabela jest odbudowywana raz (dane i klucz bez zmian)."""
+    row = conn.execute("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'companies'").fetchone()
+    if row is None or "NIEZNANY" in row[0]:
+        return
+    conn.commit()
+    conn.execute("PRAGMA foreign_keys = OFF")
+    try:
+        conn.execute("BEGIN")
+        conn.execute(row[0].replace("CREATE TABLE companies", "CREATE TABLE companies_migr", 1)
+                     .replace("CREATE TABLE IF NOT EXISTS companies", "CREATE TABLE companies_migr", 1)
+                     .replace("'BIOTECH')", "'BIOTECH','NIEZNANY')", 1))
+        conn.execute("INSERT INTO companies_migr SELECT * FROM companies")
+        conn.execute("DROP TABLE companies")
+        conn.execute("ALTER TABLE companies_migr RENAME TO companies")
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    finally:
+        conn.execute("PRAGMA foreign_keys = ON")
+
+
 def init_db(db_path: str | Path) -> sqlite3.Connection:
     """Tworzy schemat (idempotentnie) i zwraca otwarte połączenie."""
     conn = connect(db_path)
+    _migrate_companies_unknown_profile(conn)
     conn.executescript(SCHEMA)
     conn.executescript(_PORTFOLIO_TABLES_PHASE11)
     _apply_column_migrations(conn)
@@ -917,6 +961,23 @@ def upsert_company(
         """,
         (cik, name, sector, industry, sub_industry, sector_profile),
     )
+
+
+def replace_sector_profile_history(conn: sqlite3.Connection, *, cik: str, rows: list[dict]) -> None:
+    """Historia nagłówków 10-K jednej spółki (zastępuje poprzednią)."""
+    conn.execute("DELETE FROM sector_profile_history WHERE cik = ?", (cik,))
+    conn.executemany(
+        "INSERT INTO sector_profile_history (cik, accession, form, filing_date, sic, status) VALUES (?, ?, ?, ?, ?, ?)",
+        [(cik, r["accession"], r["form"], r["filing_date"], r["sic"], r["status"]) for r in rows],
+    )
+
+
+def get_sector_profile_history(conn: sqlite3.Connection) -> dict[str, list[dict]]:
+    """{cik bez wiodących zer: [wiersze nagłówków]} -- wejście `PointInTimeProfiles`."""
+    out: dict[str, list[dict]] = {}
+    for r in conn.execute("SELECT cik, accession, form, filing_date, sic, status FROM sector_profile_history"):
+        out.setdefault(str(int(r["cik"])), []).append(dict(r))
+    return out
 
 
 def upsert_ticker_history(

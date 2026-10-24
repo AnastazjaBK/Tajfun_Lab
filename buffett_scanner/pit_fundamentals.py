@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from buffett_scanner.dividend_verification import TOTAL_DIVIDEND_TAG, verify_with_sec
 from buffett_scanner.fundamentals import FundamentalsPeriod
 from buffett_scanner.point_in_time import PitFact, find_first_matching_tag, value_as_of
 from buffett_scanner.total_debt import compute_total_debt_as_of
@@ -192,6 +193,10 @@ def build_annual_fundamentals_periods_as_of(
     instant_histories: dict[str, list[PitFact]] = {
         concept: _instant_history(company_facts, concept) for concept in INSTANT_CONCEPTS
     }
+    # 2026-10-24 (poprawka nr 7): zapasowy tag `PaymentsOfDividends` to suma
+    # dywidend zwykłych i uprzywilejowanych -- weryfikowany niżej per okres.
+    dividends_found = find_first_matching_tag(company_facts, "dividends_paid")
+    dividends_from_total = dividends_found is not None and dividends_found[0] == TOTAL_DIVIDEND_TAG
 
     anchor_ends = sorted(
         {
@@ -234,6 +239,11 @@ def build_annual_fundamentals_periods_as_of(
         # `filed` wchodzi do `filed_dates` okresu -- okres jest "w pełni
         # znany" dopiero, gdy WSZYSTKIE jego użyte pola (total_debt też)
         # są znane.
+        dividends = values.get("dividends_paid")
+        if dividends_from_total and dividends:
+            dividends, _state, _why = verify_with_sec(
+                reported=dividends, facts=company_facts, period_end=end, as_of=as_of_date)
+
         total_debt_result = compute_total_debt_as_of(company_facts, as_of_date, target_end=end)
         if total_debt_result.value is not None:
             filed_dates.extend(p["filed"] for p in total_debt_result.component_provenance.values())
@@ -252,7 +262,7 @@ def build_annual_fundamentals_periods_as_of(
                 cash_and_equivalents=values.get("cash_and_equivalents"),
                 total_current_assets=values.get("total_current_assets"),
                 total_current_liabilities=values.get("total_current_liabilities"),
-                dividends_paid=values.get("dividends_paid"),
+                dividends_paid=dividends,
                 share_buybacks=values.get("share_buybacks"),
                 diluted_shares_outstanding=values.get("diluted_shares_outstanding"),
                 total_debt_resolution_method=total_debt_result.debt_resolution_method,
