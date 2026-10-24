@@ -1,0 +1,131 @@
+== 0. Wpływ poprawek na dane 22.10 ==
+Grupy: {'Z_DCF': 117, 'BEZ_DCF': 39, 'BEZ_METODY': 3, 'NIEKOMPLETNE': 3}
+BEZ_METODY: ['ARE', 'GL', 'WY'] | NIEKOMPLETNE: ['APO', 'COIN', 'HONA']
+Bezpieczeństwo zmienione (stare -> nowe, skala 15): [('APO', 12.19, 6.56), ('COIN', 15.0, 9.38), ('CVNA', 12.19, 9.38), ('ECHO', 2.81, 0.0), ('F', 9.38, 6.56), ('IP', 6.56, 3.75), ('SKYD', 5.62, 2.81)]
+  uwaga: stare wartości z bazy liczone były bez profilu SIC (wszystkie GENERAL); różnice mogą wynikać też z poprawki 1 (profile), nie tylko 6
+
+== 1. Kwalifikacja: MoS >= 0 (preferencja) ==
+  KWALIFIKACJA: 39 ['ADBE', 'ALLE', 'ANET', 'APH', 'APP', 'BKNG', 'CHRW', 'CMG', 'CMI', 'CPRT', 'DASH', 'DECK', 'DXCM', 'EME', 'ETN', 'EXE', 'FIX', 'FLEX', 'HII', 'HWM', 'INTU', 'JBHT', 'JBL', 'LDOS', 'LII', 'MU', 'PH', 'PNR', 'PYPL', 'QCOM', 'ROL', 'STX', 'TPL', 'TPR', 'TYL', 'VRT', 'WDC', 'XYL', 'ZTS']
+  KWALIFIKACJA_BEZ_POTWIERDZONEJ_CENY: 6 ['FSLR', 'GEV', 'LEN', 'NFLX', 'PODD', 'UBER']
+  PRZEGLAD_RECZNY: 16 ['ARES', 'CBRE', 'CEG', 'COHR', 'CVNA', 'EIX', 'F', 'HOOD', 'IP', 'KKR', 'NCLH', 'NDAQ', 'ORCL', 'PCG', 'SKYD', 'SMCI']
+  BRAK_KWALIFIKACJI: 95 ['ADI', 'AKAM', 'ALB', 'AMAT', 'AMD', 'APTV', 'AVGO', 'AXON', 'BA', 'BE', 'BSX', 'BX', 'CARR', 'CAT', 'CDNS', 'CHTR', 'CIEN', 'CLX', 'CMCSA', 'COO', 'CRH', 'CRL', 'CSGP', 'CSX', 'DDOG', 'DELL', 'DOW', 'DPZ', 'DVA', 'ECHO', 'FCX', 'FDXF', 'FICO', 'FIS', 'FISV', 'GIS', 'GLW', 'GNRC', 'HON', 'HSY', 'IBM', 'IDXX', 'INTC', 'IR', 'ISRG', 'JCI', 'KDP', 'KEYS', 'KLAC', 'KMI', 'LHX', 'LITE', 'LMT', 'LOW', 'LRCX', 'LULU', 'LVS', 'MAR', 'MCD', 'MCHP', 'META', 'MGM', 'MKC', 'MLM', 'MOS', 'MPWR', 'MRK', 'MRNA', 'MRVL', 'NKE', 'NOC', 'NRG', 'NVR', 'NXPI', 'ON', 'P', 'PG', 'PKG', 'PWR', 'Q', 'RDDT', 'ROP', 'SNA', 'SNDK', 'SNPS', 'TER', 'TMUS', 'TSCO', 'TXN', 'UAL', 'ULTA', 'UNP', 'VST', 'WAB', 'WYNN']
+  BRAK_METODY_OCENY: 3 ['ARE', 'GL', 'WY']
+  NIEKOMPLETNE_DANE: 3 ['APO', 'COIN', 'HONA']
+  do Claude: 45 spółek | wywołania: minimum 45, najgorszy przypadek 135 | mieści się w 75: False
+  obecna shortlista (24) poza kwalifikacją: ['APO', 'APTV', 'CEG', 'FISV', 'SNDK']; nowe względem shortlisty: ['ALLE', 'ANET', 'APH', 'CHRW', 'CMG', 'CMI', 'CPRT', 'DASH', 'ETN', 'FIX', 'FLEX', 'FSLR', 'GEV', 'HWM', 'JBHT', 'LEN', 'LII', 'PH', 'PYPL', 'ROL', 'STX', 'TPL', 'TYL', 'VRT', 'WDC', 'ZTS']
+
+== 1. Kwalifikacja: MoS >= 50 (porównanie) ==
+  KWALIFIKACJA: 15 ['ADBE', 'APP', 'BKNG', 'CHRW', 'DECK', 'EME', 'EXE', 'HII', 'INTU', 'JBHT', 'JBL', 'LDOS', 'MU', 'TPR', 'TYL']
+  KWALIFIKACJA_BEZ_POTWIERDZONEJ_CENY: 6 ['FSLR', 'GEV', 'LEN', 'NFLX', 'PODD', 'UBER']
+  PRZEGLAD_RECZNY: 16 ['ARES', 'CBRE', 'CEG', 'COHR', 'CVNA', 'EIX', 'F', 'HOOD', 'IP', 'KKR', 'NCLH', 'NDAQ', 'ORCL', 'PCG', 'SKYD', 'SMCI']
+  BRAK_KWALIFIKACJI: 119 ['ADI', 'AKAM', 'ALB', 'ALLE', 'AMAT', 'AMD', 'ANET', 'APH', 'APTV', 'AVGO', 'AXON', 'BA', 'BE', 'BSX', 'BX', 'CARR', 'CAT', 'CDNS', 'CHTR', 'CIEN', 'CLX', 'CMCSA', 'CMG', 'CMI', 'COO', 'CPRT', 'CRH', 'CRL', 'CSGP', 'CSX', 'DASH', 'DDOG', 'DELL', 'DOW', 'DPZ', 'DVA', 'DXCM', 'ECHO', 'ETN', 'FCX', 'FDXF', 'FICO', 'FIS', 'FISV', 'FIX', 'FLEX', 'GIS', 'GLW', 'GNRC', 'HON', 'HSY', 'HWM', 'IBM', 'IDXX', 'INTC', 'IR', 'ISRG', 'JCI', 'KDP', 'KEYS', 'KLAC', 'KMI', 'LHX', 'LII', 'LITE', 'LMT', 'LOW', 'LRCX', 'LULU', 'LVS', 'MAR', 'MCD', 'MCHP', 'META', 'MGM', 'MKC', 'MLM', 'MOS', 'MPWR', 'MRK', 'MRNA', 'MRVL', 'NKE', 'NOC', 'NRG', 'NVR', 'NXPI', 'ON', 'P', 'PG', 'PH', 'PKG', 'PNR', 'PWR', 'PYPL', 'Q', 'QCOM', 'RDDT', 'ROL', 'ROP', 'SNA', 'SNDK', 'SNPS', 'STX', 'TER', 'TMUS', 'TPL', 'TSCO', 'TXN', 'UAL', 'ULTA', 'UNP', 'VRT', 'VST', 'WAB', 'WDC', 'WYNN', 'XYL', 'ZTS']
+  BRAK_METODY_OCENY: 3 ['ARE', 'GL', 'WY']
+  NIEKOMPLETNE_DANE: 3 ['APO', 'COIN', 'HONA']
+  do Claude: 21 spółek | wywołania: minimum 21, najgorszy przypadek 63 | mieści się w 75: True
+  obecna shortlista (24) poza kwalifikacją: ['APO', 'APTV', 'CEG', 'DXCM', 'FISV', 'PNR', 'QCOM', 'SNDK', 'XYL']; nowe względem shortlisty: ['CHRW', 'FSLR', 'GEV', 'JBHT', 'LEN', 'TYL']
+
+== 2. Ręczny przegląd -- przyczyny ==
+  ARES (BEZ_DCF, SIC 6282, MoS —): dług netto/EBITDA 5.84 > 2; usługi finansowe (SIC 6282) -- dług netto/EBITDA może być nieadekwatny
+  CBRE (Z_DCF, SIC 6500, MoS -1373.4%): dług netto/EBITDA 3.19 > 2; SIC 6500 (nieruchomości) klasyfikowany jako GENERAL -- sprawdź, czy spółka nie jest REIT-em albo czy standardowe wskaźniki do niej pasują
+  CEG (BEZ_DCF, SIC 4911, MoS —): FCF z 3 lat -11.46 mld <= 0; ujemny przepływ operacyjny z 3 lat przy zyskach netto -- możliwy efekt klasyfikacji przepływów lub kapitału obrotowego
+  COHR (BEZ_DCF, SIC 3827, MoS —): FCF z 3 lat -0.64 mld <= 0; FCF ujemny przez inwestycje (CAPEX > przepływ operacyjny) przy zyskach netto -- sprawdź, czy to inwestycje regulowane/finansowane długiem (np. energetyka), czy realne ryzyko
+  CVNA (BEZ_DCF, SIC 5500, MoS —): dług netto przy EBITDA <= 0; EBITDA <= 0 przy dodatnim przepływie operacyjnym -- możliwe odpisy, dźwignia niemiarodajna
+  EIX (BEZ_DCF, SIC 4911, MoS —): FCF z 3 lat -3.46 mld <= 0; dług netto/EBITDA 4.87 > 2; FCF ujemny przez inwestycje (CAPEX > przepływ operacyjny) przy zyskach netto -- sprawdź, czy to inwestycje regulowane/finansowane długiem (np. energetyka), czy realne ryzyko
+  F (Z_DCF, SIC 3711, MoS 63.2%): dług netto przy EBITDA <= 0; EBITDA <= 0 przy dodatnim przepływie operacyjnym -- możliwe odpisy, dźwignia niemiarodajna
+  HOOD (BEZ_DCF, SIC 6211, MoS —): dług netto/EBITDA 3.38 > 2; usługi finansowe (SIC 6211) -- dług netto/EBITDA może być nieadekwatny
+  IP (BEZ_DCF, SIC 2621, MoS —): dług netto przy EBITDA <= 0; EBITDA <= 0 przy dodatnim przepływie operacyjnym -- możliwe odpisy, dźwignia niemiarodajna
+  KKR (BEZ_DCF, SIC 6282, MoS —): dług netto/EBITDA 5.38 > 2; usługi finansowe (SIC 6282) -- dług netto/EBITDA może być nieadekwatny
+  NCLH (BEZ_DCF, SIC 4400, MoS —): FCF z 3 lat -1.08 mld <= 0; dług netto/EBITDA 3.77 > 2; FCF ujemny przez inwestycje (CAPEX > przepływ operacyjny) przy zyskach netto -- sprawdź, czy to inwestycje regulowane/finansowane długiem (np. energetyka), czy realne ryzyko
+  NDAQ (Z_DCF, SIC 6200, MoS 44.8%): dług netto/EBITDA 2.92 > 2; usługi finansowe (SIC 6200) -- dług netto/EBITDA może być nieadekwatny
+  ORCL (BEZ_DCF, SIC 7372, MoS —): FCF z 3 lat -12.27 mld <= 0; dług netto/EBITDA 3.73 > 2; FCF ujemny przez inwestycje (CAPEX > przepływ operacyjny) przy zyskach netto -- sprawdź, czy to inwestycje regulowane/finansowane długiem (np. energetyka), czy realne ryzyko
+  PCG (BEZ_DCF, SIC 4931, MoS —): FCF z 3 lat -10.37 mld <= 0; dług netto/EBITDA 5.81 > 2; FCF ujemny przez inwestycje (CAPEX > przepływ operacyjny) przy zyskach netto -- sprawdź, czy to inwestycje regulowane/finansowane długiem (np. energetyka), czy realne ryzyko
+  SKYD (Z_DCF, SIC 4833, MoS -15.4%): dług netto przy EBITDA <= 0; zysk netto > 0 w mniej niż 2 z 3 lat; EBITDA <= 0 przy dodatnim przepływie operacyjnym -- możliwe odpisy, dźwignia niemiarodajna
+  SMCI (BEZ_DCF, SIC 3571, MoS —): FCF z 3 lat -8.05 mld <= 0; ujemny przepływ operacyjny z 3 lat przy zyskach netto -- możliwy efekt klasyfikacji przepływów lub kapitału obrotowego
+
+== 3. Powody braku kwalifikacji (MoS >= 0) ==
+  dźwignia > próg: 60
+  MoS: 29
+  zysk: 10
+  FCF: 6
+  dług: 1
+
+== 4. MoS >= 0 a ograniczenia DCF (spółki zakwalifikowane z DCF) ==
+| Spółka | MoS BASE | CAGR FCF (2 punkty) | wzrost w projekcji | FCF ost. / śr. 3 wcześn. | uwagi |
+| DECK | 81.2% | 73.4% | 20.0% | 1.40 | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| INTU | 80.5% | 23.9% | 20.0% | 1.67 | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| TPR | 76.9% | 24.3% | 20.0% | 1.79 | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| BKNG | 75.3% | 37.9% | 20.0% | 1.29 | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| MU | 72.1% | 108.6% | 20.0% | — | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| LDOS | 71.0% | 15.1% | 15.1% | 1.59 | pełne punkty za wycenę (nasycenie) |
+| EXE | 68.1% | 15.0% | 15.0% | 1.93 | pełne punkty za wycenę (nasycenie) |
+| HII | 67.8% | 16.6% | 16.6% | 2.01 | baza FCF >= 2x średniej wcześniejszych lat; pełne punkty za wycenę (nasycenie) |
+| CHRW | 66.2% | 147.0% | 20.0% | 1.01 | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| JBL | 63.6% | 50.8% | 20.0% | 1.47 | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| APP | 60.9% | 81.9% | 20.0% | 3.32 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat; pełne punkty za wycenę (nasycenie) |
+| JBHT | 58.2% | 36.1% | 20.0% | 3.86 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat; pełne punkty za wycenę (nasycenie) |
+| EME | 57.9% | 43.2% | 20.0% | 1.37 | wzrost przycięty do sufitu 20%; pełne punkty za wycenę (nasycenie) |
+| ADBE | 55.4% | 9.3% | 9.3% | 1.33 | pełne punkty za wycenę (nasycenie) |
+| TYL | 51.8% | 19.2% | 19.2% | 1.51 | pełne punkty za wycenę (nasycenie) |
+| XYL | 49.7% | 28.9% | 20.0% | 1.44 | wzrost przycięty do sufitu 20% |
+| DXCM | 49.5% | 112.0% | 20.0% | 2.23 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat |
+| QCOM | 46.5% | 10.3% | 10.3% | 1.38 |  |
+| PNR | 42.1% | 7.8% | 7.8% | 1.48 |  |
+| PYPL | 38.9% | 3.3% | 3.3% | 1.04 |  |
+| DASH | 36.7% | 47.8% | 20.0% | 2.06 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat |
+| FLEX | 34.9% | 16.0% | 16.0% | 1.45 |  |
+| WDC | 34.5% | 46.0% | 20.0% | — | wzrost przycięty do sufitu 20% |
+| ROL | 31.5% | 14.8% | 14.8% | 1.29 |  |
+| VRT | 30.3% | 96.6% | 20.0% | 3.46 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat |
+| CPRT | 29.3% | 10.8% | 10.8% | 1.25 |  |
+| ETN | 27.6% | 22.3% | 20.0% | 1.28 | wzrost przycięty do sufitu 20% |
+| CMG | 27.6% | 14.6% | 14.6% | 1.21 |  |
+| LII | 27.5% | 11.8% | 11.8% | 1.30 |  |
+| APH | 26.3% | 38.8% | 20.0% | 2.15 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat |
+| FIX | 25.6% | 59.9% | 20.0% | 2.01 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat |
+| PH | 25.5% | 15.3% | 15.3% | 1.31 |  |
+| ALLE | 21.6% | 11.5% | 11.5% | 1.38 |  |
+| STX | 18.6% | 24.9% | 20.0% | 4.42 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat |
+| ZTS | 16.8% | 7.1% | 7.1% | 1.31 |  |
+| ANET | 13.5% | 45.4% | 20.0% | 2.08 | wzrost przycięty do sufitu 20%; baza FCF >= 2x średniej wcześniejszych lat |
+| TPL | 8.1% | 18.1% | 18.1% | 1.13 |  |
+| CMI | 6.6% | 12.9% | 12.9% | 1.76 |  |
+| HWM | 4.2% | 54.7% | 20.0% | 1.95 | wzrost przycięty do sufitu 20% |
+Podsumowanie: {'sufit': 21, 'szczyt': 10, '0-50': 24, '>=50': 15}
+
+== 5. Spółki bez DCF zakwalifikowane (N1: jakość bez potwierdzonej ceny) -- przyczyna braku DCF ==
+  FSLR: FCF okna [-0.3, -0.03, -0.78, -0.31, 1.19] mld
+  GEV: FCF okna [-2.24, -0.63, 0.44, 1.7, 3.71] mld
+  LEN: FCF okna [2.47, 3.21, 5.08, 2.23, 0.03] mld
+  NFLX: FCF okna [-0.13, 1.62, 6.93, 6.92, 9.46] mld
+  PODD: FCF okna [-0.19, -0.04, 0.07, 0.31, 0.38] mld
+  UBER: FCF okna [-0.74, 0.39, 3.36, 6.89, 9.76] mld
+
+== 6. Koszt (rzeczywiste zużycie tokenów 24 analiz z 22.10) ==
+wywołań z danymi: 24 | wejście śr. 5394, wyjście śr. 8219 (min 6266, max 10874) tokenów | koszt wywołania śr. 0.0930 USD, max 0.1195 USD
+MoS >= 0: 45 spółek -> bez napraw 45 wywołań ≈ 4.18 USD (przy maks. zużyciu 5.38); najgorszy przypadek 135 wywołań ≈ 16.14 USD (każda naprawa liczona jak pełne wywołanie -- górne oszacowanie)
+MoS >= 50: 21 spółek -> bez napraw 21 wywołań ≈ 1.95 USD (przy maks. zużyciu 2.51); najgorszy przypadek 63 wywołań ≈ 7.53 USD (każda naprawa liczona jak pełne wywołanie -- górne oszacowanie)
+
+== 7. K2 -- ilustracja (FCF bez SBC; bez wyłączenia przejęć) ==
+rozkład K2 (n=156): mediana 7.2, 10/10: 49, <= 2: 16, A neutralne: 33
+bez wypłat w 3 latach (n=7): mediana dziś 5.0 -> K2 7.0; płacący dywidendę co roku (n=93): dziś 10.0 -> K2 8.0
+| Spółka | dziś (10) | wzrost FCF/akcję %/r | dyw. yield % | A | liczba akcji 3 l. % | B | C | K2 | uwagi |
+| MRK | 10 | 7.9 | 2.10 | 7.0 | -1.4 | 2 | 1 | 10.0 |  |
+| SNA | 10 | 13.9 | 2.14 | 7.0 | -2.2 | 2 | 1 | 10.0 |  |
+| QCOM | 10 | 16.6 | 1.89 | 7.0 | -2.8 | 2 | 1 | 10.0 |  |
+| CHTR | 10 | -13.1 | 0.00 | 0.0 | -16.2 | 2 | 1 | 3.0 |  |
+| ADBE | 10 | 10.5 | 0.00 | 7.0 | -9.3 | 2 | 1 | 10.0 |  |
+| AVGO | 8 | 11.3 | 0.63 | 7.0 | +14.7 | 0 | 1 | 8.0 |  |
+| TPR | 10 | 30.5 | 1.25 | 7.0 | -12.9 | 2 | 1 | 10.0 |  |
+| DECK | 10 | 56.8 | 0.00 | 7.0 | -8.9 | 2 | 1 | 10.0 |  |
+| APP | 10 | 101.0 | 0.00 | 7.0 | -8.0 | 2 | 1 | 10.0 |  |
+| NFLX | 10 | 125.2 | 0.00 | 7.0 | -4.3 | 2 | 1 | 10.0 |  |
+| UBER | 10 | — | 0.00 | 3.5 | +7.3 | 0 | 1 | 4.5 | A niepoliczalne (ujemny/zerowy start lub brak danych) -- neutralnie |
+| BA | 6 | — | 0.08 | 3.5 | +28.1 | 0 | 1 | 4.5 | A niepoliczalne (ujemny/zerowy start lub brak danych) -- neutralnie |
+| AXON | 5 | 11.2 | 0.00 | 7.0 | +37.9 | 0 | 0 | 7.0 |  |
+| BSX | 5 | 39.6 | 0.00 | 7.0 | +3.8 | 0 | 1 | 8.0 |  |
+| TYL | 5 | 23.0 | 0.00 | 7.0 | +3.3 | 0 | 1 | 8.0 |  |
+| DDOG | 5 | 38.1 | 0.00 | 7.0 | +15.2 | 0 | 1 | 8.0 |  |
+| RDDT | 5 | — | 0.00 | 3.5 | +23.7 | 0 | 1 | 4.5 | A niepoliczalne (ujemny/zerowy start lub brak danych) -- neutralnie |
+| CVNA | 5 | — | 0.00 | 3.5 | +122.4 | 0 | 1 | 4.5 | A niepoliczalne (ujemny/zerowy start lub brak danych) -- neutralnie |
+| MU | 8 | — | 0.06 | 3.5 | +4.6 | 0 | 1 | 4.5 | A niepoliczalne (ujemny/zerowy start lub brak danych) -- neutralnie |
+| FSLR | 5 | — | 0.00 | 3.5 | +0.9 | 0 | 1 | 4.5 | A niepoliczalne (ujemny/zerowy start lub brak danych) -- neutralnie |

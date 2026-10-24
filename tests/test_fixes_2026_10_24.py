@@ -363,3 +363,84 @@ def test_live_scan_without_preferred_traces_keeps_fmp_dividends(tmp_path, monkey
     values = [r[0] for r in connect(db).execute(
         "SELECT value FROM fundamentals_raw WHERE line_item = 'dividends_paid' ORDER BY period_end_date")]
     assert values == [10.0, 12.0] and dq["dividend_checks"] == {}
+
+
+# --- Kwalifikacja (decyzje 1, 3, 4, 5) -- moduł niepodłączony do skanu -------------------
+
+from buffett_scanner import qualification as q  # noqa: E402
+
+
+def _p(fy, *, ocf=100.0, capex=10.0, ni=50.0, ebitda=80.0, debt=50.0, cash=20.0):
+    return make_period(f"FY{fy}", operating_cash_flow=ocf, capital_expenditure=capex, net_income=ni, ebitda=ebitda,
+                       total_debt=debt, cash_and_equivalents=cash, revenue=500.0)
+
+
+def _three(**last):
+    return [_p(2023), _p(2024), _p(2025, **last)]
+
+
+def test_core_solvency_passes_and_dcf_needs_mos():
+    kw = dict(sic="3571", leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    assert q.qualify(group="Z_DCF", periods=_three(), margin_of_safety_base_pct=12.0, **kw).status == q.QUALIFIED
+    assert q.qualify(group="Z_DCF", periods=_three(), margin_of_safety_base_pct=0.0, **kw).status == q.QUALIFIED
+    not_cheap = q.qualify(group="Z_DCF", periods=_three(), margin_of_safety_base_pct=-0.1, **kw)
+    assert not_cheap.status == q.NOT_QUALIFIED and "MoS BASE" in not_cheap.reasons[0]
+
+
+def test_company_without_dcf_is_qualitative_only_with_explicit_label():
+    r = q.qualify(group="BEZ_DCF", periods=_three(), margin_of_safety_base_pct=None, sic="7372",
+                  leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    assert r.status == q.QUALIFIED_NO_PRICE and r.label == "jakość bez potwierdzonej ceny"
+
+
+def test_negative_ebitda_with_debt_goes_to_manual_review_not_silent_rejection():
+    """F 2025: EBITDA ujemna przez odpisy, przepływ operacyjny 21 mld."""
+    r = q.qualify(group="Z_DCF", periods=_three(ebitda=-4.58, debt=167.6, cash=23.4), margin_of_safety_base_pct=63.0,
+                  sic="3711", leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    assert r.status == q.MANUAL_REVIEW
+    assert "dług netto przy EBITDA <= 0" in r.reasons and any("odpisy" in x for x in r.reasons)
+
+
+def test_negative_fcf_with_profits_goes_to_manual_review():
+    periods = [_p(2023, ocf=-5.3, capex=2.4), _p(2024, ocf=-2.5, capex=2.6), _p(2025, ocf=4.2, capex=3.0)]
+    r = q.qualify(group="BEZ_DCF", periods=periods, margin_of_safety_base_pct=None, sic="4911",
+                  leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    assert r.status == q.MANUAL_REVIEW and any("klasyfikacji przepływów" in x for x in r.reasons)
+
+
+def test_negative_fcf_from_heavy_capex_is_a_separate_review_reason():
+    periods = [_p(2023, ocf=10.0, capex=15.0), _p(2024, ocf=12.0, capex=20.0), _p(2025, ocf=14.0, capex=30.0)]
+    r = q.qualify(group="BEZ_DCF", periods=periods, margin_of_safety_base_pct=None, sic="4931",
+                  leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    assert r.status == q.MANUAL_REVIEW and any("CAPEX > przepływ operacyjny" in x for x in r.reasons)
+
+
+def test_ordinary_failures_are_not_qualified_with_reasons():
+    r = q.qualify(group="Z_DCF", periods=_three(debt=500.0, cash=10.0), margin_of_safety_base_pct=80.0,
+                  sic="3714", leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    assert r.status == q.NOT_QUALIFIED and r.reasons == ["dług netto/EBITDA 6.12 > 2"]
+    losses = [_p(2023, ni=-1.0), _p(2024, ni=-2.0), _p(2025, ni=11.0)]
+    r = q.qualify(group="Z_DCF", periods=losses, margin_of_safety_base_pct=70.0, sic="3572",
+                  leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    assert r.reasons == ["zysk netto > 0 w mniej niż 2 z 3 lat"]
+
+
+def test_financial_services_and_real_estate_failures_go_to_manual_review():
+    kw = dict(margin_of_safety_base_pct=None, leverage_threshold=2.0, min_margin_of_safety_pct=0.0)
+    ares = q.qualify(group="BEZ_DCF", periods=_three(debt=500.0, cash=10.0), sic="6282", **kw)
+    cbre = q.qualify(group="Z_DCF", periods=_three(debt=500.0, cash=10.0), sic="6500", **kw)
+    assert ares.status == q.MANUAL_REVIEW and any("usługi finansowe" in x for x in ares.reasons)
+    assert cbre.status == q.MANUAL_REVIEW and any("SIC 6500" in x for x in cbre.reasons)
+
+
+def test_groups_without_method_or_with_incomplete_data_are_never_qualified():
+    kw = dict(periods=_three(), margin_of_safety_base_pct=90.0, sic="6311", leverage_threshold=2.0,
+              min_margin_of_safety_pct=0.0)
+    assert q.qualify(group="BEZ_METODY", **kw).status == q.NO_METHOD
+    assert q.qualify(group="NIEKOMPLETNE", **kw).status == q.INCOMPLETE
+
+
+def test_call_limit_stops_instead_of_truncating():
+    assert q.worst_case_calls(45, 2) == 135
+    assert q.within_call_limit(25, max_calls=75, max_repair_attempts=2)
+    assert not q.within_call_limit(26, max_calls=75, max_repair_attempts=2)
