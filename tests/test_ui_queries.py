@@ -536,3 +536,50 @@ def test_finalist_rank_key_matches_live_report_rule():
     keys = sorted([_finalist_rank_key(partial), _finalist_rank_key(complete_low), _finalist_rank_key(complete_high)])
     assert keys == [(0, -80.0), (0, -60.0), (1, -69.0)]
     assert _finalist_rank_key(None) is None
+
+
+def _seed_scores(conn, run_id: str, total_scores: dict[str, float]) -> None:
+    """Shortlista z kompletnymi analizami o podanych pełnych wynikach."""
+    upsert_scoring_model_version(conn, version="v1", description="test", weights_json="{}", gates_json="{}")
+    insert_live_scan_run(
+        conn, run_id=run_id, run_date="2026-10-06", config_version="v1", universe_size=500,
+        decline_surfaced=150, prefilter_excluded=0, shortlist_limit=20, shortlist_size=len(total_scores),
+    )
+    for i, (ticker, total) in enumerate(total_scores.items(), start=1):
+        cik = f"{i:010d}"
+        upsert_company(conn, cik=cik, name=ticker)
+        insert_live_scan_candidate(
+            conn, run_id=run_id, cik=cik, ticker=ticker, rank=i, current_price=100.0,
+            decline_flags={"daily_decline": True}, deterministic_score_pct=90.0, deterministic_partial_score=40.0,
+            available_components=("safety",), missing_components=(), safety_score=15.0, valuation_score=20.0,
+            dividend_score=10.0, margin_of_safety_base_pct=30.0, hard_gate_passed_deterministic=True,
+            hard_gate_triggered_deterministic=(), in_shortlist=True,
+        )
+        analysis_id = insert_analysis(
+            conn, cik=cik, run_date="2026-10-06", price_at_analysis=100.0, scoring_model_version="v1",
+            total_score=total, llm_raw_output=json.dumps(_make_analysis_output(ticker=ticker)),
+        )
+        conn.execute("UPDATE live_scan_candidates SET llm_status='COMPLETE', analysis_id=? WHERE cik=?",
+                     (analysis_id, cik))
+    conn.commit()
+
+
+def test_top5_marks_ties_and_keeps_6_10_selection(conn):
+    """Wybór TOP 5 jak 6.10 (pięć najwyższych pełnych wyników); równy wynik
+    = ta sama pozycja z „=” (6.10: DECK i INTU, 79,59, pokazane jako 3 i 4)."""
+    from buffett_scanner.ui.queries import top5_label
+
+    _seed_scores(conn, "live-scan-x", {"CBOE": 81.1, "PAYX": 79.9, "DECK": 79.6, "INTU": 79.6,
+                                       "ACN": 78.8, "QCOM": 76.1, "APP": 73.4})
+    rows = {r["ticker"]: r for r in get_synthesis_rows(conn, "live-scan-x")}
+    assert {t: top5_label(r) for t, r in rows.items()} == {
+        "CBOE": "★ 1", "PAYX": "★ 2", "DECK": "★ 3=", "INTU": "★ 3=", "ACN": "★ 5", "QCOM": "", "APP": "",
+    }
+    assert rows["CBOE"]["top5_boundary_tie"] == []
+
+
+def test_top5_boundary_tie_is_reported_not_silently_cut(conn):
+    _seed_scores(conn, "live-scan-x", {"A": 90.0, "B": 85.0, "C": 80.0, "D": 75.0, "E": 70.0, "F": 70.0})
+    rows = {r["ticker"]: r for r in get_synthesis_rows(conn, "live-scan-x")}
+    assert sum(1 for r in rows.values() if r["finalist_position"]) == 5  # wybór bez zmian
+    assert rows["A"]["top5_boundary_tie"] == ["F"]

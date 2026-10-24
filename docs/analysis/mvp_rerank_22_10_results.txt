@@ -1,0 +1,19 @@
+== zapisany 22.10 (mechanizm 6.10): rankingowanych 162, shortlista 24
+   APP(1=:100.0), DECK(1=:100.0), INTU(1=:100.0), PODD(1=:100.0), TPR(1=:100.0), DXCM(6:99.6), QCOM(7:96.9), MU(8=:95.6), SNDK(8=:95.6), XYL(10:95.3), ADBE(11=:93.8), BKNG(11=:93.8), LDOS(11=:93.8), PNR(14:93.0), APO(15=:89.3), EXE(15=:89.3), CEG(17=:88.8), NFLX(17=:88.8), UBER(17=:88.8), APTV(20=:87.5), EME(20=:87.5), FISV(20=:87.5), HII(20=:87.5), JBL(20=:87.5)
+== obecny kod, profile GENERAL: rankingowanych 162, shortlista 24
+   APP(1=:100.0), DECK(1=:100.0), INTU(1=:100.0), PODD(1=:100.0), TPR(1=:100.0), DXCM(6:99.6), QCOM(7:96.9), MU(8=:95.6), SNDK(8=:95.6), XYL(10:95.3), ADBE(11=:93.8), BKNG(11=:93.8), LDOS(11=:93.8), PNR(14:93.0), APO(15=:89.3), EXE(15=:89.3), CEG(17=:88.8), NFLX(17=:88.8), UBER(17=:88.8), APTV(20=:87.5), EME(20=:87.5), FISV(20=:87.5), HII(20=:87.5), JBL(20=:87.5)
+== obecny kod, profile SIC: rankingowanych 162, shortlista 20
+   APP(1=:100.0), DECK(1=:100.0), GL(1=:100.0), INTU(1=:100.0), PODD(1=:100.0), TPR(1=:100.0), DXCM(7:99.6), QCOM(8:96.9), MU(9=:95.6), SNDK(9=:95.6), XYL(11:95.3), ADBE(12=:93.8), BKNG(12=:93.8), LDOS(12=:93.8), PNR(15:93.0), APO(16=:89.3), EXE(16=:89.3), CEG(18=:88.8), NFLX(18=:88.8), UBER(18=:88.8)
+-- dźwignia (GENERAL): wypadają [], wchodzą []
+-- dźwignia + SIC: wypadają ['APTV', 'EME', 'FISV', 'HII', 'JBL'], wchodzą ['GL']
+Zmiana wyniku przez samą dźwignię: {'F': (80.8, 74.6), 'CVNA': (68.8, 57.5), 'IP': (50.2, 39.0), 'ECHO': (35.2, 24.0), 'SKYD': (28.1, 21.8)}
+Profile inne niż GENERAL: {'ARE': 'REIT', 'GL': 'INSURER', 'WY': 'REIT'}
+Pozycje spółek z profilem innym niż GENERAL (SIC): {'ARE': (61, 70.0), 'GL': (1, 100.0), 'WY': (142, 38.8)}
+CAPEX = 0 w danych FMP (weryfikacja SEC w skanie): ['APO', 'ARE', 'COIN']
+  w tym na shortliście (SIC): ['APO']
+
+== wariant APO_CAPEX_NULL=1
+== obecny kod, profile SIC: rankingowanych 162, shortlista 24
+   APP(1=:100.0), DECK(1=:100.0), GL(1=:100.0), INTU(1=:100.0), PODD(1=:100.0), TPR(1=:100.0), DXCM(7:99.6), QCOM(8:96.9), MU(9=:95.6), SNDK(9=:95.6), XYL(11:95.3), ADBE(12=:93.8), BKNG(12=:93.8), LDOS(12=:93.8), PNR(15:93.0), EXE(16:89.3), CEG(17=:88.8), NFLX(17=:88.8), UBER(17=:88.8), APTV(20=:87.5), EME(20=:87.5), FISV(20=:87.5), HII(20=:87.5), JBL(20=:87.5)
+-- dźwignia (GENERAL): wypadają ['APO'], wchodzą []
+-- dźwignia + SIC: wypadają ['APO'], wchodzą ['GL']

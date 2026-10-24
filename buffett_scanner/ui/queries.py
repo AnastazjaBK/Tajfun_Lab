@@ -120,14 +120,33 @@ def get_synthesis_rows(scanner_conn: sqlite3.Connection, run_id: str) -> list[di
             "llm_error": row["llm_error"],
             "analysis_id": row["analysis_id"],
         })
-    for rank, r in enumerate(sorted(
-        (r for r in result if r["finalist_rank_key"] is not None), key=lambda r: r["finalist_rank_key"],
-    )[:FINALIST_LIMIT], start=1):
-        r["finalist_position"] = rank
+    # Wybór TOP 5 bez zmian (pierwsze FINALIST_LIMIT wg klucza, jak raport
+    # 6.10); pozycje z remisami (1, 2, 3, 3, 5) jak w rankingu TOP 20 --
+    # równy wynik nie dostaje różnych pozycji.
+    ordered = sorted((r for r in result if r["finalist_rank_key"] is not None), key=lambda r: r["finalist_rank_key"])
+    top = ordered[:FINALIST_LIMIT]
+    for i, r in enumerate(top):
+        tied_before = i and r["finalist_rank_key"] == top[i - 1]["finalist_rank_key"]
+        r["finalist_position"] = top[i - 1]["finalist_position"] if tied_before else i + 1
+    for r in top:
+        r["finalist_tied"] = sum(1 for o in ordered if o["finalist_rank_key"] == r["finalist_rank_key"]) > 1
+    # Remis na granicy TOP 5: spółka spoza piątki z wynikiem równym piątej --
+    # reguła wyboru jej nie obejmuje, więc jest jawnie wskazana.
+    boundary = [o["ticker"] for o in ordered[FINALIST_LIMIT:]
+                if len(top) == FINALIST_LIMIT and o["finalist_rank_key"] == top[-1]["finalist_rank_key"]]
     for r in result:
         r.setdefault("finalist_position", None)
+        r.setdefault("finalist_tied", False)
+        r["top5_boundary_tie"] = boundary
         r.pop("finalist_rank_key")
     return result
+
+
+def top5_label(row: dict) -> str:
+    """Oznaczenie TOP 5 w tabeli TOP 20: „★ 3” albo „★ 3=” przy remisie."""
+    if not row["finalist_position"]:
+        return ""
+    return f"★ {row['finalist_position']}{'=' if row['finalist_tied'] else ''}"
 
 
 # Faza 11 (P2): finaliści = ta sama reguła co raport live-scanu

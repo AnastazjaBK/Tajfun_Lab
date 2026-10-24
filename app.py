@@ -169,6 +169,7 @@ from buffett_scanner.ui.queries import (
     get_synthesis_rows,
     get_user_positions_with_summaries,
     is_instrument_confirmed,
+    top5_label,
 )
 from buffett_scanner.ui.scanner_snapshot import SnapshotUnavailableError, ensure_local_snapshot
 
@@ -455,7 +456,7 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
     table_data = [
         {
             "Ticker": r["ticker"],
-            "Finalista": f"★ {r['finalist_position']}" if r["finalist_position"] else "",
+            "TOP 5": top5_label(r),
             "Spółka": r["company_name"],
             "Cena": r["current_price"],
             "Dlaczego spadła": decline_flags_label(r["triggered_decline_flags"]),
@@ -474,7 +475,11 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
         for r in rows
     ]
     _show_table(_name_first(table_data))
-    st.caption("★ = finaliści skanu (pierwsza piątka raportu wg pełnego wyniku).")
+    st.caption("★ TOP 5 = pierwsza piątka w ramach TOP 20 wg pełnego wyniku po analizie jakościowej "
+               "(„=” — równy wynik).")
+    if rows[0]["top5_boundary_tie"]:
+        st.warning("Remis na granicy TOP 5: " + ", ".join(rows[0]["top5_boundary_tie"])
+                   + " ma ten sam pełny wynik co piąta spółka, ale nie jest oznaczona ★.")
     st.caption(
         "Punkty deterministyczne = punkty zdobyte / maksimum komponentów, które dało się policzyć bez "
         "analizy jakościowej; pełna skala wyniku to 100 pkt. 45/45 nie oznacza 100/100 — brakujące "
@@ -531,7 +536,7 @@ def _render_top20_dividends(portfolio_conn, run, rows: list[dict]) -> None:
                 notes.append(f"wypłaty specjalne w 12 mies.: {metrics.ttm_special:.2f} USD (poza yieldem)")
         table_rows.append({
             "Ticker": r["ticker"],
-            "Finalista": f"★ {r['finalist_position']}" if r["finalist_position"] else "",
+            "TOP 5": top5_label(r),
             "Spółka": r["company_name"], **cells, "Uwagi": "; ".join(notes),
         })
     _show_table(_name_first(table_rows))
@@ -767,7 +772,7 @@ def _render_top20_price_changes(scanner_conn, portfolio_conn, run, rows: list[di
             notes.append(note)
         table_rows.append({
             "Ticker": r["ticker"],
-            "Finalista": f"★ {r['finalist_position']}" if r["finalist_position"] else "",
+            "TOP 5": top5_label(r),
             "Spółka": r["company_name"], **cells, "Uwagi": "; ".join(notes),
         })
         signs.append(sign)

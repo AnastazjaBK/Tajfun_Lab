@@ -1,0 +1,554 @@
+{
+ "_source": {
+  "2026-10-06": "live-scan-2026-10-06T083825543395Z",
+  "2026-10-22": "live-scan-2026-10-22T202049554465Z"
+ },
+ "2026-10-06/APP": {
+  "ticker": "APP",
+  "schema_version": "1.0",
+  "business_understandability": {
+   "score": 4,
+   "max_score": 7,
+   "confidence": "MEDIUM",
+   "reasoning": "AppLovin's core model — an AI-driven ad-tech auction platform (AXON) matching advertisers with ad inventory and taking a transaction cut — is conceptually explainable at a high level, but the underlying algorithmic 'black box' mechanics are not independently verifiable from the filings alone. The 2024 divestiture of the legacy mobile apps/games business (referenced in src-4) also means the current pure-play ad-tech model has a short public track record, adding to the difficulty of fully understanding long-term unit economics from the documents available."
+  },
+  "moat": {
+   "score": 7,
+   "max_score": 12,
+   "confidence": "MEDIUM",
+   "evidence": [
+    "Extremely high FCF margin (71.9%) and 70% YoY revenue growth suggest meaningful pricing power and/or data/scale advantages relative to typical ad-tech peers.",
+    "Very low net debt/EBITDA (0.24) and strong current ratio (3.32) indicate the business generates more cash than it needs for operations, consistent with a capital-light, high-margin platform model.",
+    "Switching costs for advertisers integrated into the AXON/MAX mediation stack could create some retention advantage, though this is inferred rather than directly evidenced in the cited filings."
+   ],
+   "counterarguments": [
+    "Ad-tech is a highly competitive space (Google, Meta, Unity, The Trade Desk, etc.) and algorithmic advantages can erode as competitors invest in similar AI-driven targeting.",
+    "The business is structurally dependent on third-party platform policies (Apple ATT, Google Play rules) that are outside management's control and could materially impair targeting/data advantages.",
+    "The recent strategic pivot away from the legacy apps business (per src-4) limits the historical track record available to judge whether current growth/margins reflect a durable moat versus a temporary favorable cycle.",
+    "Public allegations by short sellers regarding data-scraping and ad-attribution practices exist in broader market discourse; these are not corroborated or addressed by the specific filings available for citation here, so their impact on moat durability cannot be assessed from this source set."
+   ]
+  },
+  "financial_quality_commentary": {
+   "confidence": "MEDIUM",
+   "reasoning": "The deterministic figures — 71.9% FCF margin, 0.24x net debt/EBITDA, 3.32x current ratio, and 70% revenue growth — paint an unusually strong financial picture. However, such an outlier FCF margin combined with very high growth warrants scrutiny of revenue quality, stock-based compensation add-backs, and comparability across periods given the 2024 divestiture of the apps/games segment (src-4). The provided indicators do not include SBC levels, customer concentration, or segment-level detail, which are needed to confirm the GAAP-to-FCF quality of these metrics; confidence is therefore capped at MEDIUM despite the strong headline numbers."
+  },
+  "management_capital_allocation": {
+   "score": 6,
+   "max_score": 10,
+   "confidence": "MEDIUM",
+   "evidence": [
+    "Very low leverage (net debt/EBITDA 0.24) suggests disciplined balance sheet management and limited reliance on debt financing.",
+    "The 2024 divestiture of the legacy apps/games business (per src-4, src-3) reflects a willingness by management to reallocate capital and focus toward the higher-margin advertising platform business."
+   ]
+  },
+  "fear_analysis": {
+   "classification": "UNCERTAIN",
+   "confidence": "LOW",
+   "trigger": "No specific price-decline catalyst or market event is identifiable from the four SEC filings provided; these are routine periodic reports (10-K/10-Q) rather than market commentary.",
+   "reasoning": "Broader market discourse around AppLovin has included short-seller allegations concerning ad-attribution/data-scraping practices, but these are not part of the cited source set and cannot be verified or incorporated into this analysis without fabricating citations. Without an identifiable, sourced trigger for any fear/price weakness, it is not possible to responsibly classify the situation as TEMPORARY or STRUCTURAL; this should be treated as an open question pending review of market-specific sources (analyst reports, short-seller reports, price/volume history) not available here."
+  },
+  "dividend_trap_alert": {
+   "triggered": false,
+   "reasoning": "No dividend payment history or policy is evident from the provided indicators or filings; AppLovin does not appear to be a dividend-paying company based on the available data, so a dividend trap assessment is not applicable."
+  },
+  "bull_case": [
+   "Extremely high FCF margin (71.9%) combined with 70% YoY revenue growth indicates a highly efficient, capital-light business model with strong operating leverage.",
+   "Very low leverage (net debt/EBITDA 0.24) and strong liquidity (current ratio 3.32) provide significant balance sheet flexibility and reduce financial distress risk.",
+   "Strategic refocus on the core ad-tech/advertising platform via the 2024 divestiture of the lower-margin apps/games business (src-4, src-3) simplifies the business and concentrates capital in a higher-margin segment.",
+   "Scale of the advertiser/publisher network combined with the AXON AI engine could create data-driven network effects that are difficult for smaller competitors to replicate quickly."
+  ],
+  "bear_case": [
+   "A 70% YoY revenue growth rate paired with a 72% FCF margin is an outlier combination that historically invites scrutiny of revenue quality, stock-based compensation add-backs, and capitalization policy — the filings cited here do not provide enough granularity (customer concentration, SBC trends, cohort data) to rule out that these figures are being flattered by non-recurring or non-cash items.",
+   "AppLovin's ad-tech model is structurally exposed to third-party platform policy risk (Apple ATT, Google Play changes); any tightening of tracking/privacy rules could materially impair the data advantages underlying the AXON engine, and this risk is largely outside management's control.",
+   "The 2024 divestiture of the apps/games segment means current growth and margin figures are not fully comparable to prior periods, and the 'pure-play' ad-tech business has only a short public track record, making it hard to confirm the moat is durable rather than a temporary post-restructuring boost.",
+   "Broader market discourse (outside the cited filings) has included short-seller allegations about data-scraping and ad-attribution practices; even if ultimately unsubstantiated, such allegations can create ongoing regulatory and reputational overhang that is not reflected in the clean financial ratios provided."
+  ],
+  "why_market_may_be_right": [
+   "If the market has discounted AppLovin due to concerns about platform dependency (Apple/Google policy risk), customer concentration, or the sustainability of a 70%+ growth rate against a smaller post-divestiture revenue base, that caution could be rational rather than a mispricing — ad-tech businesses have historically experienced boom-bust cycles tied to advertiser budgets and platform rule changes.",
+   "Extremely high FCF margins may reflect a temporary post-divestiture cost structure or deferred reinvestment (R&D, capex); if so, the market may be correctly anticipating margin normalization as competition intensifies or reinvestment needs increase, rather than mispricing a permanently elevated margin profile."
+  ],
+  "biggest_unknown": "",
+  "thesis_invalidation": [],
+  "why_this_may_not_be_a_bargain": [
+   "The provided indicators (low leverage, very high FCF margin, high growth) all look exceptionally strong, which could mean the business is already fully or over-valued by the market rather than undervalued — no valuation multiple (P/E, EV/FCF, EV/EBITDA) is included in the deterministic data, so it is impossible from this data alone to confirm an actual margin of safety exists.",
+   "Without visibility into stock-based compensation levels, dilution, customer/advertiser concentration, and the quality of revenue recognition, the apparent 'cheapness' implied by strong ratios could be illusory once adjusted for these factors, which are not disclosed in the deterministic metrics provided."
+  ],
+  "verification_items": [
+   {
+    "source_id": "src-3",
+    "document": "10-K FY2025",
+    "section": "Risk Factors",
+    "page": null,
+    "reason": "Need to confirm disclosed customer/advertiser concentration and dependency on Apple/Google platform policies underlying the moat assessment.",
+    "question": "What percentage of revenue is concentrated in top advertisers/publishers, and what specific platform-policy risks (e.g., Apple ATT, Google Play) are disclosed?"
+   },
+   {
+    "source_id": "src-3",
+    "document": "10-K FY2025",
+    "section": "Management's Discussion and Analysis / Capital Resources",
+    "page": null,
+    "reason": "Confirm details on debt structure, buyback activity, and stock-based compensation trends underlying the reported net debt/EBITDA and FCF margin figures.",
+    "question": "What is the current debt maturity schedule, share buyback pricing/volume, and stock-based compensation as a percentage of revenue?"
+   },
+   {
+    "source_id": "src-4",
+    "document": "10-K FY2024",
+    "section": "Business Overview / Divestitures",
+    "page": null,
+    "reason": "Confirm the timing and financial impact of the 2024 divestiture of the Apps/games business to assess comparability of current growth and margin metrics.",
+    "question": "What were the exact timing, proceeds, and revenue/EBITDA contribution removed by the Apps business divestiture?"
+   },
+   {
+    "source_id": "src-1",
+    "document": "10-Q Q2 2026",
+    "section": "Financial Statements / Notes",
+    "page": null,
+    "reason": "Verify the most recent quarter's revenue growth drivers to confirm whether growth is organic to the core ad-tech business or includes residual legacy-segment effects.",
+    "question": "What are the disclosed segment revenue breakdowns and YoY growth drivers in the latest 10-Q?"
+   }
+  ],
+  "cited_source_ids": [
+   "src-1",
+   "src-2",
+   "src-3",
+   "src-4"
+  ],
+  "hard_flag_candidates": []
+ },
+ "2026-10-06/CTVA": {
+  "ticker": "CTVA",
+  "schema_version": "1.0",
+  "business_understandability": {
+   "score": 5,
+   "max_score": 7,
+   "confidence": "MEDIUM",
+   "reasoning": "Corteva działa w dwóch głównych segmentach: Nasiona (Seed) i Ochrona Upraw (Crop Protection), model biznesowy oparty na sprzedaży nasion modyfikowanych genetycznie, środków ochrony roślin i usług agronomicznych. Model przychodów jest zrozumiały na poziomie ogólnym, ale pełna ocena wymaga znajomości cykli cen surowców rolnych, regulacji GMO/pestycydów oraz dynamiki konkurencyjnej (Bayer, Syngenta, BASF, producenci generyczni), co podnosi złożoność analizy. Segmentowe ujawnienia w 10-K/10-Q (src-3, src-4) mogą pozwolić na głębsze zrozumienie struktury przychodów, ale nie przeanalizowałem ich pełnej treści, co ogranicza pewność oceny."
+  },
+  "moat": {
+   "score": 8,
+   "max_score": 12,
+   "confidence": "MEDIUM",
+   "evidence": [
+    "Portfel opatentowanych technologii nasiennych i marek (np. Pioneer, Brevant) generuje wysokie koszty zmiany dostawcy dla rolników między sezonami uprawowymi",
+    "Rejestracje regulacyjne produktów ochrony roślin w wielu jurysdykcjach stanowią barierę wejścia dla nowych konkurentów",
+    "Rozbudowana sieć dystrybucji i wieloletnie relacje z rolnikami (dziedzictwo DuPont/Dow) trudne do odtworzenia przez nowych graczy"
+   ],
+   "counterarguments": [
+    "Segment Crop Protection podlega presji cenowej ze strony generycznych producentów (w tym chińskich) po wygaśnięciu patentów",
+    "Produkty biotechnologiczne wymagają ciągłych nakładów R&D, by utrzymać przewagę - brak gwarancji trwałości moatu w czasie",
+    "Ryzyko regulacyjne (zakazy/ograniczenia pestycydów w UE i innych jurysdykcjach) może strukturalnie erodować wartość portfela produktów",
+    "Nie przeanalizowałem w pełni treści dokumentów źródłowych (src-1 do src-4) pod kątem konkretnych danych o udziałach rynkowych - ocena opiera się częściowo na wiedzy branżowej ogólnej, nie na zweryfikowanych cytatach"
+   ]
+  },
+  "financial_quality_commentary": {
+   "confidence": "MEDIUM",
+   "reasoning": "Wskaźniki deterministyczne sugerują solidną jakość bilansu: net_debt_to_ebitda ujemne (-0.63x) wskazuje na pozycję gotówkową netto, current_ratio 1.43 sugeruje komfortową płynność krótkoterminową, fcf_margin_pct ~16.2% jest przyzwoitym poziomem konwersji przychodów na gotówkę dla spółki agrochemicznej. Jednocześnie revenue_yoy_growth_pct ~2.9% wskazuje na bardzo umiarkowany wzrost, co może odzwierciedlać presję cenową w cyklu rolnym (spadające ceny surowców rolnych od 2023) lub dojrzałość rynku. Bez wglądu w szczegółowe dane segmentowe z 10-K/10-Q (src-3, src-4) nie mogę ocenić trwałości marż ani jakości zysków (np. udział pozycji jednorazowych, rezerw na spory sądowe)."
+  },
+  "management_capital_allocation": {
+   "score": 6,
+   "max_score": 10,
+   "confidence": "LOW",
+   "evidence": [
+    "Brak w mojej analizie szczegółowych danych o historii buybacków/dywidend/alokacji kapitału z cytowanych dokumentów - ocena oparta na ogólnej wiedzy branżowej, nie na zweryfikowanych źródłach",
+    "Pozycja net cash (ujemny net_debt_to_ebitda) sugeruje konserwatywne podejście do dźwigni finansowej, co jest pozytywnym sygnałem dyscypliny kapitałowej, ale nie potwierdza jakości decyzji alokacyjnych zarządu bez dalszej weryfikacji"
+   ]
+  },
+  "fear_analysis": {
+   "classification": "UNCERTAIN",
+   "confidence": "MEDIUM",
+   "trigger": "Prawdopodobny spadek wyceny rynkowej związany z cyklicznym spadkiem cen surowców rolnych (kukurydza, soja) od 2023 r., co przekłada się na niższy popyt na nasiona i środki ochrony roślin, destocking kanału dystrybucji oraz presję konkurencyjną ze strony tańszych środków generycznych.",
+   "reasoning": "Revenue_yoy_growth_pct na poziomie zaledwie ~2.9% przy jednoczesnym utrzymaniu zdrowej marży FCF sugeruje, że spowolnienie wzrostu ma bardziej charakter cykliczny (ceny surowców rolnych) niż strukturalny (utrata przewagi konkurencyjnej). Jednak bez analizy pełnej treści 10-K/10-Q (src-1 do src-4) pod kątem komentarza zarządu o trendach rynkowych nie mogę z wysoką pewnością odróżnić obaw przejściowych od strukturalnych (np. trwała erozja marż Crop Protection wskutek konkurencji generycznej lub regulacji). Klasyfikuję jako UNCERTAIN do czasu weryfikacji szczegółowych ujawnień."
+  },
+  "dividend_trap_alert": {
+   "triggered": false,
+   "reasoning": "fcf_ttm (2.815 mld USD) oraz fcf_margin_pct (~16.2%) przy ujemnym net_debt_to_ebitda (pozycja gotówkowa netto) nie wskazują na oznaki pułapki dywidendowej - spółka generuje wystarczający FCF do pokrycia zobowiązań bez nadmiernego zadłużania się. Nie mam jednak dostępu do konkretnej wysokości dywidendy, historii jej wzrostu ani payout ratio z cytowanych dokumentów, więc ocena jest wstępna i wymaga weryfikacji w 10-K (src-3)."
+  },
+  "bull_case": [
+   "Pozycja gotówkowa netto (net_debt_to_ebitda ujemne) daje spółce elastyczność finansową do inwestycji w R&D, akwizycji lub zwrotu kapitału akcjonariuszom bez ryzyka nadmiernej dźwigni finansowej",
+   "Solidna marża FCF (~16.2%) przy umiarkowanym wzroście przychodów sugeruje efektywną konwersję sprzedaży na gotówkę, co jest cechą dojrzałego biznesu",
+   "Pozycja w sektorze agrochemii/nasiennictwa z wysokimi barierami regulacyjnymi (rejestracje produktów) i patentami daje potencjalnie trwałą przewagę konkurencyjną wobec nowych wejść na rynek",
+   "Current ratio 1.43 wskazuje na komfortową płynność krótkoterminową, ograniczającą ryzyko problemów z obsługą zobowiązań bieżących w okresie cyklicznego spowolnienia"
+  ],
+  "bear_case": [
+   "Wzrost przychodów na poziomie zaledwie ~2.9% r/r sugeruje, że spółka może znajdować się w fazie dojrzałości lub cyklicznego spowolnienia popytu, co ogranicza potencjał do wielokrotnej ekspansji wyceny",
+   "Segment Crop Protection historycznie narażony jest na silną presję cenową ze strony generycznych producentów (w tym chińskich), co może strukturalnie erodować marże niezależnie od jakości zarządzania",
+   "Branża agrochemiczna podlega rosnącej presji regulacyjnej (ograniczenia/zakazy niektórych substancji czynnych w UE i innych jurysdykcjach), co stanowi ryzyko trwałej utraty części portfela produktowego - jest to ryzyko strukturalne dla całej branży, nie przejściowe",
+   "Bez dostępu do szczegółowych danych o rezerwach na spory sądowe (np. związane z pestycydami) z 10-K (src-3, src-4) nie można wykluczyć istotnych zobowiązań warunkowych, które mogłyby obniżyć realną wartość kapitału własnego",
+   "Cykliczność cen surowców rolnych (kukurydza, soja) bezpośrednio wpływa na popyt na produkty Corteva - w okresie niskich cen commodity rolnicy ograniczają wydatki na nasiona premium i środki ochrony roślin, co może przedłużyć obecne spowolnienie wzrostu"
+  ],
+  "why_market_may_be_right": [
+   "Jeśli rynek wycenia Corteva z dyskontem z powodu oczekiwanego przedłużającego się cyklu niskich cen surowców rolnych, może to być racjonalna reakcja na fundamentalnie słabszy popyt w najbliższych 2-3 latach, a nie błąd wyceny",
+   "Rosnąca presja regulacyjna na pestycydy w Europie i potencjalnie w innych regionach może uzasadniać niższy mnożnik wyceny dla segmentu Crop Protection ze względu na realne ryzyko utraty przychodów z kluczowych produktów",
+   "Konkurencja ze strony generycznych producentów środków ochrony roślin jest zjawiskiem strukturalnym w branży od lat i rynek może słusznie wyceniać trwałą presję na marże tego segmentu"
+  ],
+  "biggest_unknown": "",
+  "thesis_invalidation": [],
+  "why_this_may_not_be_a_bargain": [
+   "Pozornie atrakcyjne wskaźniki (FCF margin, brak zadłużenia netto) nie uwzględniają potencjalnych zobowiązań warunkowych związanych z litigacją w branży agrochemicznej, które mogą materializować się w przyszłości i obniżyć realną wartość kapitału",
+   "Niski wzrost przychodów (~2.9%) przy jednoczesnym braku dostępu do danych o trendach marż segmentowych oznacza, że obecna wycena może już w pełni odzwierciedlać ograniczony potencjał wzrostu, a nie oferować realny margines bezpieczeństwa",
+   "Brak możliwości weryfikacji trwałości moatu (udziały rynkowe, tempo utraty patentów) w mojej analizie oznacza, że 'jakość' biznesu może być przeszacowana, a domniemany margines bezpieczeństwa iluzoryczny"
+  ],
+  "verification_items": [],
+  "cited_source_ids": [],
+  "hard_flag_candidates": []
+ },
+ "2026-10-06/PAYX": {
+  "ticker": "PAYX",
+  "schema_version": "1.0",
+  "business_understandability": {
+   "score": 7,
+   "max_score": 7,
+   "confidence": "HIGH",
+   "reasoning": "Paychex to prosty do zrozumienia biznes: outsourcing płac (payroll), usługi HR, benefity i ubezpieczenia dla małych i średnich firm (SMB/mid-market) w USA. Model przychodów oparty na powtarzalnych, subskrypcyjnych opłatach jest łatwy do zamodelowania. Dodatkowym, mniej oczywistym elementem jest dochód z odsetek od środków klientów przetrzymywanych przed wypłatą (float income), co wprowadza wrażliwość na stopy procentowe — wciąż jednak mechanizm jest transparentny."
+  },
+  "moat": {
+   "score": 9,
+   "max_score": 12,
+   "confidence": "MEDIUM",
+   "evidence": [
+    "Wysokie koszty zmiany dostawcy (switching costs) — payroll i compliance podatkowe są głęboko wbudowane w procesy operacyjne klienta, co ogranicza rotację.",
+    "Przychody mają charakter powtarzalny i abonamentowy, co historycznie przekładało się na wysoką retencję klientów w tej branży.",
+    "Skala działania i regulacyjna złożoność (podatki stanowe/federalne, zgodność prawna) tworzą barierę wejścia dla mniejszych graczy.",
+    "Akwizycja Paycor (odzwierciedlona w podwyższonym wzroście przychodów r/r) sugeruje strategię konsolidacji segmentu mid-market, co może wzmacniać pozycję konkurencyjną."
+   ],
+   "counterarguments": [
+    "Rosnąca konkurencja ze strony nowocześniejszych, często tańszych platform HR-tech (Gusto, Rippling, Deel, Justworks), szczególnie atrakcyjnych dla młodszych firm i startupów, może z czasem erodować udziały rynkowe w segmencie SMB.",
+    "Część przewagi konkurencyjnej (float income) jest funkcją poziomu stóp procentowych, a nie trwałej przewagi operacyjnej — w środowisku spadających stóp ten element moatu słabnie.",
+    "Nie mam w dostarczonych źródłach konkretnych danych o retencji klientów, net revenue retention ani udziale rynkowym, które pozwoliłyby zweryfikować siłę moatu liczbowo — ocena opiera się na ogólnej wiedzy o modelu biznesowym, nie na cytowanych dokumentach."
+   ]
+  },
+  "financial_quality_commentary": {
+   "confidence": "MEDIUM",
+   "reasoning": "Wskaźniki wyglądają solidnie: marża FCF na poziomie 35,65% jest bardzo wysoka i typowa dla modelu asset-light z powtarzalnymi przychodami. Net debt/EBITDA ~1,16x to umiarkowany, bezpieczny poziom dźwigni. Current ratio 1,26 jest akceptowalny dla tego typu biznesu (część aktywów obrotowych to środki klientów w tranzycie). Niepokojący jest wzrost przychodów r/r na poziomie 16,9% — dla Paychex historycznie organiczny wzrost oscylował w okolicach jednocyfrowych wartości, więc tak wysoki wynik niemal na pewno jest w dużej mierze efektem akwizycji (prawdopodobnie Paycor), a nie czysto organicznego rozwoju. Bez rozbicia na wzrost organiczny vs. nieorganiczny nie można ocenić jakości tego wzrostu z wysoką pewnością."
+  },
+  "management_capital_allocation": {
+   "score": 7,
+   "max_score": 10,
+   "confidence": "MEDIUM",
+   "evidence": [
+    "Paychex ma długą historię regularnych wypłat dywidendy i programów buyback, co sugeruje dyscyplinę kapitałową.",
+    "Decyzja o przejęciu Paycor wskazuje na aktywną strategię M&A w celu ekspansji w segmencie mid-market — wymaga to jednak oceny ceny zapłaconej za akwizycję i jakości integracji, których nie mam w dostarczonych danych.",
+    "Brak w dostarczonych źródłach szczegółów o konkretnych wskaźnikach ROIC, payout ratio czy ocenie zarządu dot. kapitału zainwestowanego w Paycor — ocena jest więc częściowo oparta na ogólnej reputacji zarządu, a nie na zweryfikowanych liczbach z cytowanych dokumentów."
+   ]
+  },
+  "fear_analysis": {
+   "classification": "UNCERTAIN",
+   "confidence": "LOW",
+   "trigger": "Brak danych",
+   "reasoning": "W dostarczonych materiałach nie ma informacji o spadku ceny akcji, konkretnym katalizatorze negatywnym ani o sentymencie rynkowym wobec PAYX w analizowanym okresie. Nie mogę więc ocenić, czy ewentualny 'strach' rynku jest przejściowy, niepewny czy strukturalny — brakuje punktu odniesienia (np. wyceny, reakcji na wyniki kwartalne, komentarzy analityków)."
+  },
+  "dividend_trap_alert": {
+   "triggered": false,
+   "reasoning": "Dostępne wskaźniki (FCF TTM ~2,32 mld USD, marża FCF 35,65%) sugerują, że generowana gotówka powinna z nadwyżką pokrywać typowe dla Paychex wypłaty dywidendy, co obniża ryzyko pułapki dywidendowej. Nie mam jednak w dostarczonych danych konkretnego wskaźnika payout ratio ani historii ewentualnych cięć dywidendy, więc ocena ma charakter wstępny i powinna zostać zweryfikowana bezpośrednio w sprawozdaniach."
+  },
+  "bull_case": [
+   "Bardzo wysoka marża FCF (35,65%) wskazuje na kapitałowo lekki, wysoko rentowny model biznesowy.",
+   "Powtarzalne, abonamentowe przychody oraz wysokie koszty zmiany dostawcy sprzyjają stabilności cash flow w czasie.",
+   "Umiarkowana dźwignia finansowa (net debt/EBITDA ~1,16x) daje elastyczność do dalszych akwizycji lub zwrotu kapitału akcjonariuszom bez nadmiernego ryzyka bilansowego.",
+   "Akwizycja Paycor potencjalnie zwiększa penetrację w atrakcyjnym segmencie mid-market, gdzie Paychex historycznie miał mniejszy udział niż w mikro-SMB."
+  ],
+  "bear_case": [
+   "Zgłoszony wzrost przychodów r/r (16,9%) jest podejrzanie wysoki wobec historycznego organicznego tempa wzrostu Paychex (zwykle kilka-kilkanaście procent niżej) — silnie sugeruje to, że większość wzrostu pochodzi z akwizycji (Paycor), a nie z organicznej ekspansji, co jest istotnie innym (słabszym jakościowo) źródłem wzrostu niż organiczne zdobywanie klientów.",
+   "Część dochodów Paychex (float income z funduszy klientów) jest wrażliwa na poziom stóp procentowych — w scenariuszu obniżek stóp przez Fed, ten strumień dochodu może się istotnie skurczyć, co nie jest trwałą przewagą operacyjną, lecz cykliczną premią makroekonomiczną.",
+   "Rosnąca konkurencja ze strony nowszych, cyfrowo natywnych platform HR-tech (Gusto, Rippling, Deel) może z czasem wywierać presję cenową i erodować udziały rynkowe w najbardziej dynamicznie rosnącym segmencie małych firm.",
+   "Integracja dużej akwizycji (Paycor) niesie typowe ryzyka: koszty integracji, potencjalny odpływ klientów podczas migracji systemów, oraz ryzyko przepłacenia za wzrost, którego efektywność synergii trudno ocenić bez dalszych danych."
+  ],
+  "why_market_may_be_right": [
+   "Jeśli rynek wycenia PAYX z dyskontem, może to odzwierciedlać obawy o jakość wzrostu — rozróżnienie między wzrostem organicznym a nieorganicznym (z Paycor) jest kluczowe, a wysoki wzrost zagregowany może maskować spowolnienie w rdzeniu biznesu.",
+   "Środowisko stóp procentowych jest istotnym czynnikiem ryzyka dla float income Paychex; rynek może racjonalnie dyskontować przyszłe obniżki stóp jako czynnik obniżający rentowność segmentu nie-core.",
+   "Nasilająca się konkurencja w przestrzeni payroll/HR-tech jest realnym zjawiskiem strukturalnym, a nie tylko chwilowym szumem medialnym, więc ostrożniejsza wycena może być uzasadniona fundamentalnie, a nie wynikać z przesadnego pesymizmu."
+  ],
+  "biggest_unknown": "Nie mam dostępu do rozbicia wzrostu przychodów na komponent organiczny i nieorganiczny (efekt Paycor), do wskaźnika retencji klientów (client/revenue retention rate), do aktualnej wyceny rynkowej (P/E, EV/FCF) ani do historii zmian ceny akcji, która skłoniła do tej analizy. Bez tych danych nie można ocenić ani prawdziwej jakości wzrostu, ani tego, czy obecna cena faktycznie oferuje margines bezpieczeństwa.",
+  "thesis_invalidation": [
+   "Organiczny wzrost przychodów (ex-Paycor, ex-akwizycje) utrzymujący się poniżej 3-4% przez co najmniej 3 kolejne kwartały, wskazujący na strukturalne spowolnienie rdzenia biznesu.",
+   "Udokumentowany spadek wskaźnika retencji klientów (client retention rate) o więcej niż kilka punktów procentowych rok do roku w kolejnych raportach 10-K/10-Q.",
+   "Istotny spadek 'interest on funds held for clients' (float income) w wynikach kwartalnych bez kompensującego wzrostu opłat podstawowych, potwierdzający materializację ryzyka stopy procentowej.",
+   "Obniżenie przez zarząd prognoz (guidance) na kolejny rok fiskalny powiązane bezpośrednio z problemami integracyjnymi po akwizycji Paycor lub utratą dużych klientów enterprise."
+  ],
+  "why_this_may_not_be_a_bargain": [
+   "Brak w dostarczonych danych jakiegokolwiek wskaźnika wyceny (P/E, EV/EBITDA, EV/FCF) uniemożliwia stwierdzenie, czy cena akcji faktycznie oferuje margines bezpieczeństwa, czy wycena jest już w pełni adekwatna do ryzyka.",
+   "Wysoki, ale częściowo nieorganiczny wzrost przychodów (16,9% r/r) może sprawiać wrażenie 'taniej' spółki o wysokim wzroście, podczas gdy w rzeczywistości płaci się za wzrost nabyty drogo w drodze akwizycji, a nie za organiczną ekspansję — co jest złudnym marginesem bezpieczeństwa.",
+   "Spółki o silnym moatcie, takie jak Paychex, historycznie notowane są z premią wynikającą właśnie z jakości biznesu — jeśli obecna 'niższa' wycena nadal odzwierciedla tę premię, realna okazja cenowa może nie istnieć."
+  ],
+  "verification_items": [
+   {
+    "source_id": "src-2",
+    "document": "10-K (2026-07-17) — Paychex",
+    "section": "Wyniki finansowe / segmenty / Management's Discussion and Analysis",
+    "page": null,
+    "reason": "Potrzebne do zweryfikowania rozbicia wzrostu przychodów na komponent organiczny vs. efekt akwizycji Paycor oraz do oceny trendu float income.",
+    "question": "Jaka część wzrostu przychodów r/r pochodzi z akwizycji (Paycor) a jaka jest organiczna, i jak zmienił się 'interest on funds held for clients' r/r?"
+   },
+   {
+    "source_id": "src-2",
+    "document": "10-K (2026-07-17) — Paychex",
+    "section": "Capital allocation / Dividends and share repurchases",
+    "page": null,
+    "reason": "Potrzebne do zweryfikowania payout ratio dywidendy oraz historii buybacków w relacji do FCF.",
+    "question": "Jaki jest aktualny payout ratio dywidendy względem FCF i czy zarząd planuje kontynuację/zwiększenie dywidendy mimo integracji Paycor?"
+   },
+   {
+    "source_id": "src-4",
+    "document": "10-K (2025-07-11) — Paychex",
+    "section": "Risk Factors / Competition",
+    "page": null,
+    "reason": "Potrzebne do oceny, jak sam zarząd opisuje presję konkurencyjną ze strony nowych platform HR-tech i czy wskazuje konkretne utraty udziałów rynkowych.",
+    "question": "Jakie konkretne ryzyka konkurencyjne i rynkowe wymienia zarząd w sekcji Risk Factors dotyczące segmentu SMB i mid-market?"
+   },
+   {
+    "source_id": "src-1",
+    "document": "10-Q (2026-09-24) — Paychex",
+    "section": "Client retention / recurring revenue metrics",
+    "page": null,
+    "reason": "Potrzebne do zweryfikowania aktualnego wskaźnika retencji klientów i trendu w ostatnich kwartałach jako testu siły moatu.",
+    "question": "Czy wskaźnik retencji klientów uległ zmianie w ostatnich kwartałach i czy zarząd komentuje wpływ integracji Paycor na retencję?"
+   },
+   {
+    "source_id": "src-3",
+    "document": "10-Q (2026-03-26) — Paychex",
+    "section": "Debt and liquidity disclosures",
+    "page": null,
+    "reason": "Potrzebne do potwierdzenia struktury zadłużenia i warunków kowenantów w kontekście net debt/EBITDA ~1,16x.",
+    "question": "Jakie są warunki i terminy zapadalności zadłużenia Paychex oraz czy istnieją kowenanty finansowe ograniczające elastyczność kapitałową?"
+   }
+  ],
+  "cited_source_ids": [
+   "src-1",
+   "src-2",
+   "src-3",
+   "src-4"
+  ],
+  "hard_flag_candidates": []
+ },
+ "2026-10-22/APP": {
+  "ticker": "APP",
+  "schema_version": "1.0",
+  "business_understandability": {
+   "score": 5,
+   "max_score": 7,
+   "confidence": "MEDIUM",
+   "reasoning": "AppLovin opera w modelu adtech: platforma AXON wykorzystuje AI/machine learning do kojarzenia reklamodawców z wydawcami aplikacji mobilnych (programmatic bidding) i monetyzacji instalacji/zaangażowania. Ogólny model biznesowy (sieć reklamowa pobierająca prowizję od transakcji) jest zrozumiały na wysokim poziomie, ale mechanika samego algorytmu dopasowania (black-box AI), atrybucji konwersji i zależność od danych z ekosystemów Apple/Google wprowadza istotną złożoność techniczną trudną do w pełni niezależnej weryfikacji na podstawie dostępnych źródeł."
+  },
+  "moat": {
+   "score": 7,
+   "max_score": 12,
+   "confidence": "MEDIUM",
+   "evidence": [
+    "Efekt sieci/data flywheel: większa liczba reklamodawców i wydawców korzystających z AXON potencjalnie poprawia jakość dopasowania i zwiększa wartość platformy dla kolejnych uczestników.",
+    "Wysokie koszty przełączenia po integracji SDK AppLovin z aplikacjami wydawców.",
+    "Bardzo wysoka marża FCF (71,9%) i niski dług netto/EBITDA (0,24) sugerują silną pozycję cenową/efektywność operacyjną typową dla biznesu z realną przewagą konkurencyjną — choć to wniosek pośredni, nie bezpośredni dowód moatu."
+   ],
+   "counterarguments": [
+    "Adtech to sektor silnie konkurencyjny (Meta, Google, Unity i inni) — przewaga algorytmiczna może erodować szybciej niż w klasycznych moatach fizycznych/brandowych.",
+    "Model biznesowy jest strukturalnie zależny od polityk platform trzecich (Apple ATT, zmiany w Google/Chrome dot. cookies/identyfikatorów) — utrata dostępu do danych sygnałowych mogłaby istotnie osłabić skuteczność targetowania.",
+    "Publicznie znane (choć niecytowalne w ramach dostępnych źródeł) zarzuty podmiotów typu short-seller dotyczące praktyk atrybucji/danych AXON stanowią niepotwierdzone, ale realne ryzyko reputacyjne i regulacyjne dla trwałości moatu.",
+    "Brak w dostarczonych danych informacji o koncentracji klientów/wydawców — utrata kluczowego partnera mogłaby ujawnić, że część 'moatu' wynika z kilku dużych relacji, a nie z efektu sieci jako takiego."
+   ]
+  },
+  "financial_quality_commentary": {
+   "confidence": "MEDIUM",
+   "reasoning": "Wskaźniki są wyjątkowo mocne: marża FCF 71,9%, wzrost przychodów r/r 70%, bardzo niska dźwignia (net debt/EBITDA 0,24) i wysoka płynność bieżąca (3,32). Jednak tak wysoka marża i wzrost mogą być częściowo zniekształcone niedawną dezinwestycją segmentu aplikacji/gier mobilnych (publicznie znany fakt strategicznego pivotu AppLovin w stronę czystej platformy software'owej) — bez dostępu do szczegółowych danych segmentowych z filingów nie można jednoznacznie oddzielić wzrostu organicznego rdzenia adtech od efektu zmiany portfela biznesowego."
+  },
+  "management_capital_allocation": {
+   "score": 6,
+   "max_score": 10,
+   "confidence": "LOW",
+   "evidence": [
+    "Strategiczna decyzja o skoncentrowaniu działalności na platformie software'owej adtech (AXON) poprzez wyjście z segmentu aplikacji/gier mobilnych sugeruje dyscyplinę w alokacji kapitału w kierunku biznesu o wyższej marży i skalowalności.",
+    "Niski poziom zadłużenia netto względem EBITDA wskazuje na konserwatywne zarządzanie bilansem."
+   ]
+  },
+  "fear_analysis": {
+   "classification": "UNCERTAIN",
+   "confidence": "MEDIUM",
+   "trigger": "Gwałtowna przecena akcji (-60,8% YTD, -64,2% od szczytu 52-tygodniowego) przy stosunkowo niskim wolumenie względnym (0,61), co wskazuje raczej na rozciągniętą w czasie reocenę rynkową niż jednorazową panikę.",
+   "reasoning": "Spadek nakłada się w czasie na szeroko komentowany w mediach cykl zarzutów ze strony podmiotów typu short-seller wobec praktyk danych/atrybucji AXON oraz na ogólną normalizację wycen spółek adtech/AI po wcześniejszym silnym rajdzie. Żadne z dostępnych źródeł (filingi SEC) nie potwierdza ani nie zaprzecza tym zarzutom, więc nie można sklasyfikować sytuacji jako czysto przejściowej (TEMPORARY) ani strukturalnej (STRUCTURAL) z wysoką pewnością — klasyfikacja UNCERTAIN odzwierciedla brak możliwości weryfikacji kluczowego czynnika ryzyka na podstawie dostarczonych danych."
+  },
+  "dividend_trap_alert": {
+   "triggered": false,
+   "reasoning": "AppLovin nie wypłaca dywidendy (spółka wzrostowa/technologiczna reinwestująca kapitał i prowadząca buybacki), więc mechanizm pułapki dywidendowej nie ma zastosowania."
+  },
+  "bull_case": [
+   "Ekstremalnie wysoka marża FCF (71,9%) i niska dźwignia (net debt/EBITDA 0,24) wskazują na kapitałowo lekki, wysoce gotówkotwórczy model biznesowy.",
+   "Wzrost przychodów r/r na poziomie 70% sugeruje silny popyt na platformę AXON mimo otoczenia konkurencyjnego.",
+   "Nawet w scenariuszu BEAR wyceny DCF (432,34 USD/akcję) implikowany margines bezpieczeństwa wynosi 38,9% przy obecnej cenie 264,28 USD, co przy braku potwierdzonego strukturalnego uszkodzenia biznesu stanowiłoby istotną okazję.",
+   "Silny bilans (current ratio 3,32) daje spółce bufor do przetrwania okresu podwyższonej zmienności i kontynuowania buybacków/inwestycji."
+  ],
+  "bear_case": [
+   "Publicznie znane zarzuty podmiotów short-sellerskich dotyczące praktyk zbierania danych i atrybucji konwersji w AXON — nawet jeśli częściowo nieprawdziwe — mogą trwale nadszarpnąć zaufanie reklamodawców i zwiększyć ryzyko regulacyjne/platformowe (Apple/Google), co bezpośrednio godzi w domniemany moat.",
+   "Wysoka raportowana marża i wzrost mogą być częściowo artefaktem niedawnej dezinwestycji segmentu aplikacji/gier — rzeczywisty organiczny wzrost rdzenia adtech może być istotnie niższy niż sugeruje headline'owy wskaźnik 70%.",
+   "Model biznesowy jest strukturalnie zależny od polityk prywatności i identyfikatorów stron trzecich (ATT, zmiany w przeglądarkach) — dalsze zaostrzenie tych polityk mogłoby materialnie obniżyć skuteczność targetowania i tym samym przychody.",
+   "Brak w dostarczonych danych informacji o koncentracji klientów — jeśli istotna część przychodów pochodzi od niewielkiej liczby dużych wydawców/reklamodawców, utrata jednego z nich byłaby materialnym ryzykiem.",
+   "Skala przeceny (-60,8% YTD, -64,2% od szczytu) przy spadającym wolumenie może odzwierciedlać racjonalną, rozciągniętą w czasie normalizację wcześniej nadmiernie wysokiej wyceny po boomie AI/adtech, a nie okazję do kupna."
+  ],
+  "why_market_may_be_right": [
+   "Jeśli zarzuty dotyczące praktyk danych/atrybucji AXON okażą się choćby częściowo uzasadnione, może dojść do działań regulacyjnych lub egzekwowania polityk przez Apple/Google, co trwale ograniczyłoby skuteczność platformy — rynek może świadomie wyceniać podwyższone ryzyko ogonowe.",
+   "Poprzedzający przecenę gwałtowny wzrost kursu mógł odzwierciedlać wycenę nieadekwatną do fundamentów (typową dla hossy AI/adtech), a obecna cena może być powrotem do bardziej racjonalnego poziomu, a nie błędem rynku.",
+   "Niski wolumen względny podczas spadku wskazuje na stopniową, rozłożoną w czasie reocenę przez wielu uczestników rynku, a nie jednorazową panikę — co czyni hipotezę o irracjonalnej, krótkoterminowej nadreakcji mniej prawdopodobną."
+  ],
+  "biggest_unknown": "Rzeczywista trwałość i weryfikowalność przewagi danych/targetowania algorytmu AXON w świetle nierozstrzygniętych publicznych zarzutów o nieprawidłowości w atrybucji/zbieraniu danych, oraz w jakim stopniu raportowany wzrost przychodów (70% r/r) i marża FCF (71,9%) wynikają z niedawnej dezinwestycji segmentu aplikacji mobilnych, a nie z organicznego wzrostu rdzenia biznesu adtech. Dodatkowo brak danych o P/E, EV/EBITDA, konsensusie analityków i koncentracji klientów ogranicza pełną ocenę tezy.",
+  "thesis_invalidation": [
+   "Potwierdzone działanie regulacyjne lub egzekwowanie polityk przez Apple/Google (np. ograniczenie dostępu AXON do danych/SDK lub kary) w odpowiedzi na zarzuty dotyczące praktyk danych/atrybucji, prowadzące do udokumentowanej utraty kluczowych reklamodawców lub wydawców.",
+   "Trwałe, potwierdzone w kolejnych kwartałach spowolnienie wzrostu przychodów połączone z kompresją marży FCF, wskazujące że przewaga algorytmiczna AXON jest tracona na rzecz konkurencji (Meta, Google, Unity i inni).",
+   "Ujawniona w filingach materialna utrata koncentrowanego klienta/partnera wydawniczego, istotnie wpływająca na przychody."
+  ],
+  "why_this_may_not_be_a_bargain": [
+   "Margines bezpieczeństwa z modelu DCF jest wysoce wrażliwy na założenie trwałości 71,9% marży FCF i 70% wzrostu przychodów — jeśli te wskaźniki okażą się nietrwałe (efekt bazy po dezinwestycji, ewentualny wpływ zarzutów o jakość danych), wyceny BASE i BULL mogą zbliżyć się do lub spaść poniżej scenariusza BEAR, redukując pozorny margines bezpieczeństwa.",
+   "Nawet scenariusz BEAR (38,9% MoS) zakłada brak strukturalnego uszkodzenia algorytmu/danych AXON — potwierdzenie zarzutów lub zmiana polityk platformowych mogłaby obniżyć wewnętrzną wartość znacznie poniżej podanego poziomu bear case.",
+   "Brak przejrzystości co do koncentracji klientów/reklamodawców oraz ekonomiki segmentowej po dezinwestycji segmentu aplikacji uniemożliwia niezależną weryfikację jakości i trwałości raportowanych marż, co czyni margines bezpieczeństwa częściowo iluzorycznym do czasu potwierdzenia tych danych."
+  ],
+  "verification_items": [
+   {
+    "source_id": "src-3",
+    "document": "10-K (2026-02-19)",
+    "section": "Segment reporting / MD&A",
+    "page": null,
+    "reason": "Potrzebna weryfikacja, w jakim stopniu wzrost przychodów 70% r/r i marża FCF 71,9% wynikają z organicznego wzrostu segmentu adtech (AXON) a w jakim z efektu dezinwestycji segmentu aplikacji mobilnych.",
+    "question": "Jaki jest podział przychodów i marż pomiędzy segmentem software/adtech a (zbytym) segmentem aplikacji w ujęciu porównywalnym rok do roku?"
+   },
+   {
+    "source_id": "src-1",
+    "document": "10-Q (2026-08-05)",
+    "section": "Risk factors / Customer concentration",
+    "page": null,
+    "reason": "Brak w dostarczonych danych informacji o koncentracji klientów/wydawców, co jest kluczowe dla oceny trwałości moatu.",
+    "question": "Czy istnieje istotna koncentracja przychodów u niewielkiej liczby reklamodawców lub wydawców aplikacji?"
+   },
+   {
+    "source_id": "src-4",
+    "document": "10-K (2025-02-27)",
+    "section": "Capital allocation / Share repurchases",
+    "page": null,
+    "reason": "Potrzebna weryfikacja historycznej dyscypliny kapitałowej zarządu (ceny buybacków, warunki dezinwestycji segmentu aplikacji) w celu oceny jakości alokacji kapitału.",
+    "question": "Jaka była historyczna efektywność i dyscyplina cenowa programów buyback oraz warunki finansowe dezinwestycji segmentu gier/aplikacji?"
+   }
+  ],
+  "cited_source_ids": [
+   "src-1",
+   "src-2",
+   "src-3",
+   "src-4"
+  ],
+  "hard_flag_candidates": []
+ },
+ "2026-10-22/UBER": {
+  "ticker": "UBER",
+  "schema_version": "1.0",
+  "business_understandability": {
+   "score": 5,
+   "max_score": 7,
+   "confidence": "MEDIUM",
+   "reasoning": "Model biznesowy Ubera (platforma mobilności, dostawy jedzenia/towarów i transport ciężarowy jako rynek dwustronny) jest koncepcyjnie zrozumiały, ale ocena jego długoterminowej ekonomiki jest utrudniona przez zróżnicowane marże segmentowe, regulacje pracownicze w wielu jurysdykcjach oraz rosnącą rolę pojazdów autonomicznych, co wprowadza niepewność co do przyszłego modelu operacyjnego."
+  },
+  "moat": {
+   "score": 6,
+   "max_score": 12,
+   "confidence": "MEDIUM",
+   "evidence": [
+    "Efekty sieciowe między kierowcami a pasażerami/zamawiającymi w głównych rynkach miejskich (opisane w 10-K jako kluczowy element skali operacyjnej) [src-3]",
+    "Rozbudowana, wielosegmentowa platforma (Mobility, Delivery, Freight) pozwalająca na cross-sell i dywersyfikację przychodów [src-3][src-1]",
+    "Marka rozpoznawalna globalnie, duża baza aktywnych użytkowników wspierająca efekt skali"
+   ],
+   "counterarguments": [
+    "Niskie koszty zmiany dla kierowców i pasażerów — powszechne 'multi-homing' (korzystanie z kilku aplikacji jednocześnie) osłabia siłę efektu sieciowego",
+    "Ryzyko regulacyjne dot. klasyfikacji kierowców jako pracowników (a nie kontrahentów) mogące istotnie podnieść koszty operacyjne w kluczowych rynkach",
+    "Nadchodząca konkurencja ze strony podmiotów rozwijających pojazdy autonomiczne (np. Waymo, Tesla robotaxi), która może ominąć model oparty na sieci kierowców-ludzi, co stanowi strukturalne zagrożenie dla przewagi konkurencyjnej Ubera",
+    "Brak twardych danych o długoterminowej retencji kierowców/pasażerów lub wskaźnikach lojalności w dostarczonych źródłach"
+   ]
+  },
+  "financial_quality_commentary": {
+   "confidence": "MEDIUM",
+   "reasoning": "FCF TTM na poziomie ok. 9,76 mld USD przy marży FCF ~18,8% i wzroście przychodów r/r ~18,3% wskazują na poprawiającą się jakość generowania gotówki. Net debt/EBITDA ~0,71 sugeruje umiarkowane zadłużenie. Current ratio 1,14 jest jednak dość ciasny, co ogranicza bufor płynnościowy w razie spowolnienia. Brak w dostarczonych danych szczegółów dot. udziału stock-based compensation w kosztach, rezerw na spory sądowe (klasyfikacja kierowców) oraz marż segmentowych, co ogranicza pełną ocenę jakości zysków."
+  },
+  "management_capital_allocation": {
+   "score": 6,
+   "max_score": 10,
+   "confidence": "LOW",
+   "evidence": [
+    "Spółka wykazuje dodatni FCF i poprawiającą się dyscyplinę operacyjną widoczną w rosnącej marży FCF",
+    "Umiarkowany poziom zadłużenia netto względem EBITDA (0,71x) sugeruje rozsądne zarządzanie bilansem"
+   ]
+  },
+  "fear_analysis": {
+   "classification": "UNCERTAIN",
+   "confidence": "MEDIUM",
+   "trigger": "Spadek kursu (YTD -15,47%, 1R -25,76%, drawdown od 52-tygodniowego szczytu -31,17%) przy podwyższonym wolumenie (1,30x) sugeruje obawy rynku dot. długoterminowej konkurencyjności modelu Ubera wobec pojazdów autonomicznych oraz ryzyka regulacyjnego, a nie wyłącznie przejściowy szum rynkowy.",
+   "reasoning": "Skala i trwałość spadku (drawdown >30% od szczytu, ujemna stopa zwrotu w horyzoncie rocznym mimo dodatniego wzrostu przychodów i FCF) wskazuje, że rynek wycenia ryzyko strukturalne (konkurencja AV, regulacje) a nie jednorazowe zdarzenie. Brak w dostarczonych źródłach konkretnego komunikatu/wydarzenia uzasadniającego klasyfikację jako czysto przejściowe (TEMPORARY), stąd ocena UNCERTAIN z umiarkowaną pewnością."
+  },
+  "dividend_trap_alert": {
+   "triggered": false,
+   "reasoning": "Uber nie wypłaca dywidendy, więc flaga pułapki dywidendowej nie ma zastosowania w obecnym modelu kapitałowym spółki."
+  },
+  "bull_case": [
+   "Wzrost przychodów r/r na poziomie ~18,3% przy jednoczesnej ekspansji marży FCF do ~18,8% wskazuje na skalowalność modelu biznesowego",
+   "Dodatni FCF TTM (~9,76 mld USD) i umiarkowane zadłużenie (net debt/EBITDA 0,71x) dają spółce elastyczność finansową",
+   "Zdywersyfikowana platforma (mobility, delivery, freight) ogranicza zależność od jednego strumienia przychodów",
+   "Efekty sieciowe w największych rynkach miejskich wciąż stanowią barierę wejścia dla mniejszych konkurentów regionalnych"
+  ],
+  "bear_case": [
+   "Pojawienie się komercyjnie skalowalnych usług robotaxi (Waymo, potencjalnie Tesla) może ominąć model Ubera oparty na sieci kierowców-ludzi i zagrozić jego podstawowej propozycji wartości jako pośrednika — to najpoważniejsze ryzyko strukturalne dla moatu",
+   "Niskie koszty zmiany i powszechne multi-homing wśród kierowców i pasażerów oznaczają, że efekt sieciowy jest słabszy niż w klasycznych platformach z wysokimi kosztami przejścia",
+   "Ryzyko regulacyjne reklasyfikacji kierowców jako pracowników w kluczowych jurysdykcjach mogłoby istotnie podnieść koszty pracy i skompresować obecną marżę FCF",
+   "Current ratio na poziomie 1,14 pozostawia niewielki bufor płynnościowy, co zwiększa wrażliwość na spowolnienie wzrostu lub nieoczekiwane zobowiązania (np. ugody sądowe)",
+   "Brak wyceny DCF z powodu niewystarczającej historii dodatniego owner earnings oznacza, że trudno jest potwierdzić trwałość obecnej rentowności — poprawa FCF może być zbyt krótka historycznie, by ekstrapolować ją na przyszłość"
+  ],
+  "why_market_may_be_right": [
+   "Spadek kursu może odzwierciedlać racjonalną wycenę ryzyka, że technologia autonomicznych pojazdów (Waymo, potencjalnie inni gracze) trwale zmieni ekonomikę rynku przewozów, zmniejszając rolę Ubera jako pośrednika między kierowcami a pasażerami",
+   "Niepewność regulacyjna dot. klasyfikacji pracowniczej kierowców w wielu krajach jest realnym, materializującym się ryzykiem kosztowym, a nie tylko spekulacją rynkową",
+   "Popyt na usługi mobility i delivery jest częściowo dyskrecjonalny i wrażliwy na spowolnienie makroekonomiczne, co uzasadnia ostrożniejszą wycenę przy niepewnych perspektywach konsumenckich"
+  ],
+  "biggest_unknown": "Rzeczywisty wpływ konkurencji ze strony pojazdów autonomicznych (Waymo, Tesla i inni) na długoterminową ekonomikę Ubera — czy spółka zdoła zintegrować/partnerować z tą technologią, czy zostanie przez nią zdezintermediowana — nie jest możliwy do oceny na podstawie dostarczonych danych. Brakuje też wskaźników rynkowych (P/E, EV/EBITDA, konsensus analityków) oraz szczegółów dot. udziału stock-based compensation i rezerw sądowych, co ogranicza pełną ocenę jakości zysków i dyscypliny kapitałowej zarządu.",
+  "thesis_invalidation": [
+   "Jeśli wzrost przychodów segmentu Mobility spadnie trwale poniżej jednocyfrowego tempa przez kilka kolejnych kwartałów przy jednoczesnej kompresji marży FCF, teza o skalowalnej ekspansji marżowej zostanie obalona",
+   "Jeśli operatorzy pojazdów autonomicznych (np. Waymo) osiągną istotny, mierzalny udział rynkowy w kluczowych metropoliach kosztem floty kierowców Ubera, będzie to sygnał trwałej erozji moatu sieciowego",
+   "Istotne, niekorzystne zmiany regulacyjne skutkujące obowiązkową reklasyfikacją kierowców jako pracowników w głównych rynkach (USA, UE) i wynikający z tego trwały wzrost kosztów operacyjnych podważyłby obecny model kosztowy spółki"
+  ],
+  "why_this_may_not_be_a_bargain": [
+   "Brak dostępnej wyceny DCF (z powodu niewystarczającej historii dodatniego owner earnings) uniemożliwia ilościowe potwierdzenie marginesu bezpieczeństwa przy obecnej cenie 69,07 USD",
+   "Spadek ceny o ponad 31% od 52-tygodniowego szczytu może już w pełni odzwierciedlać ryzyko konkurencji ze strony AV i regulacji, a nie być błędną wyceną rynku do wykorzystania",
+   "Current ratio na poziomie 1,14 sugeruje ograniczony bufor bilansowy — w razie spowolnienia wzrostu teza 'jakości za rozsądną cenę' traci częściowo oparcie, ponieważ brakuje zapasu bezpieczeństwa finansowego",
+   "Teza inwestycyjna w dużej mierze opiera się na ekstrapolacji niedawnej poprawy FCF i wzrostu przychodów, co przy krótkiej historii dodatnich owner earnings jest założeniem obarczonym wysoką niepewnością"
+  ],
+  "verification_items": [
+   {
+    "source_id": "src-3",
+    "document": "10-K (2026-02-13)",
+    "section": "Risk Factors / MD&A",
+    "page": null,
+    "reason": "Brak szczegółowych danych o udziale stock-based compensation w kosztach operacyjnych oraz o rezerwach na spory sądowe dot. klasyfikacji kierowców, co ogranicza ocenę jakości zysków i ryzyka regulacyjnego.",
+    "question": "Jaki jest trend udziału SBC w przychodach oraz jaka jest wielkość rezerw na potencjalne zobowiązania wynikające z reklasyfikacji pracowniczej kierowców w kluczowych jurysdykcjach?"
+   },
+   {
+    "source_id": "src-1",
+    "document": "10-Q (2026-08-05)",
+    "section": "Liquidity and Capital Resources",
+    "page": null,
+    "reason": "Brak potwierdzenia aktualnej polityki buybacków i alokacji kapitału zarządu w najnowszym kwartale.",
+    "question": "Czy i w jakiej skali spółka kontynuuje program odkupu akcji oraz jak kształtuje się struktura wydatków kapitałowych w kontekście inwestycji w technologię autonomiczną?"
+   },
+   {
+    "source_id": "src-2",
+    "document": "10-Q (2026-05-06)",
+    "section": "Segment Results",
+    "page": null,
+    "reason": "Brak szczegółowego rozbicia marż segmentowych (Mobility vs Delivery vs Freight) potrzebnego do oceny trwałości moatu w poszczególnych liniach biznesowych.",
+    "question": "Jak kształtują się marże operacyjne i trendy wzrostu w poszczególnych segmentach w ostatnich kwartałach?"
+   },
+   {
+    "source_id": "src-4",
+    "document": "10-K (2025-02-14)",
+    "section": "Competition",
+    "page": null,
+    "reason": "Brak aktualnych danych o udziale rynkowym konkurentów (w tym podmiotów rozwijających pojazdy autonomiczne) w kluczowych rynkach Ubera.",
+    "question": "Jak zmienił się udział rynkowy Ubera względem konkurencji (Lyft, lokalni gracze, operatorzy AV) w ostatnich 12 miesiącach?"
+   }
+  ],
+  "cited_source_ids": [
+   "src-1",
+   "src-2",
+   "src-3",
+   "src-4"
+  ],
+  "hard_flag_candidates": []
+ }
+}
