@@ -144,6 +144,7 @@ from buffett_scanner.ui.portfolio import (
     FEES_KNOWN,
     FEES_UNSPLIT,
     AmountError,
+    describe_sale_amounts,
     fees_unknown_default,
     compute_portfolio_bar_summary,
     compute_portfolio_pln_summary,
@@ -1661,7 +1662,7 @@ def _describe_transaction(kind: str, row) -> str:
         )
     return (
         f"Sprzedaż {row['sale_date']} · {broker_label(row['broker'])} · "
-        f"{_format_shares(row['shares'])} szt. po {row['sale_price']:.2f} {row['currency']}"
+        f"{_format_shares(row['shares'])} jedn. · {describe_sale_amounts(row)}"
     )
 
 
@@ -1676,7 +1677,7 @@ def _negative_holding_message(negative: dict, what: str) -> str:
 
 _AMOUNT_MODES = {
     "BUY": {True: "Kwota zawiera opłaty", False: "Kwota bez opłat (+ opłaty)"},
-    "SELL": {True: "Wpływ po opłatach (netto)", False: "Kwota przed opłatami (brutto)"},
+    "SELL": {True: "Kwota otrzymana (netto)", False: "Kwota sprzedaży przed opłatami (brutto)"},
 }
 
 
@@ -1684,21 +1685,33 @@ def _render_amount_fields(key: str, *, side: str, amount: float = 0.0, fees: flo
                           fees_unknown: bool = False, includes: bool = True) -> tuple[bool, float, float, bool]:
     """Kwota i opłaty transakcji (wewnątrz st.form) -- dwa sposoby
     wpisania: kwota łączna z opłatami albo kwota bez opłat + opłaty.
-    Opłat nigdy nie doliczamy drugi raz (patrz `resolve_purchase_amounts`)."""
+    Opłat nigdy nie doliczamy drugi raz (patrz `resolve_purchase_amounts`).
+    Sprzedaż: łączna kwota za wszystkie jednostki, bez ceny jednostkowej --
+    cenę wylicza `resolve_sale_amounts`."""
+    sell = side == "SELL"
     includes = st.radio(
         "Sposób wpisania kwoty", (True, False), index=0 if includes else 1, format_func=_AMOUNT_MODES[side].get,
         horizontal=True, key=f"{key}_amode",
+        help=("Netto: tyle wpłynęło na konto, opłaty już potrącone. "
+              "Brutto: kwota sprzedaży przed opłatami — opłaty wpisz osobno, aplikacja je odejmie.") if sell else None,
     )
     amount = st.number_input(
-        "Kwota sprzedaży (łącznie za wszystkie jednostki)" if side == "SELL" else "Kwota zakupu (łącznie)",
+        "Kwota łączna za wszystkie sprzedane jednostki" if sell else "Kwota zakupu (łącznie)",
         min_value=0.0, value=float(amount or 0.0), step=0.01, format="%.2f", key=f"{key}_amount",
     )
-    fees = st.number_input("Opłaty / prowizja", min_value=0.0, value=float(fees or 0.0), step=0.01, format="%.2f",
-                           key=f"{key}_afees")
-    fees_unknown = st.checkbox(
-        "Nie znam wysokości opłat — są zawarte w kwocie (nierozdzielone)", value=bool(fees_unknown),
-        key=f"{key}_aunknown",
+    fees = st.number_input(
+        "Opłaty / prowizja (opcjonalnie)" if sell else "Opłaty / prowizja", min_value=0.0, value=float(fees or 0.0),
+        step=0.01, format="%.2f", key=f"{key}_afees",
+        help=("Przy kwocie netto — tylko informacyjnie, nie odejmowane drugi raz. "
+              "Przy kwocie brutto — odejmowane od kwoty.") if sell else None,
     )
+    fees_unknown = st.checkbox(
+        "Nie znam wysokości opłat — kwota otrzymana już je uwzględnia" if sell
+        else "Nie znam wysokości opłat — są zawarte w kwocie (nierozdzielone)",
+        value=bool(fees_unknown), key=f"{key}_aunknown",
+    )
+    if sell:
+        st.caption("Cena za jednostkę nie jest potrzebna — aplikacja wyliczy ją z kwoty i liczby jednostek.")
     return includes, amount, fees, fees_unknown
 
 
@@ -1795,7 +1808,8 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
         st.caption(
             f"Zmiana: {_TRANSACTION_TYPE_LABELS[current_type]} → {_TRANSACTION_TYPE_LABELS[new_type]}. "
             "Pola wypełniono danymi z obecnego wpisu — sprawdź je z potwierdzeniem transakcji."
-            + (" Cena sprzedaży wyliczona jako (kwota + opłaty) / liczba jednostek."
+            + (" Wpisz łączną kwotę otrzymaną ze sprzedaży — w polu kwoty wstawiono kwotę dotychczasowego "
+               "zakupu, popraw ją. Cenę za jednostkę aplikacja wyliczy sama."
                if new_type == "SELL" and kind == "PURCHASE" else "")
         )
     key = f"edit_{kind}_{row['transaction_id']}_{new_type}"
@@ -1868,7 +1882,11 @@ def _render_transaction_editor(portfolio_conn, position: dict) -> None:
                 except TransactionChangeError as exc:
                     st.error(f"Zapis zablokowany — dane nie zostały zmienione. {exc}")
                 else:
-                    st.toast(f"Zapisano: {_TRANSACTION_TYPE_LABELS[new_type]}.")
+                    saved = _TRANSACTION_TYPE_LABELS[new_type]
+                    if new_type == "SELL":
+                        saved += " — " + describe_sale_amounts(
+                            {"shares": shares, "sale_price": sale_price, "fees": fees, "currency": currency})
+                    st.toast(f"Zapisano: {saved}.")
                     st.rerun()
 
 
@@ -2267,7 +2285,8 @@ def _render_existing_position_transaction_form(portfolio_conn, position: dict) -
                             portfolio_conn, kind="SALE", transaction_id=transaction_id, fx_rate_actual=fx_rate,
                         )
                     portfolio_conn.commit()
-                    st.toast("Zapisano sprzedaż.")
+                    st.toast("Zapisano sprzedaż — " + describe_sale_amounts(
+                        {"shares": shares, "sale_price": sale_price, "fees": fees, "currency": currency.strip()}) + ".")
                     st.rerun()
 
 

@@ -261,6 +261,30 @@ def sale_amounts(row) -> tuple[float, float]:
     return gross, gross - (_field(row, "fees") or 0.0)
 
 
+def format_unit_price(value: float) -> str:
+    """Cena za jednostkę: 2 miejsca od 1 w górę, więcej przy ułamkach (krypto, gramy)."""
+    if abs(value) >= 1:
+        return f"{value:,.2f}".replace(",", " ")
+    return f"{value:.8f}".rstrip("0").rstrip(".") or "0"
+
+
+def describe_sale_amounts(row) -> str:
+    """Opis kwot sprzedaży do list i potwierdzeń: faktyczny wpływ (to, co
+    przyszło na konto) i cena za jednostkę WYLICZONA z kwoty -- nigdy
+    wpisywana ręcznie. Przy znanych opłatach także kwota przed opłatami."""
+    def money(value: float) -> str:
+        return f"{value:,.2f}".replace(",", " ")
+
+    gross, net = sale_amounts(row)
+    shares = float(row["shares"])
+    unit = gross / shares if shares > 0 else 0.0
+    text = f"wpływ {money(net)} {row['currency']}"
+    fees = _field(row, "fees")
+    if fees:
+        text += f" (przed opłatami {money(gross)}, opłaty {money(fees)})"
+    return text + f" · cena wyliczona {format_unit_price(unit)}/jedn."
+
+
 # Typy transakcji w interfejsie -> tabela, w której żyje wiersz.
 TRANSACTION_TABLE = {"BUY": "PURCHASE", "BONUS": "PURCHASE", "SELL": "SALE"}
 

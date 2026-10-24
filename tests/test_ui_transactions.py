@@ -335,3 +335,70 @@ def test_received_value_is_ignored_for_non_bonus_rows(conn):
     )
     row = conn.execute("SELECT received_value FROM purchase_transactions WHERE transaction_id = ?", (new_id,)).fetchone()
     assert row["received_value"] is None
+
+
+# --- Sprzedaż wpisywana łączną kwotą, bez ceny jednostkowej (2026-10-24) ---
+
+from buffett_scanner.ui.portfolio import describe_sale_amounts, format_unit_price  # noqa: E402
+
+
+def test_sale_entered_as_total_received_needs_no_unit_price_for_any_asset_class():
+    """Akcje, krypto (ułamki), metale fizyczne (sztuki), metale na platformie
+    (uncje): ta sama ścieżka -- liczba jednostek + łączna kwota netto. Wpływ
+    zapisany = dokładnie kwota otrzymana, wynik = wpływ - koszt sprzedanej części."""
+    cases = [  # (liczba jednostek, koszt zakupu z opłatami, kwota otrzymana netto)
+        (3.0, 1500.0, 1234.56),            # akcje
+        (0.00123456, 300.0, 487.31),       # bitcoin
+        (2.0, 9100.0, 9640.0),             # monety złote
+        (1.7311, 7200.0, 7911.42),         # złoto na platformie, uncje
+    ]
+    for units, cost, received in cases:
+        price, fees, status = resolve_sale_amounts(units, received, 0.0, amount_is_net=True, fees_unknown=True)
+        s = summary([buy(1, "2026-01-10", units, cost)], [sell(1, "2026-03-01", units, price, fees=fees)])
+        [sub] = s.by_broker_currency
+        assert status == FEES_UNSPLIT and fees is None
+        assert sub.realized_pl == pytest.approx(received - cost, abs=1e-6)
+
+
+def test_net_and_gross_entry_of_the_same_sale_give_identical_realized_result():
+    net = resolve_sale_amounts(4.0, 991.50, 8.50, amount_is_net=True, fees_unknown=False)
+    gross = resolve_sale_amounts(4.0, 1000.00, 8.50, amount_is_net=False, fees_unknown=False)
+    results = []
+    for price, fees, _ in (net, gross):
+        s = summary([buy(1, "2026-01-10", 10.0, 2000.0, fees=5.0)], [sell(1, "2026-03-01", 4.0, price, fees=fees)])
+        results.append(s.by_broker_currency[0].realized_pl)
+    # wpływ 991,50 - 40% kosztu 2000 (opłata zakupu już w koszcie, nie drugi raz)
+    assert results[0] == pytest.approx(results[1]) == pytest.approx(991.50 - 800.0)
+
+
+def test_sale_description_shows_received_amount_and_derived_unit_price():
+    price, fees, _ = resolve_sale_amounts(3.0, 1234.56, 0.0, amount_is_net=True, fees_unknown=True)
+    row = {"shares": 3.0, "sale_price": price, "fees": fees, "currency": "USD"}
+    assert describe_sale_amounts(row) == "wpływ 1 234.56 USD · cena wyliczona 411.52/jedn."
+    price, fees, _ = resolve_sale_amounts(2.0, 200.0, 4.0, amount_is_net=False, fees_unknown=False)
+    row = {"shares": 2.0, "sale_price": price, "fees": fees, "currency": "PLN"}
+    assert describe_sale_amounts(row) == "wpływ 196.00 PLN (przed opłatami 200.00, opłaty 4.00) · cena wyliczona 100.00/jedn."
+    assert format_unit_price(0.00012345) == "0.00012345"
+    assert format_unit_price(394712.5) == "394 712.50"
+
+
+def test_buy_changed_to_sell_takes_total_received_without_unit_price(conn):
+    uid = db.create_user(conn, "Anastazja")
+    pid = db.insert_position(conn, user_id=uid, ticker="ETH", company_name="Ethereum", instrument_confirmed=True)
+    db.insert_purchase_transaction(conn, position_id=pid, broker="REVOLUT", acquisition_type="BUY",
+                                   purchase_date="2026-01-05", shares=1.5, total_invested=9000.0, currency="PLN")
+    wrong = db.insert_purchase_transaction(conn, position_id=pid, broker="REVOLUT", acquisition_type="BUY",
+                                           purchase_date="2026-02-05", shares=0.5, total_invested=3100.0,
+                                           currency="PLN")
+    conn.commit()
+    row = dict(db.get_purchase_transactions(conn, pid)[1])
+    assert retype_defaults("PURCHASE", row, "SELL")["amount"] == 3100.0  # pole kwoty, nie ceny
+    price, fees, status = resolve_sale_amounts(0.5, 3355.20, 0.0, amount_is_net=True, fees_unknown=True)
+    apply_transaction_change(conn, pid, kind="PURCHASE", old_id=wrong, current_type="BUY", new_type="SELL",
+                             new_row={"broker": "REVOLUT", "currency": "PLN", "shares": 0.5,
+                                      "sale_date": "2026-02-05", "sale_price": price, "fees": fees,
+                                      "fee_status": status}, fx_rate=0.0, note="")
+    sales = [dict(r) for r in db.get_sale_transactions(conn, pid)]
+    assert len(sales) == 1 and sales[0]["shares"] * sales[0]["sale_price"] == pytest.approx(3355.20)
+    s = summary(db.get_purchase_transactions(conn, pid), sales)
+    assert s.by_broker_currency[0].realized_pl == pytest.approx(3355.20 - 9000.0 / 3)
