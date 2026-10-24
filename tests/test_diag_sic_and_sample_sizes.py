@@ -164,8 +164,8 @@ def test_end_to_end_with_fake_sec(tmp_path, monkeypatch, capsys):
     assert all(u.startswith(("https://data.sec.gov/", "https://www.sec.gov/Archives/")) for u in fake.urls)
 
 
-def test_refuses_to_run_with_paid_api_keys(tmp_path, monkeypatch):
-    monkeypatch.setenv("FMP_API_KEY", "x")
+def test_refuses_to_run_with_claude_key(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     assert d.main(["--calibration-db", "a", "--snapshot-db", "b", "--out", "c"]) == 2
 
 
@@ -198,3 +198,32 @@ def test_annual_facts_keeps_only_full_year_10k_values():
     assert d.annual_facts(cf, "PaymentsOfDividendsCommonStock") == {"2025-12-31": 0.0, "2024-12-31": 100e6}
     assert d.annual_facts(cf, "ShareBasedCompensation") == {}
     assert d.annual_facts(cf, "Missing") == {}
+
+
+class _FakeFMP:
+    def __init__(self):
+        self.calls = []
+
+    def get_sp500_constituents(self):
+        return [{"symbol": "TGT", "cik": "0000000222"}, {"symbol": "NEW"}, {"symbol": "ZZZ"}]
+
+    def get_cash_flow_statement(self, symbol):
+        self.calls.append(symbol)
+        if symbol == "BAD":
+            raise d.FMPError("402")
+        return [{"date": "2025-12-31", "commonDividendsPaid": -331e6, "preferredDividendsPaid": 0,
+                 "commonStockIssuance": 5e6, "operatingCashFlow": 1.0}]
+
+
+def test_fmp_part_keeps_current_composition_separate_from_scan_universe():
+    fmp = _FakeFMP()
+    rep, cur = d.fmp_part(fmp, {"NEW": "555"}, {"222", "333"}, [("222", "BA"), ("999", "BAD")])
+    assert cur == {"222": "TGT", "555": "NEW"}
+    assert rep["sklad_fmp"]["bez_cik"] == ["ZZZ"]
+    assert rep["sklad_fmp_vs_uniwersum_skanu_22_10"] == {"tylko_w_skladzie_fmp": [("555", "NEW")],
+                                                          "tylko_w_uniwersum_skanu": ["333"]}
+    assert rep["cash_flow_pola"]["commonDividendsPaid"] == {"wiersze": 1, "niezerowe": 1}
+    assert rep["cash_flow_pola"]["preferredDividendsPaid"] == {"wiersze": 1, "niezerowe": 0}
+    assert "operatingCashFlow" not in rep["cash_flow_pola"]
+    assert rep["BA_cash_flow"][0]["commonDividendsPaid"] == -331e6
+    assert rep["cash_flow_bledy"][0][0] == "BAD"

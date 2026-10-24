@@ -1,16 +1,18 @@
-"""Diagnostyka SIC i liczebności prób (decyzja właścicielki 2026-10-24).
+"""Diagnostyka SIC i liczebności prób (decyzje właścicielki 2026-10-24).
 
 NARZĘDZIE DIAGNOSTYCZNE, nie kod produkcyjny. Tylko odczyt:
 - SEC EDGAR (bezpłatne; throttling poniżej limitu 10 zapytań/s),
+- FMP w ramach abonamentu (aktualny skład indeksu, surowe pola cash flow),
 - artefakt kalibracji Round 1 `baseline` (calibration_result.db),
 - snapshot skanu 22.10 (live_scan_result.db).
-Bez FMP, bez Claude. Niczego nie zapisuje do baz wejściowych (otwierane
+Bez Claude. Niczego nie zapisuje do baz wejściowych (otwierane
 read-only). Nie liczy żadnych stóp zwrotu ani metryk wyników -- jedynie
 liczebności obserwacji i spółek.
 
 Sprawdza:
-1. brakujące kody SIC (przyszły profil NIEZNANY) i błędy SEC: 615 CIK
-   backtestu i 500 spółek obecnego składu;
+1. brakujące kody SIC (przyszły profil NIEZNANY) i błędy SEC, osobno dla:
+   615 CIK uniwersum backtestu, 500 spółek uniwersum skanu 22.10 i
+   aktualnego składu indeksu z FMP (zbiory nie są zastępowane jeden drugim);
 2. historyczne zmiany SIC z nagłówków raportów 10-K (point-in-time) i ich
    wiarygodność (zgodność najnowszego nagłówka z bieżącym SIC);
 3. liczebności per rok 2016-2021 (obserwacje i unikalne spółki), pełna
@@ -34,6 +36,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from buffett_scanner.providers.fmp import FMPClient, FMPError  # noqa: E402
 from buffett_scanner.providers.sec_edgar import ARCHIVES_BASE_URL, SecEdgarClient, SecEdgarError  # noqa: E402
 from buffett_scanner.sector_classification import classify_sic_to_sector_profile  # noqa: E402
 
@@ -210,10 +213,13 @@ def per_year(obs, pred=lambda o: True) -> dict[int, tuple[int, int]]:
 
 
 def analyse(sec: dict, ciks_backtest: set[str], ciks_current: set[str], ranked: list[tuple[str, str]],
-            rows, bench) -> dict:
+            rows, bench, ciks_fmp: set[str] = frozenset()) -> dict:
     rep: dict = {}
-    for label, cset in (("backtest_615", ciks_backtest), ("obecny_sklad_500", ciks_current),
-                        ("rankowane_22_10", {c for c, _ in ranked})):
+    sets = [("backtest_615", ciks_backtest), ("uniwersum_skanu_22_10", ciks_current),
+            ("rankowane_22_10", {c for c, _ in ranked})]
+    if ciks_fmp:
+        sets.append(("aktualny_sklad_fmp", ciks_fmp))
+    for label, cset in sets:
         recs = [sec[c] for c in cset]
         rep[label] = {
             "n": len(recs),
@@ -361,9 +367,55 @@ def capital_fields(cal, snap, ranked: list[tuple[str, str]]) -> dict:
             "BA": by_ticker.get("BA", []), "przyklady": {t: by_ticker.get(t, []) for t in ("MRK", "TPR", "F", "AVGO")}}
 
 
+# --- 6. FMP: aktualny skład indeksu i surowe pola cash flow ----------------------
+FMP_KEY_HINTS = ("issu", "dividend", "stockbased", "acquisition", "repurchas", "debt")
+
+
+def fmp_part(fmp, sec_tickers: dict[str, str], scan_universe: set[str], ranked: list[tuple[str, str]]) -> dict:
+    out: dict = {}
+    cons = fmp.get_sp500_constituents()
+    cur = {}
+    unmapped = []
+    for row in cons:
+        sym = row.get("symbol")
+        cik = row.get("cik") or sec_tickers.get(str(sym).upper().replace(".", "-"))
+        if cik:
+            cur[norm_cik(cik)] = sym
+        else:
+            unmapped.append(sym)
+    out["sklad_fmp"] = {"n": len(cons), "cik_zmapowane": len(cur), "bez_cik": unmapped,
+                        "pola_rekordu": sorted(cons[0].keys()) if cons else []}
+    out["sklad_fmp_vs_uniwersum_skanu_22_10"] = {
+        "tylko_w_skladzie_fmp": sorted((c, cur[c]) for c in set(cur) - scan_universe),
+        "tylko_w_uniwersum_skanu": sorted(scan_universe - set(cur)),
+    }
+    keys, nonzero, ba_rows, errors = Counter(), Counter(), [], []
+    for cik, ticker in ranked:
+        try:
+            rows = fmp.get_cash_flow_statement(ticker)
+        except FMPError as exc:
+            errors.append((ticker, str(exc)[:120]))
+            continue
+        for r in rows:
+            for k, v in r.items():
+                if any(h in k.lower() for h in FMP_KEY_HINTS):
+                    keys[k] += 1
+                    if isinstance(v, (int, float)) and v != 0:
+                        nonzero[k] += 1
+        if ticker == "BA":
+            ba_rows = [{k: v for k, v in r.items() if k in ("date", "fiscalYear") or any(
+                h in k.lower() for h in FMP_KEY_HINTS)} for r in rows]
+    out["cash_flow_pola"] = {k: {"wiersze": keys[k], "niezerowe": nonzero[k]} for k in sorted(keys)}
+    out["cash_flow_bledy"] = errors
+    out["BA_cash_flow"] = ba_rows
+    return out, cur
+
+
 def print_report(rep: dict) -> None:
     print("\n== 1. Brakujące SIC i błędy SEC ==")
-    for label in ("backtest_615", "obecny_sklad_500", "rankowane_22_10"):
+    for label in ("backtest_615", "uniwersum_skanu_22_10", "rankowane_22_10", "aktualny_sklad_fmp"):
+        if label not in rep:
+            continue
         r = rep[label]
         print(f"{label}: n={r['n']} | profile={r['profile']} | błędy SEC={len(r['bledy_sec'])} | brak SIC={len(r['brak_sic'])}")
         for cik, name in r["brak_sic"]:
@@ -388,6 +440,20 @@ def print_report(rep: dict) -> None:
         for key in ("nieznany", "blad_sec", "pit_inny_profil", "pit_brak"):
             print(f"   {key}: " + ", ".join(f"{y}: {o}/{u}" for y, (o, u) in s[key].items()))
         print(f"   przejścia profilu (bieżący->PIT): {s['pit_przejscia']}")
+    if "fmp" in rep:
+        f = rep["fmp"]
+        print("\n== 6. FMP: aktualny skład indeksu (osobny zbiór, NIE uniwersum skanu 22.10) ==")
+        print(f"   rekordów {f['sklad_fmp']['n']}, z CIK {f['sklad_fmp']['cik_zmapowane']}, bez CIK {f['sklad_fmp']['bez_cik']}")
+        print(f"   pola rekordu: {f['sklad_fmp']['pola_rekordu']}")
+        d_ = f["sklad_fmp_vs_uniwersum_skanu_22_10"]
+        print(f"   tylko w aktualnym składzie FMP: {d_['tylko_w_skladzie_fmp']}")
+        print(f"   tylko w uniwersum skanu 22.10: {d_['tylko_w_uniwersum_skanu']}")
+        print("   surowe pola cash flow FMP (wiersze / niezerowe), spółki rankowane 22.10:")
+        for k, v in f["cash_flow_pola"].items():
+            print(f"     {k}: {v['wiersze']} / {v['niezerowe']}")
+        print(f"   błędy FMP: {f['cash_flow_bledy']}")
+        for r in f["BA_cash_flow"]:
+            print(f"   BA: {r}")
     if "kapital" in rep:
         k = rep["kapital"]
         print(f"\n== 5. Pola SEC XBRL do alokacji kapitału (cache: {k['cache_cik']} CIK) ==")
@@ -417,24 +483,34 @@ def main(argv=None) -> int:
     p.add_argument("--header-to", default="2021-12-31")
     p.add_argument("--max-ciks", type=int, default=0, help="test na małej próbie (0 = wszystkie)")
     a = p.parse_args(argv)
-    for forbidden in ("FMP_API_KEY", "ANTHROPIC_API_KEY"):
-        if os.environ.get(forbidden):
-            print(f"STOP: {forbidden} ustawiony -- diagnostyka nie może mieć dostępu do płatnych API.")
-            return 2
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        print("STOP: ANTHROPIC_API_KEY ustawiony -- diagnostyka nie może wywoływać Claude.")
+        return 2
     cal = sqlite3.connect(f"file:{a.calibration_db}?mode=ro", uri=True)
     snap = sqlite3.connect(f"file:{a.snapshot_db}?mode=ro", uri=True)
     ciks_backtest = {norm_cik(r[0]) for r in cal.execute("SELECT DISTINCT cik FROM universe_membership")}
     ciks_current = {norm_cik(r[0]) for r in snap.execute("SELECT cik FROM companies")}
     ranked = [(norm_cik(c), t) for c, t in snap.execute("SELECT cik, ticker FROM live_scan_candidates ORDER BY ticker")]
     run_id, rows, bench = load_backtest(cal)
+    fmp_rep, ciks_fmp = None, set()
+    fmp_key = os.environ.get("FMP_API_KEY")
+    if fmp_key:
+        ua0 = os.environ.get("SEC_EDGAR_USER_AGENT", "")
+        with SecEdgarClient(ua0, min_interval_s=0.15) as sc0:
+            sec_tickers = {t.upper(): norm_cik(c) for t, c in sc0.get_company_tickers().items()}
+        with FMPClient(fmp_key, min_interval_s=0.2) as fmp:
+            fmp_rep, cur_map = fmp_part(fmp, sec_tickers, ciks_current, ranked)
+        ciks_fmp = set(cur_map)
+        print(f"Aktualny skład indeksu z FMP: {len(ciks_fmp)} CIK (osobny zbiór od uniwersum skanu 22.10)")
     print(f"backtest run_id={run_id} | kandydaci={len(rows)} | CIK backtestu={len(ciks_backtest)} "
           f"| obecny skład={len(ciks_current)} | rankowane 22.10={len(ranked)}")
-    ciks_all = ciks_backtest | ciks_current
+    ciks_all = ciks_backtest | ciks_current | ciks_fmp
     if a.max_ciks:
         keep = sorted(ciks_backtest, key=int)[: a.max_ciks] + sorted(ciks_current - ciks_backtest, key=int)[: a.max_ciks]
         ciks_all = set(keep) | {c for c, _ in ranked if c in ciks_backtest}
         ciks_backtest &= ciks_all
         ciks_current &= ciks_all
+        ciks_fmp &= ciks_all
         ranked = [r for r in ranked if r[0] in ciks_all]
         print(f"TRYB TESTOWY: {len(ciks_all)} CIK")
     ua = os.environ.get("SEC_EDGAR_USER_AGENT", "")
@@ -444,7 +520,9 @@ def main(argv=None) -> int:
     print(f"Zapytań SEC łącznie: {fetcher.requests}")
     if a.max_ciks:
         rows = [r for r in rows if norm_cik(r[1]) in ciks_backtest]
-    rep = analyse(sec, ciks_backtest, ciks_current, ranked, rows, bench)
+    rep = analyse(sec, ciks_backtest, ciks_current, ranked, rows, bench, ciks_fmp)
+    if fmp_rep is not None:
+        rep["fmp"] = fmp_rep
     rep["kapital"] = capital_fields(cal, snap, ranked)
     rep["meta"] = {"run_id": run_id, "sec_requests": fetcher.requests, "test_mode": bool(a.max_ciks)}
     Path(a.out).write_text(json.dumps({"report": rep, "sec": sec}, ensure_ascii=False, indent=1, default=str))
