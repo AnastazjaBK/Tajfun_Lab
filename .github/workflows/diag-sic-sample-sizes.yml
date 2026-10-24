@@ -1,9 +1,11 @@
-name: Diagnostyka SIC i liczebności (tylko SEC, bez płatnych API)
+name: Diagnostyka SIC i liczebności (SEC + FMP w abonamencie, bez Claude)
 
-# Zgoda właścicielki 2026-10-24. Bezpłatna diagnostyka: wyłącznie SEC EDGAR
-# (throttling poniżej limitu 10 zapytań/s) + odczyt istniejącego artefaktu
-# kalibracji i snapshotu z 22.10. Bez FMP, bez Claude, bez publikacji, bez
-# zmian metodologii/scoringu/wyników historycznych. Token tylko do odczytu.
+# Zgoda właścicielki 2026-10-24 (z korektą: FMP dozwolone w ramach abonamentu).
+# SEC EDGAR (throttling poniżej limitu 10 zapytań/s) do SIC i danych
+# historycznych; FMP do aktualnego składu indeksu i surowych pól cash flow;
+# odczyt istniejącego artefaktu kalibracji i snapshotu z 22.10. Bez Claude,
+# bez publikacji, bez zmian metodologii/scoringu/wyników historycznych.
+# Token tylko do odczytu.
 # Uruchamiana WYŁĄCZNIE z gałęzi roboczej, z potwierdzeniem commitu.
 
 on:
@@ -77,9 +79,10 @@ jobs:
           echo "${{ inputs.snapshot_sha256 }}  live_scan_result.db" | sha256sum -c -
           sha256sum calibration_result.db
 
-      - name: Diagnostyka (tylko SEC)
+      - name: Diagnostyka (SEC + FMP, bez Claude)
         env:
           SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
         run: |
           python scripts/diag_sic_and_sample_sizes.py \
             --calibration-db calibration_result.db \
