@@ -154,6 +154,8 @@ def render_full_ranking_table(ranked: list[RankedCandidate]) -> str:
         i = f"{i}=" if i in tied else str(i)
         s = c.score
         pct = f"{s.deterministic_score_pct:.2f}" if s.deterministic_score_pct is not None else "N/A"
+        if s.deterministic_score_pct is not None and s.valuation_score is None:
+            pct += " (bez DCF)"  # wynik bez wyceny -- nie potwierdza niedowartościowania
         val = f"{s.valuation_score:.1f}" if s.valuation_score is not None else "N/A"
         mos = f"{s.margin_of_safety_base_pct:.1f}%" if s.margin_of_safety_base_pct is not None else "N/A"
         gate = "PASSED" if c.hard_gate_result.passed else "TRIGGERED"
@@ -162,6 +164,8 @@ def render_full_ranking_table(ranked: list[RankedCandidate]) -> str:
             f"| {i} | {c.ticker} | {pct} | {s.deterministic_partial_score:.1f} | "
             f"{s.safety_score:.1f} | {val} | {s.dividend_score:.1f} | {mos} | {gate} | {triggers} |"
         )
+    lines += ["", "„(bez DCF)” = wynik bez komponentu wyceny, przeskalowany do 100% dostępnych "
+                  "komponentów -- nie potwierdza niedowartościowania."]
     return "\n".join(lines)
 
 

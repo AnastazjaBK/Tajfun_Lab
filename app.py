@@ -132,6 +132,9 @@ from buffett_scanner.ui.labels import (
     deterministic_points_label,
     holding_action_label,
     missing_components_label,
+    NO_DCF_NOTE,
+    NO_DCF_SHORT,
+    has_no_dcf,
     run_status_banner,
 )
 from buffett_scanner.ui.price_changes import (
@@ -465,8 +468,10 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
                 r["deterministic_partial_score"], r["available_components"], weights,
             ),
             "Brakujące komponenty": missing_components_label(r["missing_components"], weights),
+            "Wycena DCF": NO_DCF_SHORT if has_no_dcf(r["missing_components"]) else "jest",
             "Margines bezpieczeństwa (BASE)": (
-                f"{r['margin_of_safety_pct']:.1f}%" if r["margin_of_safety_pct"] is not None else "—"
+                f"{r['margin_of_safety_pct']:.1f}%" if r["margin_of_safety_pct"] is not None
+                else ("brak (bez DCF)" if has_no_dcf(r["missing_components"]) else "—")
             ),
             "Dlaczego ciekawa?": r["bull_case_first"] or "—",
             "Największe ryzyko": r["biggest_risk"] or "—",
@@ -475,6 +480,9 @@ def _render_synthesis_table(scanner_conn, portfolio_conn) -> tuple[str | None, l
         for r in rows
     ]
     _show_table(_name_first(table_data))
+    no_dcf = [r["ticker"] for r in rows if has_no_dcf(r["missing_components"])]
+    if no_dcf:
+        st.warning(f"{', '.join(no_dcf)}: {NO_DCF_NOTE}. Pozycja w rankingu wynika z obecnej punktacji.")
     st.caption("★ TOP 5 = pierwsza piątka w ramach TOP 20 wg pełnego wyniku po analizie jakościowej "
                "(„=” — równy wynik).")
     if rows[0]["top5_boundary_tie"]:
@@ -847,7 +855,7 @@ def _render_valuation_section(valuation_result, current_price: float) -> None:
     st.markdown("#### Wycena")
     st.write(f"Obecna cena: **{current_price}**")
     if not valuation_result.implemented:
-        st.info(f"Wycena DCF niedostępna dla tej spółki. Powód: {valuation_result.reason}")
+        st.warning(f"{NO_DCF_NOTE[0].upper()}{NO_DCF_NOTE[1:]}. Powód: {valuation_result.reason}")
         return
 
     for scenario_key, label in _VALUATION_SCENARIO_LABELS:

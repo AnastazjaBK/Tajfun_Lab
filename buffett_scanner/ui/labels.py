@@ -217,6 +217,21 @@ def deterministic_points_label(
     return f"{earned:.1f} / {max_available:g} pkt (z {full_scale:g})"
 
 
+# Decyzja właścicielki 2026-10-24: spółka bez wyceny DCF zostaje w rankingu
+# na pozycji z obecnej punktacji, ale jej wynik (renormalizowany bez
+# komponentu wyceny) nigdy nie jest pokazywany jako potwierdzone
+# niedowartościowanie.
+NO_DCF_SHORT = "BRAK wyceny DCF"
+NO_DCF_NOTE = (
+    "brak wyceny DCF — wynik liczony bez komponentu wyceny (przeskalowany do 100%), "
+    "nie potwierdza niedowartościowania"
+)
+
+
+def has_no_dcf(missing_components) -> bool:
+    return "valuation" in missing_components
+
+
 def missing_components_label(missing: list[str], weights: dict[str, float]) -> str:
     """Np. "jakość biznesu (45), strach/okazja (10)"; "—" gdy niczego nie brakuje."""
     if not missing:

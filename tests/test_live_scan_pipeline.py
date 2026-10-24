@@ -187,3 +187,15 @@ def test_render_full_ranking_table_includes_all_candidates_and_decline_trigger()
     assert "AAA" in table and "BBB" in table
     assert "month_decline" in table
     assert table.index("AAA") < table.index("BBB")  # wyższy score_pct wyżej w tabeli
+
+
+def test_full_ranking_table_marks_score_without_dcf():
+    """Decyzja 2026-10-24: wynik bez wyceny (np. ubezpieczyciel GL, 100%)
+    oznaczony „(bez DCF)”; wynik z wyceną bez oznaczenia."""
+    with_dcf = _candidate("WITH")
+    insurer = _candidate("INSR", sector_profile="INSURER")
+    assert insurer.score.valuation_score is None and with_dcf.score.valuation_score is not None
+    table = render_full_ranking_table(rank_all_candidates([with_dcf, insurer]))
+    assert f"| INSR | {insurer.score.deterministic_score_pct:.2f} (bez DCF) |" in table
+    assert f"| WITH | {with_dcf.score.deterministic_score_pct:.2f} |" in table
+    assert "nie potwierdza niedowartościowania" in table

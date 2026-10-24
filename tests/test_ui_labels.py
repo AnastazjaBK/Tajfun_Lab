@@ -131,3 +131,11 @@ def test_missing_components_label_lists_components_with_their_weights():
     assert label == "jakość biznesu (45), strach/okazja (10), wycena (20)"
     assert missing_components_label([], _WEIGHTS) == "—"
     assert missing_components_label(["new_component"], _WEIGHTS) == "new_component"
+
+
+def test_no_dcf_marking_never_reads_as_confirmed_undervaluation():
+    from buffett_scanner.ui.labels import NO_DCF_NOTE, has_no_dcf
+
+    assert has_no_dcf(["business_quality", "fear", "valuation"])
+    assert not has_no_dcf(["business_quality", "fear"])
+    assert "nie potwierdza niedowartościowania" in NO_DCF_NOTE
