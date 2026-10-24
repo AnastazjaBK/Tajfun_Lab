@@ -1,0 +1,97 @@
+name: Diagnostyka SIC i liczebności (tylko SEC, bez płatnych API)
+
+# Zgoda właścicielki 2026-10-24. Bezpłatna diagnostyka: wyłącznie SEC EDGAR
+# (throttling poniżej limitu 10 zapytań/s) + odczyt istniejącego artefaktu
+# kalibracji i snapshotu z 22.10. Bez FMP, bez Claude, bez publikacji, bez
+# zmian metodologii/scoringu/wyników historycznych. Token tylko do odczytu.
+# Uruchamiana WYŁĄCZNIE z gałęzi roboczej, z potwierdzeniem commitu.
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: "Pełny SHA commitu gałęzi roboczej, który ma zostać uruchomiony"
+        required: true
+      max_ciks:
+        description: "Test na małej próbie: liczba CIK z każdego zbioru (0 = pełna diagnostyka)"
+        required: false
+        default: "0"
+      calibration_run_id:
+        description: "Run kalibracji Round 1 baseline (artefakt calibration-round1-baseline-db)"
+        required: false
+        default: "37313299445"
+      snapshot_tag:
+        description: "Release ze snapshotem skanu 22.10"
+        required: false
+        default: "scanner-snapshot-live-scan-2026-10-22T202049554465Z"
+      snapshot_sha256:
+        description: "Oczekiwany SHA256 snapshotu"
+        required: false
+        default: "69e6785df0de6991ad27b9dfdf315278adeaa096e6423286ad14c89d0f7ce0e2"
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - name: Kontrola gałęzi i commitu
+        run: |
+          echo "ref=${GITHUB_REF} sha=${GITHUB_SHA} expected=${{ inputs.expected_sha }}"
+          if [ "${GITHUB_REF}" != "refs/heads/claude/buffett-scanner-design-review-mrud89" ]; then
+            echo "STOP: diagnostyka tylko z gałęzi roboczej"; exit 1
+          fi
+          if [ "${GITHUB_SHA}" != "${{ inputs.expected_sha }}" ]; then
+            echo "STOP: commit ${GITHUB_SHA} różny od oczekiwanego"; exit 1
+          fi
+
+      - uses: actions/checkout@v4
+
+      - name: Potwierdzenie commitu
+        run: git log -1 --format='commit %H%n%s'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Testy skryptu diagnostycznego (offline)
+        run: python -m pytest -q tests/test_diag_sic_and_sample_sizes.py
+
+      - name: Artefakt kalibracji (tylko odczyt)
+        uses: actions/download-artifact@v4
+        with:
+          name: calibration-round1-baseline-db
+          run-id: ${{ inputs.calibration_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Snapshot 22.10 (tylko odczyt) i kontrola SHA256
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "${{ inputs.snapshot_tag }}" -p live_scan_result.db -R "${GITHUB_REPOSITORY}"
+          echo "${{ inputs.snapshot_sha256 }}  live_scan_result.db" | sha256sum -c -
+          sha256sum calibration_result.db
+
+      - name: Diagnostyka (tylko SEC)
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+        run: |
+          python scripts/diag_sic_and_sample_sizes.py \
+            --calibration-db calibration_result.db \
+            --snapshot-db live_scan_result.db \
+            --out diag_sic_sample_sizes.json \
+            --max-ciks "${{ inputs.max_ciks }}"
+
+      - name: Wynik jako artefakt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diag-sic-sample-sizes
+          path: diag_sic_sample_sizes.json
+          retention-days: 30
+          if-no-files-found: warn
