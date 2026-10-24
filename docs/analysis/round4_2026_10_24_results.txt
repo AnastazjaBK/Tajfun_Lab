@@ -1,0 +1,284 @@
+Grupy: {'Z_DCF': 116, 'BEZ_DCF': 39, 'BEZ_METODY': 4, 'NIEKOMPLETNE': 3}
+BEZ_METODY: ['ARE', 'CBRE', 'GL', 'WY'] | NIEKOMPLETNE: ['APO', 'COIN', 'HONA']
+
+== 1. Ograniczenia warunków rdzenia ==
+EBITDA <= 0: [('CVNA', '-0.11', '3.19', True), ('ECHO', '-15.79', '29.12', True), ('F', '-4.58', '144.22', True), ('IP', '-0.10', '9.66', True), ('LITE', '-6.88', '-0.37', True), ('MRNA', '-2.55', '-0.68', True), ('SKYD', '-4.92', '11.53', True)]
+  'niska dźwignia' zaliczona mimo EBITDA <= 0 (dług netto/EBITDA ujemny przez znak): ['CVNA', 'ECHO', 'F', 'IP', 'LITE', 'MRNA', 'SKYD']
+dźwignia niepoliczalna (brak danych/EBITDA=0): []
+FCF ostatniego roku <= 0, ale suma 3 lat > 0: [('DOW', '-1.45', '1.12'), ('FDXF', '-0.21', '1.96'), ('IP', '-0.16', '1.29'), ('MOS', '-0.53', '0.52')]
+FCF ostatniego roku > 0, ale suma 3 lat <= 0: [('ALB', '0.69', '-1.13'), ('BE', '0.06', '-0.37'), ('CEG', '1.29', '-11.46')]
+„brak trwałych strat” zaliczony mimo straty w 1-2 z 3 lat: [('ALB', ['1.57', '-1.18', '-0.51']), ('BA', ['-2.22', '-11.82', '2.23']), ('COHR', ['-0.16', '0.05', '0.80']), ('CRL', ['0.47', '0.01', '-0.14']), ('DASH', ['-0.56', '0.12', '0.94']), ('DOW', ['0.59', '1.12', '-2.62']), ('EXE', ['2.42', '-0.71', '1.82']), ('F', ['4.35', '5.88', '-8.18']), ('FIS', ['-6.66', '1.45', '0.38']), ('GEV', ['-0.44', '1.55', '4.88']), ('GIS', ['2.50', '2.30', '-0.09']), ('HOOD', ['-0.54', '1.41', '1.88']), ('INTC', ['1.69', '-18.76', '-0.27']), ('IP', ['0.30', '0.56', '-3.52']), ('LITE', ['-0.55', '0.03', '-6.94']), ('MCHP', ['1.91', '-0.00', '0.20']), ('MRVL', ['-0.93', '-0.89', '2.67']), ('NRG', ['-0.20', '1.12', '0.86']), ('RDDT', ['-0.09', '-0.48', '0.53']), ('SNDK', ['-0.67', '-1.64', '11.43']), ('WDC', ['-0.80', '1.86', '9.30'])]
+dług netto/EBITDA w przedziale (2; 3] (wypadają przez próg 2): [('LMT', 2.01), ('MOS', 2.02), ('BSX', 2.03), ('WAB', 2.09), ('GNRC', 2.13), ('NOC', 2.13), ('APTV', 2.17), ('CMCSA', 2.18), ('PKG', 2.18), ('CAT', 2.25), ('INTC', 2.25), ('HSY', 2.29), ('IR', 2.3), ('PWR', 2.32), ('GLW', 2.33), ('NXPI', 2.35), ('UNP', 2.36), ('MLM', 2.44), ('COO', 2.54), ('HON', 2.69), ('LHX', 2.71), ('LVS', 2.73), ('ROP', 2.85), ('Q', 2.9), ('MKC', 2.91), ('NDAQ', 2.92), ('TSCO', 2.93), ('CSX', 2.98)]
+
+== 2. Reguły kwalifikacji (bezpieczeństwo x wycena dla grupy z DCF) ==
+| Reguła bezp. | Wycena | Q z DCF | Q bez DCF | razem | maks. wywołań |
+| P12 | MoS>=0 | 35 | 8 | 43 | 129 |
+| P12 | MoS>=50 | 13 | 8 | 21 | 63 |
+| RDZEN | MoS>=0 | 41 | 9 | 50 | 150 |
+| RDZEN | MoS>=50 | 17 | 9 | 26 | 78 |
+| RDZEN_POPR | MoS>=0 | 39 | 6 | 45 | 135 |
+| RDZEN_POPR | MoS>=50 | 15 | 6 | 21 | 63 |
+
+Różnice RDZEN -> RDZEN_POPR (bezpieczeństwo, wszystkie spółki operacyjne):
+  odpadają: [('CEG', 'FCF 3 l. -11.46 mld'), ('CVNA', 'dług netto przy EBITDA <= 0'), ('F', 'dług netto przy EBITDA <= 0'), ('LITE', 'zysk netto > 0 w mniej niż 2 z 3 lat'), ('MRVL', 'zysk netto > 0 w mniej niż 2 z 3 lat'), ('RDDT', 'zysk netto > 0 w mniej niż 2 z 3 lat'), ('SNDK', 'zysk netto > 0 w mniej niż 2 z 3 lat')]
+  wchodzą: []
+
+RDZEN_POPR + MoS>=0 -- skład:
+  z DCF: ['ADBE', 'ALLE', 'ANET', 'APH', 'APP', 'BKNG', 'CHRW', 'CMG', 'CMI', 'CPRT', 'DASH', 'DECK', 'DXCM', 'EME', 'ETN', 'EXE', 'FIX', 'FLEX', 'HII', 'HWM', 'INTU', 'JBHT', 'JBL', 'LDOS', 'LII', 'MU', 'PH', 'PNR', 'PYPL', 'QCOM', 'ROL', 'STX', 'TPL', 'TPR', 'TYL', 'VRT', 'WDC', 'XYL', 'ZTS']
+  bez DCF: ['FSLR', 'GEV', 'LEN', 'NFLX', 'PODD', 'UBER']
+  z DCF przy MoS>=50: ['ADBE', 'APP', 'BKNG', 'CHRW', 'DECK', 'EME', 'EXE', 'HII', 'INTU', 'JBHT', 'JBL', 'LDOS', 'MU', 'TPR', 'TYL']
+
+Obecna shortlista (24) wobec RDZEN_POPR + MoS>=0 -- kto odpada i dlaczego:
+  APO: grupa NIEKOMPLETNE
+  APTV: dług netto/EBITDA 2.17
+  CEG: FCF 3 l. -11.46 mld
+  FISV: dług netto/EBITDA 3.16
+  SNDK: zysk netto > 0 w mniej niż 2 z 3 lat
+
+Wysokie bezpieczeństwo punktowe (>=12/16), a odpadają w RDZEN_POPR:
+   [('AKAM', 13.0, 'dług netto/EBITDA 4.46'), ('ARES', 13.0, 'dług netto/EBITDA 5.84'), ('BSX', 13.0, 'dług netto/EBITDA 2.03'), ('CEG', 13.0, 'FCF 3 l. -11.46 mld'), ('COO', 13.0, 'dług netto/EBITDA 2.54'), ('CVNA', 13.0, 'dług netto przy EBITDA <= 0'), ('DDOG', 13.0, 'dług netto/EBITDA 5.85'), ('DPZ', 13.0, 'dług netto/EBITDA 4.53'), ('IR', 13.0, 'dług netto/EBITDA 2.30'), ('LITE', 13.0, 'zysk netto > 0 w mniej niż 2 z 3 lat'), ('MCHP', 13.0, 'dług netto/EBITDA 3.78'), ('MLM', 13.0, 'dług netto/EBITDA 2.44'), ('MRVL', 16.0, 'zysk netto > 0 w mniej niż 2 z 3 lat'), ('Q', 13.0, 'dług netto/EBITDA 2.90'), ('RDDT', 16.0, 'zysk netto > 0 w mniej niż 2 z 3 lat'), ('SNDK', 16.0, 'zysk netto > 0 w mniej niż 2 z 3 lat'), ('SNPS', 13.0, 'dług netto/EBITDA 4.56')]
+
+BEZ_DCF -- przyczyny braku DCF wśród zakwalifikowanych (RDZEN_POPR):
+  FSLR: FCF ost. 1.19 mld, FCF 3 l. 0.09 mld, dług netto/EBITDA -1.07
+  GEV: FCF ost. 3.71 mld, FCF 3 l. 5.85 mld, dług netto/EBITDA -2.40
+  LEN: FCF ost. 0.03 mld, FCF 3 l. 7.34 mld, dług netto/EBITDA 0.85
+  NFLX: FCF ost. 9.46 mld, FCF 3 l. 23.31 mld, dług netto/EBITDA 0.18
+  PODD: FCF ost. 0.38 mld, FCF 3 l. 0.75 mld, dług netto/EBITDA 0.66
+  UBER: FCF ost. 9.76 mld, FCF 3 l. 20.02 mld, dług netto/EBITDA 0.71
+
+Pełna tabela (ticker;grupa;fq;rdzeń;rdzeń_popr;MoS;FCF ost.;FCF 3 l.;dług netto/EBITDA;przyczyna):
+  ADBE;Z_DCF;13;1;1;55.4;9.85;24.67;0.12;
+  ADI;Z_DCF;16;1;1;-8.9;4.28;10.96;1.23;
+  AKAM;Z_DCF;13;0;0;-3672.0;0.70;2.15;4.46;dług netto/EBITDA 4.46
+  ALB;BEZ_DCF;11;0;0;—;0.69;-1.13;3.01;FCF 3 l. -1.13 mld, dług netto/EBITDA 3.01, zysk netto > 0 w mniej niż 2 z 3 lat
+  ALLE;Z_DCF;16;1;1;21.6;0.69;1.78;1.92;
+  AMAT;Z_DCF;16;1;1;-189.5;5.70;20.78;-0.02;
+  AMD;Z_DCF;16;1;1;-109.0;6.74;10.26;-0.15;
+  ANET;Z_DCF;16;1;1;13.5;4.25;9.93;-0.45;
+  APH;Z_DCF;16;1;1;26.3;4.38;8.68;0.63;
+  APP;Z_DCF;16;1;1;60.9;3.94;7.09;0.24;
+  APTV;Z_DCF;10;0;0;88.5;1.53;4.13;2.17;dług netto/EBITDA 2.17
+  ARES;BEZ_DCF;13;0;0;—;3.19;5.59;5.84;dług netto/EBITDA 5.84
+  AVGO;Z_DCF;16;1;1;-8.4;26.91;63.96;1.41;
+  AXON;Z_DCF;10;0;0;-13958.6;0.08;0.53;3.61;dług netto/EBITDA 3.61
+  BA;BEZ_DCF;4;0;0;—;-1.88;-11.84;5.91;FCF 3 l. -11.84 mld, dług netto/EBITDA 5.91, zysk netto > 0 w mniej niż 2 z 3 lat
+  BE;BEZ_DCF;8;0;0;—;0.06;-0.37;26.83;FCF 3 l. -0.37 mld, dług netto/EBITDA 26.83, zysk netto > 0 w mniej niż 2 z 3 lat
+  BKNG;Z_DCF;13;1;1;75.3;9.09;23.98;0.23;
+  BSX;Z_DCF;13;0;0;66.5;3.66;8.01;2.03;dług netto/EBITDA 2.03
+  BX;Z_DCF;13;1;1;-1707.7;1.74;9.00;1.48;
+  CARR;Z_DCF;5;0;0;-576.6;1.70;3.91;3.15;dług netto/EBITDA 3.15
+  CAT;Z_DCF;10;0;0;-58.2;7.45;26.07;2.25;dług netto/EBITDA 2.25
+  CDNS;Z_DCF;16;1;1;-72.0;1.59;3.95;-0.28;
+  CEG;BEZ_DCF;13;1;0;—;1.29;-11.46;0.93;FCF 3 l. -11.46 mld
+  CHRW;Z_DCF;11;1;1;66.2;0.89;2.03;1.65;
+  CHTR;BEZ_DCF;5;0;0;—;4.42;11.07;4.56;dług netto/EBITDA 4.56
+  CIEN;Z_DCF;16;1;1;-169.8;0.67;1.11;1.26;
+  CLX;BEZ_DCF;5;0;0;—;0.41;1.65;4.60;dług netto/EBITDA 4.60
+  CMCSA;Z_DCF;8;0;0;61.2;19.23;47.57;2.18;dług netto/EBITDA 2.18
+  CMG;Z_DCF;13;1;1;27.6;1.45;4.18;1.99;
+  CMI;Z_DCF;11;1;1;6.6;2.39;5.42;0.98;
+  COHR;BEZ_DCF;10;0;0;—;-1.03;-0.64;1.52;FCF 3 l. -0.64 mld
+  COO;Z_DCF;13;0;0;-804.8;0.43;0.94;2.54;dług netto/EBITDA 2.54
+  CPRT;Z_DCF;16;1;1;29.3;1.27;3.46;-0.88;
+  CRH;Z_DCF;13;1;1;-40.9;2.91;8.27;1.94;
+  CRL;Z_DCF;8;0;0;-365.9;0.52;1.39;6.94;dług netto/EBITDA 6.94
+  CSGP;Z_DCF;13;1;1;-1452.9;0.04;0.26;-2.01;
+  CSX;BEZ_DCF;8;0;0;—;1.71;7.69;2.98;dług netto/EBITDA 2.98
+  CVNA;BEZ_DCF;13;1;0;—;0.89;2.43;-29.04;dług netto przy EBITDA <= 0
+  DASH;Z_DCF;13;1;1;36.7;2.17;5.33;-0.64;
+  DDOG;Z_DCF;13;0;0;-62.2;1.00;2.47;5.85;dług netto/EBITDA 5.85
+  DECK;Z_DCF;16;1;1;81.2;1.10;3.00;-1.09;
+  DELL;Z_DCF;10;1;1;-151.4;8.55;16.34;1.69;
+  DOW;BEZ_DCF;5;0;0;—;-1.45;1.12;13.28;dług netto/EBITDA 13.28
+  DPZ;Z_DCF;13;0;0;-42.3;0.67;1.67;4.53;dług netto/EBITDA 4.53
+  DVA;Z_DCF;7;0;0;-385.1;1.31;4.27;5.41;dług netto/EBITDA 5.41
+  DXCM;Z_DCF;16;1;1;49.5;1.08;2.22;0.35;
+  ECHO;BEZ_DCF;3;0;0;—;-1.07;-2.03;-1.84;FCF 3 l. -2.03 mld, dług netto przy EBITDA <= 0, zysk netto > 0 w mniej niż 2 z 3 lat
+  EIX;BEZ_DCF;4;0;0;—;-0.71;-3.46;4.87;FCF 3 l. -3.46 mld, dług netto/EBITDA 4.87
+  EME;Z_DCF;10;1;1;57.9;1.19;3.34;-0.36;
+  ETN;Z_DCF;13;1;1;27.6;3.55;9.94;1.70;
+  EXE;Z_DCF;13;1;1;68.1;1.84;2.40;0.79;
+  F;Z_DCF;10;1;0;63.2;12.47;25.89;-31.48;dług netto przy EBITDA <= 0
+  FCX;Z_DCF;13;1;1;-4654.2;1.12;3.92;0.93;
+  FDXF;BEZ_DCF;5;0;0;—;-0.21;1.96;4.40;dług netto/EBITDA 4.40
+  FICO;Z_DCF;10;0;0;37.4;0.77;1.84;3.09;dług netto/EBITDA 3.09
+  FIS;Z_DCF;10;0;0;-56.3;2.81;9.00;4.39;dług netto/EBITDA 4.39
+  FISV;Z_DCF;10;0;0;71.1;4.30;13.13;3.16;dług netto/EBITDA 3.16
+  FIX;Z_DCF;13;1;1;25.6;1.03;2.31;-0.14;
+  FLEX;Z_DCF;10;1;1;34.9;1.05;2.92;1.00;
+  FSLR;BEZ_DCF;16;1;1;—;1.19;0.09;-1.07;
+  GEV;BEZ_DCF;10;1;1;—;3.71;5.85;-2.40;
+  GIS;Z_DCF;5;0;0;-1069.9;1.63;6.45;3.89;dług netto/EBITDA 3.89
+  GLW;Z_DCF;10;0;0;-2499.7;1.41;3.00;2.33;dług netto/EBITDA 2.33
+  GNRC;Z_DCF;8;0;0;-503.7;0.27;1.27;2.13;dług netto/EBITDA 2.13
+  HII;Z_DCF;10;1;1;67.8;0.79;1.50;1.96;
+  HON;Z_DCF;10;0;0;-24.8;5.42;15.25;2.69;dług netto/EBITDA 2.69
+  HOOD;BEZ_DCF;10;0;0;—;1.58;2.54;3.38;dług netto/EBITDA 3.38
+  HSY;Z_DCF;10;0;0;-55.0;1.75;5.23;2.29;dług netto/EBITDA 2.29
+  HWM;Z_DCF;16;1;1;4.2;1.43;3.09;0.97;
+  IBM;Z_DCF;10;0;0;-37.7;12.10;35.98;3.10;dług netto/EBITDA 3.10
+  IDXX;Z_DCF;13;1;1;-23.3;1.05;2.62;0.60;
+  INTC;BEZ_DCF;5;0;0;—;-4.95;-34.88;2.25;FCF 3 l. -34.88 mld, dług netto/EBITDA 2.25, zysk netto > 0 w mniej niż 2 z 3 lat
+  INTU;Z_DCF;16;1;1;80.5;8.62;19.33;0.52;
+  IP;BEZ_DCF;7;0;0;—;-0.16;1.29;-99.57;dług netto przy EBITDA <= 0
+  IR;Z_DCF;13;0;0;56.4;1.22;3.74;2.30;dług netto/EBITDA 2.30
+  ISRG;Z_DCF;16;1;1;-131.8;2.49;4.54;-0.77;
+  JBHT;Z_DCF;8;1;1;58.2;0.95;1.45;1.18;
+  JBL;Z_DCF;10;1;1;63.6;1.37;3.48;1.09;
+  JCI;BEZ_DCF;7;0;0;—;0.96;4.34;3.43;dług netto/EBITDA 3.43
+  KDP;BEZ_DCF;7;0;0;—;1.50;4.01;3.60;dług netto/EBITDA 3.60
+  KEYS;Z_DCF;16;1;1;-176.0;1.28;3.39;0.77;
+  KKR;BEZ_DCF;8;0;0;—;0.32;5.22;5.38;dług netto/EBITDA 5.38
+  KLAC;Z_DCF;16;1;1;-171.9;3.77;10.54;0.74;
+  KMI;BEZ_DCF;10;0;0;—;2.89;10.04;4.32;dług netto/EBITDA 4.32
+  LDOS;Z_DCF;13;1;1;71.0;1.62;3.83;1.97;
+  LEN;BEZ_DCF;11;1;1;—;0.03;7.34;0.85;
+  LHX;Z_DCF;10;0;0;-36.4;2.68;6.48;2.71;dług netto/EBITDA 2.71
+  LII;Z_DCF;14;1;1;27.5;0.64;1.91;1.76;
+  LITE;Z_DCF;13;1;0;-1713.9;0.30;0.08;0.05;zysk netto > 0 w mniej niż 2 z 3 lat
+  LMT;Z_DCF;7;0;0;-141.9;6.91;18.42;2.01;dług netto/EBITDA 2.01
+  LOW;Z_DCF;7;0;0;-164.6;7.65;21.52;3.50;dług netto/EBITDA 3.50
+  LRCX;Z_DCF;16;1;1;-19.4;4.89;14.56;-0.17;
+  LULU;Z_DCF;13;1;1;-18.1;0.92;4.15;-0.00;
+  LVS;BEZ_DCF;10;0;0;—;1.78;5.37;2.73;dług netto/EBITDA 2.73
+  MAR;Z_DCF;7;0;0;21.9;2.61;7.33;3.49;dług netto/EBITDA 3.49
+  MCD;Z_DCF;10;0;0;-330.5;7.19;21.11;3.68;dług netto/EBITDA 3.68
+  MCHP;Z_DCF;13;0;0;-1473.7;0.87;4.25;3.78;dług netto/EBITDA 3.78
+  META;Z_DCF;16;1;1;-114.6;46.11;144.03;0.46;
+  MGM;Z_DCF;7;0;0;69.8;1.67;4.65;31.49;dług netto/EBITDA 31.49
+  MKC;Z_DCF;10;0;0;2.0;0.74;2.36;2.91;dług netto/EBITDA 2.91
+  MLM;Z_DCF;13;0;0;-70.3;0.98;2.46;2.44;dług netto/EBITDA 2.44
+  MOS;BEZ_DCF;4;0;0;—;-0.53;0.52;2.02;dług netto/EBITDA 2.02
+  MPWR;Z_DCF;16;1;1;-40.0;0.67;1.89;-1.31;
+  MRK;Z_DCF;16;1;1;-64.3;12.36;39.60;1.27;
+  MRNA;BEZ_DCF;6;0;0;—;-2.06;-9.95;0.27;FCF 3 l. -9.95 mld, zysk netto > 0 w mniej niż 2 z 3 lat
+  MRVL;Z_DCF;16;1;0;-142.8;1.40;3.81;0.47;zysk netto > 0 w mniej niż 2 z 3 lat
+  MU;Z_DCF;16;1;1;72.1;58.96;60.75;-0.30;
+  NCLH;BEZ_DCF;4;0;0;—;-1.17;-1.08;3.77;FCF 3 l. -1.08 mld, dług netto/EBITDA 3.77
+  NDAQ;Z_DCF;10;0;0;44.8;1.99;5.26;2.92;dług netto/EBITDA 2.92
+  NFLX;BEZ_DCF;13;1;1;—;9.46;23.31;0.18;
+  NKE;Z_DCF;13;1;1;-248.4;2.18;12.07;0.76;
+  NOC;Z_DCF;7;0;0;8.1;3.31;8.03;2.13;dług netto/EBITDA 2.13
+  NRG;Z_DCF;10;0;0;43.2;0.77;1.78;3.66;dług netto/EBITDA 3.66
+  NVR;Z_DCF;14;1;1;-50.1;1.10;3.92;-0.42;
+  NXPI;Z_DCF;11;0;0;-145.6;2.28;6.84;2.35;dług netto/EBITDA 2.35
+  ON;Z_DCF;14;1;1;-44.4;1.42;3.07;1.49;
+  ORCL;BEZ_DCF;4;0;0;—;-23.69;-12.27;3.73;FCF 3 l. -12.27 mld, dług netto/EBITDA 3.73
+  P;Z_DCF;16;1;1;-23.0;0.62;1.63;-1.68;
+  PCG;BEZ_DCF;4;0;0;—;-3.07;-10.37;5.81;FCF 3 l. -10.37 mld, dług netto/EBITDA 5.81
+  PG;Z_DCF;13;1;1;-83.1;15.15;45.72;1.03;
+  PH;Z_DCF;13;1;1;25.5;3.90;10.23;1.36;
+  PKG;Z_DCF;10;0;0;-29.9;0.73;2.10;2.18;dług netto/EBITDA 2.18
+  PNR;Z_DCF;16;1;1;42.1;0.75;1.98;1.76;
+  PODD;BEZ_DCF;16;1;1;—;0.38;0.75;0.66;
+  PWR;Z_DCF;7;0;0;6.3;1.62;4.24;2.32;dług netto/EBITDA 2.32
+  PYPL;Z_DCF;13;1;1;38.9;5.56;16.55;0.25;
+  Q;Z_DCF;13;0;0;-124.4;0.99;2.50;2.90;dług netto/EBITDA 2.90
+  QCOM;Z_DCF;16;1;1;46.5;12.82;33.83;0.57;
+  RDDT;BEZ_DCF;16;1;0;—;0.68;0.82;-1.71;zysk netto > 0 w mniej niż 2 z 3 lat
+  ROL;Z_DCF;13;1;1;31.5;0.65;1.73;1.10;
+  ROP;Z_DCF;10;0;0;-8.0;2.49;6.75;2.85;dług netto/EBITDA 2.85
+  SKYD;Z_DCF;6;0;0;-15.4;0.32;0.96;-2.34;dług netto przy EBITDA <= 0, zysk netto > 0 w mniej niż 2 z 3 lat
+  SMCI;BEZ_DCF;10;0;0;—;-6.97;-8.05;0.39;FCF 3 l. -8.05 mld
+  SNA;Z_DCF;16;1;1;-13.4;1.01;3.20;-0.20;
+  SNDK;Z_DCF;16;1;0;71.3;11.49;10.90;-0.33;zysk netto > 0 w mniej niż 2 z 3 lat
+  SNPS;Z_DCF;13;0;0;-1228.8;1.35;4.14;4.56;dług netto/EBITDA 4.56
+  STX;Z_DCF;16;1;1;18.6;3.10;4.59;0.51;
+  TER;Z_DCF;16;1;1;-1108.9;0.45;1.35;0.07;
+  TMUS;BEZ_DCF;10;0;0;—;15.43;33.16;3.73;dług netto/EBITDA 3.73
+  TPL;Z_DCF;16;1;1;8.1;0.49;1.35;-0.17;
+  TPR;Z_DCF;16;1;1;76.9;1.81;4.05;1.40;
+  TSCO;Z_DCF;7;0;0;-27.9;0.74;1.96;2.93;dług netto/EBITDA 2.93
+  TXN;Z_DCF;16;1;1;-2136.2;2.60;5.45;1.47;
+  TYL;Z_DCF;13;1;1;51.8;0.64;1.57;-0.69;
+  UAL;BEZ_DCF;7;0;0;—;2.56;6.13;3.33;dług netto/EBITDA 3.33
+  UBER;BEZ_DCF;13;1;1;—;9.76;20.02;0.71;
+  ULTA;Z_DCF;10;1;1;-57.0;1.07;3.07;0.96;
+  UNP;Z_DCF;10;0;0;-509.2;5.50;16.17;2.36;dług netto/EBITDA 2.36
+  VRT;Z_DCF;16;1;1;30.3;1.89;3.79;0.70;
+  VST;BEZ_DCF;7;0;0;—;0.13;6.39;3.73;dług netto/EBITDA 3.73
+  WAB;Z_DCF;10;0;0;-5.7;1.50;4.14;2.09;dług netto/EBITDA 2.09
+  WDC;Z_DCF;13;1;1;34.5;3.51;4.01;-0.05;
+  WYNN;BEZ_DCF;10;0;0;—;0.69;2.44;6.15;dług netto/EBITDA 6.15
+  XYL;Z_DCF;16;1;1;49.7;0.91;2.42;0.33;
+  ZTS;Z_DCF;16;1;1;16.8;2.28;6.20;1.76;
+
+== 3. FCF na akcję -- ilustracja ==
+spółki z policzalnym wzrostem: 124 z 152; mediana 12.7%/rok; ujemny lub niepoliczalny start: 23
+| Spółka | FCF/akcję start | FCF/akcję koniec | wzrost r/r | wypłaty / FCF 3 l. | zmiana liczby akcji 2 l. |
+| ADBE | 15.42 | 19.26 | 11.8% | 102% | -7.0% |
+| APP | 1.68 | 6.92 | 102.8% | 61% | -5.7% |
+| AVGO | 3.69 | 4.39 | 9.1% | 86% | +13.7% |
+| AXON | 1.69 | 1.78 | 2.6% | 0% | +32.5% |
+| BA | 1.28 | -5.18 | — | — | +25.8% |
+| BSX | 0.90 | 1.79 | 41.2% | 0% | +2.1% |
+| CHTR | 40.09 | 26.79 | -18.3% | 86% | -9.4% |
+| CVNA | -1.42 | 0.72 | — | 0% | +11.8% |
+| DDOG | 1.18 | 2.26 | 38.7% | 0% | +3.8% |
+| DECK | 3.25 | 6.86 | 45.4% | 69% | -6.7% |
+| MRK | 4.39 | 5.27 | 9.6% | 79% | -1.6% |
+| NFLX | 0.62 | 1.80 | 69.9% | 92% | -4.0% |
+| QCOM | 7.50 | 10.21 | 16.7% | 79% | -1.9% |
+| RDDT | -0.65 | 1.34 | — | 0% | +23.7% |
+| SNA | 15.75 | 20.12 | 13.0% | 67% | -1.7% |
+| TPR | 3.86 | 6.43 | 29.1% | 112% | -9.9% |
+| TYL | 7.60 | 11.94 | 25.3% | 0% | +2.4% |
+| UBER | 0.48 | 3.15 | 156.2% | 39% | +1.3% |
+mediana wzrostu FCF/akcję: wypłaty < 10% FCF (n=8): 38.7%; wypłaty >= 75% FCF (n=75): 7.1%
+
+== 4. Wypłaty ponad FCF: dźwignia na początku i końcu okna ==
+wypłaty > FCF 3 l.: 54; dźwignia na końcu <= 2.0: 20; > 2.0 lub EBITDA <= 0: 34
+  ADBE: wypłaty/FCF 102%, dźwignia 0.06 -> 0.12, dług brutto +2.02 mld
+  ADI: wypłaty/FCF 102%, dźwignia 0.92 -> 1.23, dług brutto +2.06 mld
+  ALB: wypłaty/FCF —, dźwignia 0.50 -> 3.01, dług brutto -0.02 mld
+  APTV: wypłaty/FCF 118%, dźwignia 2.75 -> 2.17, dług brutto +1.13 mld
+  BA: wypłaty/FCF —, dźwignia EBITDA<=0 -> 5.91, dług brutto -2.84 mld
+  BE: wypłaty/FCF —, dźwignia EBITDA<=0 -> 26.83, dług brutto +1.97 mld
+  BKNG: wypłaty/FCF 107%, dźwignia 0.17 -> 0.23, dług brutto +6.26 mld
+  BX: wypłaty/FCF 179%, dźwignia 2.58 -> 1.48, dług brutto -0.06 mld
+  CARR: wypłaty/FCF 178%, dźwignia 1.31 -> 3.15, dług brutto +3.30 mld
+  CEG: wypłaty/FCF —, dźwignia 1.83 -> 0.93, dług brutto +3.22 mld
+  CLX: wypłaty/FCF 145%, dźwignia 4.53 -> 4.60, dług brutto +2.60 mld
+  COHR: wypłaty/FCF —, dźwignia 5.98 -> 1.52, dług brutto -0.95 mld
+  CRH: wypłaty/FCF 109%, dźwignia 0.90 -> 1.94, dług brutto +9.07 mld
+  CSGP: wypłaty/FCF 243%, dźwignia 0.00 -> 0.00, dług brutto +0.04 mld
+  CSX: wypłaty/FCF 129%, dźwignia 2.18 -> 2.98, dług brutto +0.82 mld
+  DOW: wypłaty/FCF 584%, dźwignia 1.35 -> 13.28, dług brutto +2.89 mld
+  ECHO: wypłaty/FCF —, dźwignia 5.06 -> EBITDA<=0, dług brutto +5.28 mld
+  EIX: wypłaty/FCF —, dźwignia 7.21 -> 4.87, dług brutto +9.49 mld
+  FICO: wypłaty/FCF 143%, dźwignia 3.17 -> 3.09, dług brutto +1.16 mld
+  FISV: wypłaty/FCF 126%, dźwignia 3.02 -> 3.16, dług brutto +7.58 mld
+  FLEX: wypłaty/FCF 120%, dźwignia 0.67 -> 1.00, dług brutto +0.12 mld
+  GIS: wypłaty/FCF 120%, dźwignia 2.81 -> 3.89, dług brutto +1.47 mld
+  GLW: wypłaty/FCF 116%, dźwignia 1.74 -> 2.33, dług brutto +2.41 mld
+  HON: wypłaty/FCF 117%, dźwignia 1.36 -> 2.69, dług brutto +14.04 mld
+  INTC: wypłaty/FCF —, dźwignia 1.45 -> 2.25, dług brutto +4.53 mld
+  IP: wypłaty/FCF 199%, dźwignia 1.71 -> EBITDA<=0, dług brutto +4.94 mld
+  JBHT: wypłaty/FCF 153%, dźwignia 0.77 -> 1.18, dług brutto +0.32 mld
+  JBL: wypłaty/FCF 134%, dźwignia 0.60 -> 1.09, dług brutto +0.77 mld
+  JCI: wypłaty/FCF 249%, dźwignia 3.38 -> 3.43, dług brutto +2.23 mld
+  KDP: wypłaty/FCF 135%, dźwignia 4.18 -> 3.60, dług brutto +2.56 mld
+  LITE: wypłaty/FCF 171%, dźwignia 10.68 -> —, dług brutto -1.20 mld
+  LMT: wypłaty/FCF 119%, dźwignia 1.49 -> 2.01, dług brutto +6.15 mld
+  LVS: wypłaty/FCF 116%, dźwignia 23.81 -> 2.73, dług brutto +0.16 mld
+  MAR: wypłaty/FCF 178%, dźwignia 2.70 -> 3.49, dług brutto +5.99 mld
+  MCD: wypłaty/FCF 106%, dźwignia 4.23 -> 3.68, dług brutto +6.12 mld
+  MGM: wypłaty/FCF 105%, dźwignia 5.64 -> 31.49, dług brutto +22.16 mld
+  MOS: wypłaty/FCF 366%, dźwignia 0.53 -> 2.02, dług brutto +1.47 mld
+  MRNA: wypłaty/FCF —, dźwignia 0.00 -> —, dług brutto +0.72 mld
+  NCLH: wypłaty/FCF —, dźwignia EBITDA<=0 -> 3.77, dług brutto +0.98 mld
+  NKE: wypłaty/FCF 118%, dźwignia 0.64 -> 0.76, dług brutto -1.11 mld
+  NOC: wypłaty/FCF 115%, dźwignia 1.85 -> 2.13, dług brutto +2.92 mld
+  NRG: wypłaty/FCF 264%, dźwignia 2.84 -> 3.66, dług brutto +8.46 mld
+  NVR: wypłaty/FCF 127%, dźwignia 0.00 -> 0.00, dług brutto +0.19 mld
+  ORCL: wypłaty/FCF —, dźwignia 4.31 -> 3.73, dług brutto +65.71 mld
+  PCG: wypłaty/FCF —, dźwignia 7.85 -> 5.81, dług brutto +7.80 mld
+  PG: wypłaty/FCF 101%, dźwignia 1.25 -> 1.03, dług brutto -0.40 mld
+  PYPL: wypłaty/FCF 104%, dźwignia 0.53 -> 0.25, dług brutto -0.43 mld
+  SMCI: wypłaty/FCF —, dźwignia 0.00 -> 0.39, dług brutto +8.43 mld
+  TER: wypłaty/FCF 112%, dźwignia 0.00 -> 0.07, dług brutto +0.15 mld
+  TMUS: wypłaty/FCF 128%, dźwignia 5.32 -> 3.73, dług brutto +10.48 mld
+  TPR: wypłaty/FCF 112%, dźwignia 1.84 -> 1.40, dług brutto +0.66 mld
+  TSCO: wypłaty/FCF 152%, dźwignia 2.29 -> 2.93, dług brutto +1.67 mld
+  TXN: wypłaty/FCF 313%, dźwignia 0.57 -> 1.47, dług brutto +5.89 mld
+  ZTS: wypłaty/FCF 138%, dźwignia 1.34 -> 1.76, dług brutto +1.40 mld

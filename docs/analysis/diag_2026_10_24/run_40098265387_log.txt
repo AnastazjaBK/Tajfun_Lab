@@ -1,0 +1,383 @@
+  FMP_API_KEY: ***
+##[endgroup]
+Aktualny skład indeksu z FMP: 500 CIK (osobny zbiór od uniwersum skanu 22.10)
+backtest run_id=calib-r1-baseline-2026-10-05T130103Z | kandydaci=7847 | CIK backtestu=615 | obecny skład=500 | rankowane 22.10=162
+  [50/620] zapytań SEC: 752
+  [100/620] zapytań SEC: 1476
+  [150/620] zapytań SEC: 2183
+  [200/620] zapytań SEC: 2885
+  [250/620] zapytań SEC: 3602
+  [300/620] zapytań SEC: 4374
+  [350/620] zapytań SEC: 5072
+  [400/620] zapytań SEC: 5774
+  [450/620] zapytań SEC: 6473
+  [500/620] zapytań SEC: 7117
+  [550/620] zapytań SEC: 7602
+  [600/620] zapytań SEC: 7816
+Zapytań SEC łącznie: 7856
+
+== 1. Brakujące SIC i błędy SEC ==
+backtest_615: n=615 | profile={'GENERAL': 527, 'BANK': 20, 'INSURER': 35, 'REIT': 33} | błędy SEC=0 | brak SIC=0
+uniwersum_skanu_22_10: n=500 | profile={'GENERAL': 425, 'BANK': 17, 'INSURER': 29, 'REIT': 28, 'BLAD_SEC': 1} | błędy SEC=1 | brak SIC=0
+   błąd SEC: CIK=2012866 HTTP 404
+rankowane_22_10: n=162 | profile={'GENERAL': 158, 'REIT': 3, 'INSURER': 1} | błędy SEC=0 | brak SIC=0
+aktualny_sklad_fmp: n=500 | profile={'GENERAL': 425, 'REIT': 28, 'INSURER': 29, 'BANK': 17, 'BLAD_SEC': 1} | błędy SEC=1 | brak SIC=0
+   błąd SEC: CIK=2012866 HTTP 404
+
+== 2. Nagłówki 10-K (point-in-time) ==
+statusy nagłówków: {'OK': 6476}
+CIK backtestu bez żadnego odczytanego nagłówka w oknie: 38
+zgodność z bieżącym SIC: {'zgodny': 610, 'okno_zgodny': 569, 'okno_rozny': 8}
+CIK ze zmianą SIC w nagłówkach: 33; ze zmianą profilu: 5
+   CIK=33213 EQT Corp: 4923(2011-02-24) -> 1311(2014-02-20) | bieżący 1311
+   CIK=48898 HUBBELL INC: 3640(2011-02-16) -> 3670(2013-02-13) | bieżący 3670
+   CIK=62996 MASCO CORP /DE/: 2430(2011-02-18) -> 3430(2021-02-09) | bieżący 3430
+   CIK=64040 S&P Global Inc.: 2731(2011-02-23) -> 7320(2014-02-07) | bieżący 7320
+   CIK=91142 SMITH A O CORP: 3621(2011-02-24) -> 3630(2013-02-27) | bieżący 3630
+   CIK=96223 Jefferies Financial Group Inc.: 2400(2011-02-25) -> 2011(2013-02-25) -> 6211(2020-01-29) | bieżący 6211
+   CIK=105770 WEST PHARMACEUTICAL SERVICES INC: 3060(2011-02-28) -> 3841(2026-02-17) | bieżący 3841
+   CIK=701985 Bath & Body Works, Inc.: 5621(2011-03-18) -> 5990(2026-03-12) | bieżący 5990
+   CIK=717423 MURPHY OIL CORP: 2911(2011-02-28) -> 1311(2015-02-27) | bieżący 1311
+   CIK=773840 HONEYWELL INTERNATIONAL INC: 3714(2011-02-11) -> 3724(2020-02-14) | bieżący 3724
+   CIK=798354 FISERV INC: 7374(2011-02-24) -> 7389(2026-02-19) | bieżący 7389
+   CIK=816761 TERADATA CORP /DE/: 3571(2011-03-01) -> 7372(2019-02-26) | bieżący 7372
+   CIK=827099 Ocean Thermal Energy Corp: 7372(2011-04-13) -> 4931(2018-04-02) | bieżący 4931
+   CIK=833444 Johnson Controls International plc: 7380(2011-11-16) -> 3585(2025-11-14) | bieżący 3585
+   CIK=891103 Match Group, Inc.: 5990(2011-03-01) -> 7200(2021-02-25) -> 7370(2026-02-26) | bieżący 7370
+   CIK=927628 CAPITAL ONE FINANCIAL CORP: 6022(2011-03-01) -> 6021(2014-02-27) | bieżący 6021
+   CIK=1020569 IRON MOUNTAIN INC: 4220(2011-03-01) -> 6798(2016-02-26) | bieżący 6798 [PROFIL]
+   CIK=1034054 SBA COMMUNICATIONS CORP: 4899(2011-02-25) -> 6798(2017-03-01) | bieżący 6798 [PROFIL]
+   CIK=1037868 AMETEK INC/: 3621(2011-02-24) -> 3823(2021-02-18) | bieżący 3823
+   CIK=1051470 CROWN CASTLE INC.: 4899(2011-02-15) -> 6798(2015-02-19) | bieżący 6798 [PROFIL]
+   CIK=1053507 AMERICAN TOWER CORP /MA/: 4899(2011-02-28) -> 6798(2012-02-29) | bieżący 6798 [PROFIL]
+   CIK=1070412 CNX Resources Corp: 1221(2011-02-10) -> 1311(2018-02-07) | bieżący 1311
+   CIK=1075531 Booking Holdings Inc.: 7389(2011-02-25) -> 4700(2020-02-26) | bieżący 4700
+   CIK=1090872 AGILENT TECHNOLOGIES, INC.: 3825(2011-12-16) -> 3826(2015-12-21) | bieżący 3826
+   CIK=1094285 TELEDYNE TECHNOLOGIES INC: 8711(2011-03-03) -> 3812(2012-02-29) | bieżący 3812
+   CIK=1101239 EQUINIX INC: 4813(2011-02-25) -> 6798(2016-02-26) | bieżący 6798 [PROFIL]
+   CIK=1113169 PRICE T ROWE GROUP INC: 6200(2011-02-08) -> 6282(2026-02-13) | bieżący 6282
+   CIK=1267238 ASSURANT, INC.: 6321(2011-02-23) -> 6399(2020-02-19) | bieżący 6399
+   CIK=1415404 EchoStar CORP: 3663(2011-02-24) -> 4899(2021-02-23) | bieżący 4899
+   CIK=1552275 Sunoco LP: 5172(2013-03-29) -> 2911(2020-02-21) | bieżący 2911
+   CIK=1645590 Hewlett Packard Enterprise Co: 3570(2015-12-17) -> 5045(2019-12-13) -> 3570(2025-12-18) | bieżący 3570
+   CIK=1674101 Vertiv Holdings Co: 6770(2019-03-13) -> 3679(2020-03-12) | bieżący 3679
+   CIK=1826011 Banzai International, Inc.: 6770(2021-03-26) -> 7372(2026-03-31) | bieżący 7372
+
+== 3. Liczebności 2016-2021 (obserwacje / unikalne spółki) ==
+-- próba: pelna | razem {'obserwacje': 5834, 'unikalne_spolki': 474}
+   2016: 879 obs. / 231 spółek | dokumentacja 879 | ZGODNE
+   2017: 481 obs. / 184 spółek | dokumentacja 481 | ZGODNE
+   2018: 741 obs. / 255 spółek | dokumentacja 741 | ZGODNE
+   2019: 1042 obs. / 281 spółek | dokumentacja 1042 | ZGODNE
+   2020: 2113 obs. / 423 spółek | dokumentacja 2113 | ZGODNE
+   2021: 578 obs. / 262 spółek | dokumentacja 578 | ZGODNE
+   nieznany: 2016: 0/0, 2017: 0/0, 2018: 0/0, 2019: 0/0, 2020: 0/0, 2021: 0/0
+   blad_sec: 2016: 0/0, 2017: 0/0, 2018: 0/0, 2019: 0/0, 2020: 0/0, 2021: 0/0
+   pit_inny_profil: 2016: 2/1, 2017: 0/0, 2018: 0/0, 2019: 0/0, 2020: 0/0, 2021: 0/0
+   pit_brak: 2016: 0/0, 2017: 0/0, 2018: 0/0, 2019: 1/1, 2020: 1/1, 2021: 0/0
+   przejścia profilu (bieżący->PIT): {'REIT->GENERAL': 2}
+-- próba: z_wycena | razem {'obserwacje': 1111, 'unikalne_spolki': 127}
+   2016: 177 obs. / 56 spółek | dokumentacja 177 | ZGODNE
+   2017: 108 obs. / 39 spółek | dokumentacja 108 | ZGODNE
+   2018: 138 obs. / 53 spółek | dokumentacja 138 | ZGODNE
+   2019: 229 obs. / 64 spółek | dokumentacja 229 | ZGODNE
+   2020: 365 obs. / 95 spółek | dokumentacja 365 | ZGODNE
+   2021: 94 obs. / 49 spółek | dokumentacja 94 | ZGODNE
+   nieznany: 2016: 0/0, 2017: 0/0, 2018: 0/0, 2019: 0/0, 2020: 0/0, 2021: 0/0
+   blad_sec: 2016: 0/0, 2017: 0/0, 2018: 0/0, 2019: 0/0, 2020: 0/0, 2021: 0/0
+   pit_inny_profil: 2016: 0/0, 2017: 0/0, 2018: 0/0, 2019: 0/0, 2020: 0/0, 2021: 0/0
+   pit_brak: 2016: 0/0, 2017: 0/0, 2018: 0/0, 2019: 0/0, 2020: 0/0, 2021: 0/0
+   przejścia profilu (bieżący->PIT): {}
+
+== 6. FMP: aktualny skład indeksu (osobny zbiór, NIE uniwersum skanu 22.10) ==
+   rekordów 503, z CIK 500, bez CIK []
+   pola rekordu: ['cik', 'dateFirstAdded', 'founded', 'headQuarter', 'name', 'sector', 'subSector', 'symbol']
+   tylko w aktualnym składzie FMP: []
+   tylko w uniwersum skanu 22.10: []
+   surowe pola cash flow FMP (wiersze / niezerowe), spółki rankowane 22.10:
+     acquisitionsNet: 802 / 591
+     commonDividendsPaid: 802 / 508
+     commonStockIssuance: 802 / 398
+     commonStockRepurchased: 802 / 644
+     longTermNetDebtIssuance: 802 / 688
+     netCommonStockIssuance: 802 / 756
+     netDebtIssuance: 802 / 710
+     netDividendsPaid: 802 / 514
+     netPreferredStockIssuance: 802 / 59
+     netStockIssuance: 802 / 757
+     preferredDividendsPaid: 802 / 34
+     shortTermNetDebtIssuance: 802 / 249
+     stockBasedCompensation: 802 / 718
+   błędy FMP: []
+   BA: {'date': '2025-12-31', 'fiscalYear': '2025', 'stockBasedCompensation': 426000000, 'acquisitionsNet': -1166000000, 'netDebtIssuance': -3456000000, 'longTermNetDebtIssuance': -3456000000, 'shortTermNetDebtIssuance': 0, 'netStockIssuance': -34000000, 'netCommonStockIssuance': -34000000, 'commonStockIssuance': 0, 'commonStockRepurchased': -34000000, 'netPreferredStockIssuance': 0, 'netDividendsPaid': -331000000, 'commonDividendsPaid': -331000000, 'preferredDividendsPaid': 0}
+   BA: {'date': '2024-12-31', 'fiscalYear': '2024', 'stockBasedCompensation': 407000000, 'acquisitionsNet': 74000000, 'netDebtIssuance': 1488000000, 'longTermNetDebtIssuance': 1488000000, 'shortTermNetDebtIssuance': 0, 'netStockIssuance': 23857000000, 'netCommonStockIssuance': 18200000000, 'commonStockIssuance': 18200000000, 'commonStockRepurchased': 0, 'netPreferredStockIssuance': 5657000000, 'netDividendsPaid': 0, 'commonDividendsPaid': 0, 'preferredDividendsPaid': 0}
+   BA: {'date': '2023-12-31', 'fiscalYear': '2023', 'stockBasedCompensation': 690000000, 'acquisitionsNet': -70000000, 'netDebtIssuance': -5141000000, 'longTermNetDebtIssuance': -5141000000, 'shortTermNetDebtIssuance': 0, 'netStockIssuance': 45000000, 'netCommonStockIssuance': 45000000, 'commonStockIssuance': 45000000, 'commonStockRepurchased': 0, 'netPreferredStockIssuance': 0, 'netDividendsPaid': 0, 'commonDividendsPaid': 0, 'preferredDividendsPaid': 0}
+   BA: {'date': '2022-12-31', 'fiscalYear': '2022', 'stockBasedCompensation': 1941000000, 'acquisitionsNet': -6000000, 'netDebtIssuance': -1276000000, 'longTermNetDebtIssuance': -1276000000, 'shortTermNetDebtIssuance': 0, 'netStockIssuance': 50000000, 'netCommonStockIssuance': 50000000, 'commonStockIssuance': 50000000, 'commonStockRepurchased': 0, 'netPreferredStockIssuance': 0, 'netDividendsPaid': 0, 'commonDividendsPaid': 0, 'preferredDividendsPaid': 0}
+   BA: {'date': '2021-12-31', 'fiscalYear': '2021', 'stockBasedCompensation': 2073000000, 'acquisitionsNet': -6000000, 'netDebtIssuance': -5576000000, 'longTermNetDebtIssuance': -5576000000, 'shortTermNetDebtIssuance': 0, 'netStockIssuance': 42000000, 'netCommonStockIssuance': 42000000, 'commonStockIssuance': 42000000, 'commonStockRepurchased': 0, 'netPreferredStockIssuance': 0, 'netDividendsPaid': 0, 'commonDividendsPaid': 0, 'preferredDividendsPaid': 0}
+
+== 5. Pola SEC XBRL do alokacji kapitału (cache: 615 CIK) ==
+   PaymentsOfDividendsCommonStock: CIK z danymi 2016-2021 295 | FY2025 273
+   PaymentsOfDividends: CIK z danymi 2016-2021 203 | FY2025 173
+   PaymentsOfDividendsPreferredStockAndPreferenceStock: CIK z danymi 2016-2021 68 | FY2025 46
+   DividendsPreferredStock: CIK z danymi 2016-2021 58 | FY2025 35
+   DividendsCommonStockCash: CIK z danymi 2016-2021 231 | FY2025 204
+   CommonStockDividendsPerShareDeclared: CIK z danymi 2016-2021 348 | FY2025 326
+   CommonStockDividendsPerShareCashPaid: CIK z danymi 2016-2021 187 | FY2025 133
+   PaymentsForRepurchaseOfCommonStock: CIK z danymi 2016-2021 521 | FY2025 477
+   ProceedsFromIssuanceOfCommonStock: CIK z danymi 2016-2021 223 | FY2025 126
+   ProceedsFromStockOptionsExercised: CIK z danymi 2016-2021 296 | FY2025 198
+   ShareBasedCompensation: CIK z danymi 2016-2021 495 | FY2025 494
+   StockIssuedDuringPeriodSharesAcquisitions: CIK z danymi 2016-2021 24 | FY2025 2
+   StockIssuedDuringPeriodValueAcquisitions: CIK z danymi 2016-2021 127 | FY2025 34
+   StockRepurchasedDuringPeriodShares: CIK z danymi 2016-2021 109 | FY2025 75
+   PaymentsToAcquireBusinessesNetOfCashAcquired: CIK z danymi 2016-2021 448 | FY2025 322
+   ProceedsFromIssuanceOfLongTermDebt: CIK z danymi 2016-2021 347 | FY2025 238
+   RepaymentsOfLongTermDebt: CIK z danymi 2016-2021 346 | FY2025 278
+   dywidendy FMP vs SEC: porównane okresy 792, niezgodne 57
+   niezgodne: ('APO', '2025-12-31', 1298000000.0, 1201000000, 'różnica > 5%')
+   niezgodne: ('ARES', '2021-12-31', 593506000.0, None, 'brak w SEC')
+   niezgodne: ('ARES', '2022-12-31', 836364000.0, None, 'brak w SEC')
+   niezgodne: ('ARES', '2023-12-31', 1030666000.0, None, 'brak w SEC')
+   niezgodne: ('ARES', '2024-12-31', 1310896000.0, None, 'brak w SEC')
+   niezgodne: ('ARES', '2025-12-31', 1756688000.0, None, 'brak w SEC')
+   niezgodne: ('AVGO', '2021-10-31', 6212000000.0, 5913000000, 'różnica > 5%')
+   niezgodne: ('BSX', '2021-12-31', 0.0, 55000000, 'różnica > 5%')
+   niezgodne: ('BSX', '2022-12-31', 0.0, 55000000, 'różnica > 5%')
+   niezgodne: ('BSX', '2023-12-31', 0.0, 28000000, 'różnica > 5%')
+   niezgodne: ('CEG', '2021-12-31', 1832000000.0, 0, 'różnica > 5%')
+   niezgodne: ('CLX', '2026-06-30', 602000000.0, None, 'brak w SEC')
+   niezgodne: ('COHR', '2022-07-01', 34508000.0, None, 'brak w SEC')
+   niezgodne: ('COHR', '2023-06-30', 27600000.0, None, 'brak w SEC')
+   niezgodne: ('COHR', '2025-06-30', 11438000.0, None, 'brak w SEC')
+   niezgodne: ('COHR', '2026-06-30', 11438000.0, None, 'brak w SEC')
+   niezgodne: ('CRH', '2021-12-31', 796011600.0, None, 'brak w SEC')
+   niezgodne: ('CRH', '2022-12-31', 856386300.0, None, 'brak w SEC')
+   niezgodne: ('CRH', '2023-12-31', 851452000.0, None, 'brak w SEC')
+   niezgodne: ('CRH', '2024-12-31', 1706000000.0, None, 'brak w SEC')
+   niezgodne: ('CRH', '2025-12-31', 996000000.0, None, 'brak w SEC')
+   niezgodne: ('ECHO', '2022-12-31', 2000000.0, None, 'brak w SEC')
+   niezgodne: ('EXE', '2021-12-31', 119000000.0, None, 'brak w SEC')
+   niezgodne: ('FDXF', '2026-05-31', 0.0, 48000000, 'różnica > 5%')
+   niezgodne: ('GLW', '2021-12-31', 871000000.0, None, 'brak w SEC')
+   niezgodne: ('GLW', '2022-12-31', 932000000.0, None, 'brak w SEC')
+   niezgodne: ('GLW', '2023-12-31', 989000000.0, None, 'brak w SEC')
+   niezgodne: ('GLW', '2024-12-31', 986000000.0, None, 'brak w SEC')
+   niezgodne: ('GLW', '2025-12-31', 999000000.0, None, 'brak w SEC')
+   niezgodne: ('HWM', '2021-12-31', 17000000.0, None, 'brak w SEC')
+   niezgodne: ('HWM', '2022-12-31', 42000000.0, None, 'brak w SEC')
+   niezgodne: ('HWM', '2023-12-31', 71000000.0, None, 'brak w SEC')
+   niezgodne: ('HWM', '2024-12-31', 107000000.0, None, 'brak w SEC')
+   niezgodne: ('HWM', '2025-12-31', 181000000.0, None, 'brak w SEC')
+   niezgodne: ('JBL', '2026-08-31', 35000000.0, None, 'brak w SEC')
+   niezgodne: ('KKR', '2025-12-31', 768538000.0, 649942000, 'różnica > 5%')
+   niezgodne: ('LDOS', '2021-12-31', 199000000.0, None, 'brak w SEC')
+   niezgodne: ('LDOS', '2022-12-30', 199000000.0, None, 'brak w SEC')
+   niezgodne: ('LDOS', '2023-12-29', 201000000.0, None, 'brak w SEC')
+   niezgodne: ('LDOS', '2025-01-03', 208000000.0, None, 'brak w SEC')
+   niezgodne: ('LDOS', '2026-01-02', 211000000.0, None, 'brak w SEC')
+   niezgodne: ('MCHP', '2022-03-31', 503800000.0, None, 'brak w SEC')
+   niezgodne: ('MCHP', '2023-03-31', 695300000.0, None, 'brak w SEC')
+   niezgodne: ('MU', '2026-09-03', 610000000.0, None, 'brak w SEC')
+   niezgodne: ('PCG', '2025-12-31', 220000000.0, None, 'brak w SEC')
+   niezgodne: ('QCOM', '2021-09-30', 3008000000.0, None, 'brak w SEC')
+   niezgodne: ('QCOM', '2022-09-30', 3212000000.0, None, 'brak w SEC')
+   niezgodne: ('QCOM', '2023-09-30', 3462000000.0, None, 'brak w SEC')
+   niezgodne: ('QCOM', '2024-09-30', 3687000000.0, None, 'brak w SEC')
+   niezgodne: ('QCOM', '2025-09-28', 3805000000.0, None, 'brak w SEC')
+   niezgodne: ('ROL', '2021-12-31', 168912000.0, 208656000, 'różnica > 5%')
+   niezgodne: ('SKYD', '2025-12-31', 90000000.0, None, 'brak w SEC')
+   niezgodne: ('ZTS', '2021-12-31', 474000000.0, None, 'brak w SEC')
+   niezgodne: ('ZTS', '2022-12-31', 611000000.0, None, 'brak w SEC')
+   niezgodne: ('ZTS', '2023-12-31', 692000000.0, None, 'brak w SEC')
+   niezgodne: ('ZTS', '2024-12-31', 786000000.0, None, 'brak w SEC')
+   niezgodne: ('ZTS', '2025-12-31', 889000000.0, None, 'brak w SEC')
+   BA (koniec okresu, FMP, SEC common, SEC razem, SEC uprzyw., DPS zadekl.):
+     ('2021-12-31', 0.0, None, None, None, None)
+     ('2022-12-31', 0.0, None, None, None, None)
+     ('2023-12-31', 0.0, None, None, None, None)
+     ('2024-12-31', 0.0, None, None, None, None)
+     ('2025-12-31', 331000000.0, None, 331000000, None, None)
+   MRK: ('2021-12-31', 6610000000.0, 6610000000, None, None, 2.64)
+   MRK: ('2022-12-31', 7012000000.0, 7012000000, None, None, 2.8)
+   MRK: ('2023-12-31', 7445000000.0, 7445000000, None, None, 2.96)
+   MRK: ('2024-12-31', 7840000000.0, 7840000000, None, None, 3.12)
+   MRK: ('2025-12-31', 8176000000.0, 8176000000, None, None, 3.28)
+   TPR: ('2022-06-30', 264400000.0, None, 264400000, None, 1)
+   TPR: ('2023-06-30', 283300000.0, None, 283300000, None, 1.2)
+   TPR: ('2024-06-30', 321400000.0, None, 321400000, None, 1.4)
+   TPR: ('2025-06-28', 299300000.0, None, 299300000, None, 1.4)
+   TPR: ('2026-06-27', 326100000.0, None, 326100000, None, 1.6)
+   F: ('2021-12-31', 403000000.0, 403000000, None, None, 0.1)
+   F: ('2022-12-31', 2009000000.0, 2009000000, None, None, 0.5)
+   F: ('2023-12-31', 4995000000.0, 4995000000, None, None, 1.25)
+   F: ('2024-12-31', 3118000000.0, 3118000000, None, None, 0.78)
+   F: ('2025-12-31', 2989000000.0, 2989000000, None, None, 0.75)
+   AVGO: ('2021-10-31', 6212000000.0, 5913000000, 6212000000, 299000000, None)
+   AVGO: ('2022-10-30', 7032000000.0, 6733000000, 7032000000, 299000000, None)
+   AVGO: ('2023-10-29', 7645000000.0, 7645000000, 7645000000, 0, None)
+   AVGO: ('2024-11-03', 9814000000.0, 9814000000, 9814000000, 0, None)
+   AVGO: ('2025-11-02', 11142000000.0, 11142000000, 11142000000, None, None)
+
+== 4. SIC spółek rankowanych 22.10 (ticker, CIK, SIC, profil) ==
+   ADBE;796343;7372;GENERAL;Services-Prepackaged Software
+   ADI;6281;3674;GENERAL;Semiconductors & Related Devices
+   AKAM;1086222;7389;GENERAL;Services-Business Services, NEC
+   ALB;915913;2821;GENERAL;Plastic Materials, Synth Resins & Nonvulcan Elastomers
+   ALLE;1579241;7381;GENERAL;Services-Detective, Guard & Armored Car Services
+   AMAT;6951;3674;GENERAL;Semiconductors & Related Devices
+   AMD;2488;3674;GENERAL;Semiconductors & Related Devices
+   ANET;1596532;3576;GENERAL;Computer Communications Equipment
+   APH;820313;3678;GENERAL;Electronic Connectors
+   APO;1858681;6282;GENERAL;Investment Advice
+   APP;1751008;7370;GENERAL;Services-Computer Programming, Data Processing, Etc.
+   APTV;1521332;3714;GENERAL;Motor Vehicle Parts & Accessories
+   ARE;1035443;6798;REIT;Real Estate Investment Trusts
+   ARES;1176948;6282;GENERAL;Investment Advice
+   AVGO;1730168;3674;GENERAL;Semiconductors & Related Devices
+   AXON;1069183;3480;GENERAL;Ordnance & Accessories, (No Vehicles/Guided Missiles)
+   BA;12927;3721;GENERAL;Aircraft
+   BE;1664703;3620;GENERAL;Electrical Industrial Apparatus
+   BKNG;1075531;4700;GENERAL;Transportation Services
+   BSX;885725;3841;GENERAL;Surgical & Medical Instruments & Apparatus
+   BX;1393818;6282;GENERAL;Investment Advice
+   CARR;1783180;3585;GENERAL;Air-Cond & Warm Air Heatg Equip & Comm & Indl Refrig Equip
+   CAT;18230;3531;GENERAL;Construction Machinery & Equip
+   CBRE;1138118;6500;REIT;Real Estate
+   CDNS;813672;7372;GENERAL;Services-Prepackaged Software
+   CEG;1868275;4911;GENERAL;Electric Services
+   CHRW;1043277;4731;GENERAL;Arrangement of  Transportation of  Freight & Cargo
+   CHTR;1091667;4841;GENERAL;Cable & Other Pay Television Services
+   CIEN;936395;3661;GENERAL;Telephone & Telegraph Apparatus
+   CLX;21076;2842;GENERAL;Specialty Cleaning, Polishing and Sanitation Preparations
+   CMCSA;1166691;4841;GENERAL;Cable & Other Pay Television Services
+   CMG;1058090;5812;GENERAL;Retail-Eating  Places
+   CMI;26172;3510;GENERAL;Engines & Turbines
+   COHR;820318;3827;GENERAL;Optical Instruments & Lenses
+   COIN;1679788;6199;GENERAL;Finance Services
+   COO;711404;3851;GENERAL;Ophthalmic Goods
+   CPRT;900075;5500;GENERAL;Retail-Auto Dealers & Gasoline Stations
+   CRH;849395;3241;GENERAL;Cement, Hydraulic
+   CRL;1100682;8731;GENERAL;Services-Commercial Physical & Biological Research
+   CSGP;1057352;7389;GENERAL;Services-Business Services, NEC
+   CSX;277948;4011;GENERAL;Railroads, Line-Haul Operating
+   CVNA;1690820;5500;GENERAL;Retail-Auto Dealers & Gasoline Stations
+   DASH;1792789;7389;GENERAL;Services-Business Services, NEC
+   DDOG;1561550;7372;GENERAL;Services-Prepackaged Software
+   DECK;910521;3021;GENERAL;Rubber & Plastics Footwear
+   DELL;1571996;3571;GENERAL;Electronic Computers
+   DOW;1751788;2821;GENERAL;Plastic Materials, Synth Resins & Nonvulcan Elastomers
+   DPZ;1286681;5140;GENERAL;Wholesale-Groceries & Related Products
+   DVA;927066;8090;GENERAL;Services-Misc Health & Allied Services, NEC
+   DXCM;1093557;3841;GENERAL;Surgical & Medical Instruments & Apparatus
+   ECHO;1415404;4899;GENERAL;Communications Services, NEC
+   EIX;827052;4911;GENERAL;Electric Services
+   EME;105634;1731;GENERAL;Electrical Work
+   ETN;1551182;3590;GENERAL;Misc Industrial & Commercial Machinery & Equipment
+   EXE;895126;1311;GENERAL;Crude Petroleum & Natural Gas
+   F;37996;3711;GENERAL;Motor Vehicles & Passenger Car Bodies
+   FCX;831259;1000;GENERAL;Metal Mining
+   FDXF;2082247;4513;GENERAL;Air Courier Services
+   FICO;814547;7389;GENERAL;Services-Business Services, NEC
+   FIS;1136893;7389;GENERAL;Services-Business Services, NEC
+   FISV;798354;7389;GENERAL;Services-Business Services, NEC
+   FIX;1035983;1731;GENERAL;Electrical Work
+   FLEX;866374;3672;GENERAL;Printed Circuit Boards
+   FSLR;1274494;3674;GENERAL;Semiconductors & Related Devices
+   GEV;1996810;3600;GENERAL;Electronic & Other Electrical Equipment (No Computer Equip)
+   GIS;40704;2040;GENERAL;Grain Mill Products
+   GL;320335;6311;INSURER;Life Insurance
+   GLW;24741;3357;GENERAL;Drawing & Insulating of  Nonferrous Wire
+   GNRC;1474735;3621;GENERAL;Motors & Generators
+   HII;1501585;3730;GENERAL;Ship & Boat Building & Repairing
+   HON;773840;3724;GENERAL;Aircraft Engines & Engine Parts
+   HONA;2089271;3724;GENERAL;Aircraft Engines & Engine Parts
+   HOOD;1783879;6211;GENERAL;Security Brokers, Dealers & Flotation Companies
+   HSY;47111;2060;GENERAL;Sugar & Confectionery Products
+   HWM;4281;3350;GENERAL;Rolling Drawing & Extruding of  Nonferrous Metals
+   IBM;51143;3570;GENERAL;Computer & office Equipment
+   IDXX;874716;2835;GENERAL;In Vitro & In Vivo Diagnostic Substances
+   INTC;50863;3674;GENERAL;Semiconductors & Related Devices
+   INTU;896878;7372;GENERAL;Services-Prepackaged Software
+   IP;51434;2621;GENERAL;Paper Mills
+   IR;1699150;3560;GENERAL;General Industrial Machinery & Equipment
+   ISRG;1035267;3842;GENERAL;Orthopedic, Prosthetic & Surgical Appliances & Supplies
+   JBHT;728535;4213;GENERAL;Trucking (No Local)
+   JBL;898293;3672;GENERAL;Printed Circuit Boards
+   JCI;833444;3585;GENERAL;Air-Cond & Warm Air Heatg Equip & Comm & Indl Refrig Equip
+   KDP;1418135;2080;GENERAL;Beverages
+   KEYS;1601046;3823;GENERAL;Industrial Instruments For Measurement, Display, and Control
+   KKR;1404912;6282;GENERAL;Investment Advice
+   KLAC;319201;3827;GENERAL;Optical Instruments & Lenses
+   KMI;1506307;4922;GENERAL;Natural Gas Transmission
+   LDOS;1336920;7373;GENERAL;Services-Computer Integrated Systems Design
+   LEN;920760;1520;GENERAL;General Bldg Contractors - Residential Bldgs
+   LHX;202058;3812;GENERAL;Search, Detection, Navigation, Guidance, Aeronautical Sys
+   LII;1069202;3585;GENERAL;Air-Cond & Warm Air Heatg Equip & Comm & Indl Refrig Equip
+   LITE;1633978;3669;GENERAL;Communications Equipment, NEC
+   LMT;936468;3760;GENERAL;Guided Missiles & Space Vehicles & Parts
+   LOW;60667;5211;GENERAL;Retail-Lumber & Other Building Materials Dealers
+   LRCX;707549;3559;GENERAL;Special Industry Machinery, NEC
+   LULU;1397187;2300;GENERAL;Apparel & Other Finishd Prods of  Fabrics & Similar Matl
+   LVS;1300514;7011;GENERAL;Hotels & Motels
+   MAR;1048286;7011;GENERAL;Hotels & Motels
+   MCD;63908;5812;GENERAL;Retail-Eating  Places
+   MCHP;827054;3674;GENERAL;Semiconductors & Related Devices
+   META;1326801;7370;GENERAL;Services-Computer Programming, Data Processing, Etc.
+   MGM;789570;7011;GENERAL;Hotels & Motels
+   MKC;63754;2090;GENERAL;Miscellaneous Food Preparations & Kindred Products
+   MLM;916076;1400;GENERAL;Mining & Quarrying of  Nonmetallic Minerals (No Fuels)
+   MOS;1285785;2870;GENERAL;Agricultural Chemicals
+   MPWR;1280452;3674;GENERAL;Semiconductors & Related Devices
+   MRK;310158;2834;GENERAL;Pharmaceutical Preparations
+   MRNA;1682852;2836;GENERAL;Biological Products, (No Diagnostic Substances)
+   MRVL;1835632;3674;GENERAL;Semiconductors & Related Devices
+   MU;723125;3674;GENERAL;Semiconductors & Related Devices
+   NCLH;1513761;4400;GENERAL;Water Transportation
+   NDAQ;1120193;6200;GENERAL;Security & Commodity Brokers, Dealers, Exchanges & Services
+   NFLX;1065280;7841;GENERAL;Services-Video Tape Rental
+   NKE;320187;3021;GENERAL;Rubber & Plastics Footwear
+   NOC;1133421;3812;GENERAL;Search, Detection, Navigation, Guidance, Aeronautical Sys
+   NRG;1013871;4911;GENERAL;Electric Services
+   NVR;906163;1531;GENERAL;Operative Builders
+   NXPI;1413447;3674;GENERAL;Semiconductors & Related Devices
+   ON;1097864;3674;GENERAL;Semiconductors & Related Devices
+   ORCL;1341439;7372;GENERAL;Services-Prepackaged Software
+   P;1474432;3572;GENERAL;Computer Storage Devices
+   PCG;1004980;4931;GENERAL;Electric & Other Services Combined
+   PG;80424;2840;GENERAL;Soap, Detergents, Cleang Preparations, Perfumes, Cosmetics
+   PH;76334;3490;GENERAL;Miscellaneous Fabricated Metal Products
+   PKG;75677;2650;GENERAL;Paperboard Containers & Boxes
+   PNR;77360;3550;GENERAL;Special Industry Machinery (No Metalworking Machinery)
+   PODD;1145197;3841;GENERAL;Surgical & Medical Instruments & Apparatus
+   PWR;1050915;1731;GENERAL;Electrical Work
+   PYPL;1633917;7389;GENERAL;Services-Business Services, NEC
+   Q;2058873;3674;GENERAL;Semiconductors & Related Devices
+   QCOM;804328;3663;GENERAL;Radio & Tv Broadcasting & Communications Equipment
+   RDDT;1713445;7374;GENERAL;Services-Computer Processing & Data Preparation
+   ROL;84839;7340;GENERAL;Services-To Dwellings & Other Buildings
+   ROP;882835;3823;GENERAL;Industrial Instruments For Measurement, Display, and Control
+   SKYD;2041610;4833;GENERAL;Television Broadcasting Stations
+   SMCI;1375365;3571;GENERAL;Electronic Computers
+   SNA;91440;3420;GENERAL;Cutlery, Handtools & General Hardware
+   SNDK;2023554;3572;GENERAL;Computer Storage Devices
+   SNPS;883241;7372;GENERAL;Services-Prepackaged Software
+   STX;1137789;3572;GENERAL;Computer Storage Devices
+   TER;97210;3825;GENERAL;Instruments For Meas & Testing of  Electricity & Elec Signals
+   TMUS;1283699;4812;GENERAL;Radiotelephone Communications
+   TPL;1811074;6792;GENERAL;Oil Royalty Traders
+   TPR;1116132;3100;GENERAL;Leather & Leather Products
+   TSCO;916365;5200;GENERAL;Retail-Building Materials, Hardware, Garden Supply
+   TXN;97476;3674;GENERAL;Semiconductors & Related Devices
+   TYL;860731;7372;GENERAL;Services-Prepackaged Software
+   UAL;100517;4512;GENERAL;Air Transportation, Scheduled
+   UBER;1543151;7389;GENERAL;Services-Business Services, NEC
+   ULTA;1403568;5990;GENERAL;Retail-Retail Stores, NEC
+   UNP;100885;4011;GENERAL;Railroads, Line-Haul Operating
+   VRT;1674101;3679;GENERAL;Electronic Components, NEC
+   VST;1692819;4911;GENERAL;Electric Services
+   WAB;943452;3743;GENERAL;Railroad Equipment
+   WDC;106040;3572;GENERAL;Computer Storage Devices
+   WY;106535;6798;REIT;Real Estate Investment Trusts
+   WYNN;1174922;7011;GENERAL;Hotels & Motels
+   XYL;1524472;3561;GENERAL;Pumps & Pumping Equipment
+   ZTS;1555280;2834;GENERAL;Pharmaceutical Preparations
