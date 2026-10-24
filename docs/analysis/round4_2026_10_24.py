@@ -221,3 +221,45 @@ med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None  # noqa: E731
 print(f"mediana wzrostu FCF/akcję: wypłaty < 10% FCF (n={len(reinvest)}): "
       f"{med([v[3] for v in reinvest if v[3] is not None]) * 100:.1f}%; "
       f"wypłaty >= 75% FCF (n={len(returners)}): {med([v[3] for v in returners if v[3] is not None]) * 100:.1f}%")
+
+# ---------- 4. Finansowanie wypłat: test wynikowy zamiast „wzrost długu brutto” ----
+# Wypłaty (D + B) z 3 lat wobec FCF z 3 lat; dźwignia (dług netto/EBITDA) na
+# początku i na końcu okna. Próg 2,0 = istniejący próg bezpieczeństwa z configu
+# (spójność, nie kalibracja).
+print("\n== 4. Wypłaty ponad FCF: dźwignia na początku i końcu okna ==")
+LEV_T = cfg.financial_quality.net_debt_to_ebitda_low_leverage_threshold
+
+
+def lev(q):
+    nd_ = net_debt(q)
+    if nd_ is None or q.ebitda is None:
+        return None
+    if nd_ <= 0:
+        return 0.0 if q.ebitda > 0 else None
+    return nd_ / q.ebitda if q.ebitda > 0 else float("inf")
+
+
+over = []
+for r in c.execute("select ticker, cik from live_scan_candidates order by ticker"):
+    x = BY[r["ticker"]]
+    if x["group"] not in ("Z_DCF", "BEZ_DCF"):
+        continue
+    p = get_fundamentals_periods(c, r["cik"])
+    if len(p) < 4:
+        continue
+    f = [free_cash_flow(q) for q in p[-3:]]
+    if None in f:
+        continue
+    paid = sum((q.dividends_paid or 0) + (q.share_buybacks or 0) for q in p[-3:])
+    if paid <= 0 or paid <= sum(f):
+        continue
+    l0, l1 = lev(p[-4]), lev(p[-1])
+    dd = (p[-1].total_debt or 0) - (p[-4].total_debt or 0)
+    over.append((r["ticker"], paid / sum(f) * 100 if sum(f) > 0 else None, l0, l1, dd))
+ok = [o for o in over if o[3] is not None and o[3] <= LEV_T]
+bad = [o for o in over if o[3] is None or o[3] > LEV_T]
+print(f"wypłaty > FCF 3 l.: {len(over)}; dźwignia na końcu <= {LEV_T}: {len(ok)}; > {LEV_T} lub EBITDA <= 0: {len(bad)}")
+fmt = lambda v: "—" if v is None else ("EBITDA<=0" if v == float("inf") else f"{v:.2f}")  # noqa: E731
+for t, cov, l0, l1, dd in sorted(over):
+    print(f"  {t}: wypłaty/FCF {('—' if cov is None else f'{cov:.0f}%')}, dźwignia {fmt(l0)} -> {fmt(l1)}, "
+          f"dług brutto {dd / 1e9:+.2f} mld")
