@@ -1,7 +1,7 @@
 # Runda 5 (2026-10-24): wdrożone poprawki, symulacja kwalifikacji na 22.10, propozycja K2
 
 Status:
-- **Poprawki 6, 7, 8, 9 i 13 wdrożone w kodzie gałęzi roboczej, z testami regresyjnymi.** Pełny zestaw testów: 970 zaliczonych, 24 pominięte (przed modułem kwalifikacji). Commit `6cef41d`.
+- **Poprawki 6, 7, 8, 9 i 13 wdrożone w kodzie gałęzi roboczej, z testami regresyjnymi.** Pełny zestaw testów: 979 zaliczonych, 24 pominięte (z modułem kwalifikacji). Commity `6cef41d`, `aa64363`.
 - **Moduł kwalifikacji** (`buffett_scanner/qualification.py`, decyzje 1, 3, 4, 5) gotowy i przetestowany, ale **niepodłączony do skanu na żywo**. Próg MoS czeka na decyzję.
 - **K2 — tylko propozycja.** Produkcyjna punktacja dywidend bez zmian.
 - Bez płatnych wywołań Claude, bez skanu, bez publikacji.
