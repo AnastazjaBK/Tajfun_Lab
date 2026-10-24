@@ -15,7 +15,9 @@ Sprawdza:
    wiarygodność (zgodność najnowszego nagłówka z bieżącym SIC);
 3. liczebności per rok 2016-2021 (obserwacje i unikalne spółki), pełna
    próba i podzbiór z wyceną, oraz wpływ profilu NIEZNANY i SIC
-   point-in-time na te liczebności.
+   point-in-time na te liczebności;
+4. dostępność pól SEC XBRL do oceny alokacji kapitału i zgodność dywidend
+   na akcje zwykłe FMP vs SEC (z cache faktów w artefakcie, bez nowych zapytań).
 
 Użycie: python scripts/diag_sic_and_sample_sizes.py --calibration-db X --snapshot-db Y --out Z.json
 """
@@ -285,6 +287,80 @@ def analyse(sec: dict, ciks_backtest: set[str], ciks_current: set[str], ranked: 
     return rep
 
 
+# --- 4. Pola SEC XBRL potrzebne do oceny alokacji kapitału (cache z artefaktu) ---
+CAPITAL_TAGS = (
+    "PaymentsOfDividendsCommonStock", "PaymentsOfDividends", "PaymentsOfDividendsPreferredStockAndPreferenceStock",
+    "DividendsPreferredStock", "DividendsCommonStockCash", "CommonStockDividendsPerShareDeclared",
+    "CommonStockDividendsPerShareCashPaid", "PaymentsForRepurchaseOfCommonStock", "ProceedsFromIssuanceOfCommonStock",
+    "ProceedsFromStockOptionsExercised", "ShareBasedCompensation", "StockIssuedDuringPeriodSharesAcquisitions",
+    "StockIssuedDuringPeriodValueAcquisitions", "StockRepurchasedDuringPeriodShares",
+    "PaymentsToAcquireBusinessesNetOfCashAcquired", "ProceedsFromIssuanceOfLongTermDebt", "RepaymentsOfLongTermDebt",
+)
+
+
+def annual_facts(cf: dict, tag: str) -> dict[str, float]:
+    """{koniec okresu: wartość} rocznych faktów (>= 330 dni, formularz 10-K),
+    najpóźniej złożona wersja dla danego końca okresu."""
+    import datetime as dt
+    units = cf.get("facts", {}).get("us-gaap", {}).get(tag, {}).get("units", {})
+    best: dict[str, tuple[str, float]] = {}
+    for entries in units.values():
+        for f in entries:
+            if not f.get("start") or not str(f.get("form", "")).startswith("10-K"):
+                continue
+            if (dt.date.fromisoformat(f["end"]) - dt.date.fromisoformat(f["start"])).days < 330:
+                continue
+            if f["end"] not in best or f["filed"] > best[f["end"]][0]:
+                best[f["end"]] = (f["filed"], f["val"])
+    return {e: v for e, (_, v) in best.items()}
+
+
+def capital_fields(cal, snap, ranked: list[tuple[str, str]]) -> dict:
+    cache = {norm_cik(r[0]): r[1] for r in cal.execute("SELECT cik, raw_json FROM sec_company_facts_cache")}
+    coverage = {t: {"2016_2021": 0, "FY2025": 0} for t in CAPITAL_TAGS}
+    for raw in cache.values():
+        cf = json.loads(raw)
+        for t in CAPITAL_TAGS:
+            ends = annual_facts(cf, t)
+            if any("2016" <= e[:4] <= "2021" for e in ends):
+                coverage[t]["2016_2021"] += 1
+            if any(e[:4] in ("2025", "2026") for e in ends):
+                coverage[t]["FY2025"] += 1
+    # FMP `dividends_paid` (commonDividendsPaid) ze snapshotu vs SEC: dywidendy na akcje zwykłe.
+    cmp_rows, by_ticker = [], {}
+    for cik, ticker in ranked:
+        if cik not in cache:
+            continue
+        cf = json.loads(cache[cik])
+        common = annual_facts(cf, "PaymentsOfDividendsCommonStock")
+        total = annual_facts(cf, "PaymentsOfDividends")
+        pref = {**annual_facts(cf, "DividendsPreferredStock"),
+                **annual_facts(cf, "PaymentsOfDividendsPreferredStockAndPreferenceStock")}
+        dps = annual_facts(cf, "CommonStockDividendsPerShareDeclared")
+        for end, fmp_val in snap.execute(
+                "SELECT period_end_date, value FROM fundamentals_raw f JOIN companies c ON c.cik = f.cik "
+                "WHERE f.line_item = 'dividends_paid' AND CAST(c.cik AS INTEGER) = ? ORDER BY period_end_date",
+                (int(cik),)):
+            def near(d):
+                import datetime as dt
+                e0 = dt.date.fromisoformat(end[:10])
+                hits = [v for k, v in d.items() if abs((dt.date.fromisoformat(k) - e0).days) <= 7]
+                return hits[0] if hits else None
+            row = (ticker, end, fmp_val, near(common), near(total), near(pref), near(dps))
+            cmp_rows.append(row)
+            by_ticker.setdefault(ticker, []).append(row)
+    mism = []
+    for t, end, fmp_val, com, tot, pref, dps in cmp_rows:
+        sec_val = com if com is not None else tot
+        if fmp_val and sec_val is None:
+            mism.append((t, end, fmp_val, None, "brak w SEC"))
+        elif fmp_val is not None and sec_val is not None and abs(abs(fmp_val) - abs(sec_val)) > 0.05 * max(abs(sec_val), 1e6):
+            mism.append((t, end, fmp_val, sec_val, "różnica > 5%"))
+    return {"pokrycie_tagow_cik_z_615": coverage, "cache_cik": len(cache),
+            "dywidendy_fmp_vs_sec_niezgodne": mism, "dywidendy_porownane_okresy": len(cmp_rows),
+            "BA": by_ticker.get("BA", []), "przyklady": {t: by_ticker.get(t, []) for t in ("MRK", "TPR", "F", "AVGO")}}
+
+
 def print_report(rep: dict) -> None:
     print("\n== 1. Brakujące SIC i błędy SEC ==")
     for label in ("backtest_615", "obecny_sklad_500", "rankowane_22_10"):
@@ -312,6 +388,21 @@ def print_report(rep: dict) -> None:
         for key in ("nieznany", "blad_sec", "pit_inny_profil", "pit_brak"):
             print(f"   {key}: " + ", ".join(f"{y}: {o}/{u}" for y, (o, u) in s[key].items()))
         print(f"   przejścia profilu (bieżący->PIT): {s['pit_przejscia']}")
+    if "kapital" in rep:
+        k = rep["kapital"]
+        print(f"\n== 5. Pola SEC XBRL do alokacji kapitału (cache: {k['cache_cik']} CIK) ==")
+        for t, v in k["pokrycie_tagow_cik_z_615"].items():
+            print(f"   {t}: CIK z danymi 2016-2021 {v['2016_2021']} | FY2025 {v['FY2025']}")
+        print(f"   dywidendy FMP vs SEC: porównane okresy {k['dywidendy_porownane_okresy']}, "
+              f"niezgodne {len(k['dywidendy_fmp_vs_sec_niezgodne'])}")
+        for row in k["dywidendy_fmp_vs_sec_niezgodne"]:
+            print(f"   niezgodne: {row}")
+        print("   BA (koniec okresu, FMP, SEC common, SEC razem, SEC uprzyw., DPS zadekl.):")
+        for row in k["BA"]:
+            print(f"     {row[1:]}")
+        for t, rows in k["przyklady"].items():
+            for row in rows:
+                print(f"   {t}: {row[1:]}")
     print("\n== 4. SIC spółek rankowanych 22.10 (ticker, CIK, SIC, profil) ==")
     for t, c, sic, prof, desc in rep["rankowane_22_10_sic"]:
         print(f"   {t};{c};{sic};{prof};{desc}")
@@ -354,6 +445,7 @@ def main(argv=None) -> int:
     if a.max_ciks:
         rows = [r for r in rows if norm_cik(r[1]) in ciks_backtest]
     rep = analyse(sec, ciks_backtest, ciks_current, ranked, rows, bench)
+    rep["kapital"] = capital_fields(cal, snap, ranked)
     rep["meta"] = {"run_id": run_id, "sec_requests": fetcher.requests, "test_mode": bool(a.max_ciks)}
     Path(a.out).write_text(json.dumps({"report": rep, "sec": sec}, ensure_ascii=False, indent=1, default=str))
     print_report(rep)

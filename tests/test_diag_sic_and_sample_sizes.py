@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 from pathlib import Path
 
@@ -130,12 +131,17 @@ def test_end_to_end_with_fake_sec(tmp_path, monkeypatch, capsys):
     _db(cal, ["CREATE TABLE universe_membership (cik TEXT)",
               "CREATE TABLE backtest_candidates (run_id TEXT, decision_date TEXT, cik TEXT, deterministic_score_pct REAL,"
               " margin_of_safety_base_pct REAL, return_6m_pct REAL)",
-              "CREATE TABLE backtest_benchmark (run_id TEXT, decision_date TEXT, ew_pit_universe_return_6m_pct REAL)"],
-        {"universe_membership": [("222",), ("333",)],
+              "CREATE TABLE backtest_benchmark (run_id TEXT, decision_date TEXT, ew_pit_universe_return_6m_pct REAL)",
+              "CREATE TABLE sec_company_facts_cache (cik TEXT, raw_json TEXT)"],
+        {"sec_company_facts_cache": [("222", json.dumps(_facts()))],
+         "universe_membership": [("222",), ("333",)],
          "backtest_candidates": [("r", "2016-06-01", "222", 50.0, None, 1.0), ("r", "2016-06-01", "333", 50.0, None, 1.0)],
          "backtest_benchmark": [("r", "2016-06-01", 0.5)]})
-    _db(snap, ["CREATE TABLE companies (cik TEXT)", "CREATE TABLE live_scan_candidates (cik TEXT, ticker TEXT)"],
-        {"companies": [("0000000222",), ("0000000444",)], "live_scan_candidates": [("0000000222", "TGT")]})
+    _db(snap, ["CREATE TABLE companies (cik TEXT)", "CREATE TABLE live_scan_candidates (cik TEXT, ticker TEXT)",
+               "CREATE TABLE fundamentals_raw (cik TEXT, period_end_date TEXT, line_item TEXT, value REAL)"],
+        {"companies": [("0000000222",), ("0000000444",)], "live_scan_candidates": [("0000000222", "TGT")],
+         "fundamentals_raw": [("0000000222", "2025-12-31", "dividends_paid", 331e6),
+                              ("0000000222", "2024-12-31", "dividends_paid", 100e6)]})
     fake = _FakeClient()
     monkeypatch.setattr(d, "SecEdgarClient", lambda ua, **kw: _Ctx(fake))
     monkeypatch.delenv("FMP_API_KEY", raising=False)
@@ -151,6 +157,9 @@ def test_end_to_end_with_fake_sec(tmp_path, monkeypatch, capsys):
     assert "nieznany: 2016: 1/1" in text
     assert "pit_inny_profil: 2016: 1/1" in text
     assert "'REIT->GENERAL': 1" in text
+    # FY2025: FMP 331 mln, SEC common = 0 (dywidenda uprzywilejowana) -> niezgodność.
+    assert "niezgodne: ('TGT', '2025-12-31', 331000000.0, 0.0, 'różnica > 5%')" in text
+    assert "PaymentsOfDividendsCommonStock: CIK z danymi 2016-2021 0 | FY2025 1" in text
     # Tylko SEC i lokalne bazy.
     assert all(u.startswith(("https://data.sec.gov/", "https://www.sec.gov/Archives/")) for u in fake.urls)
 
@@ -169,3 +178,23 @@ class _Ctx:
 
     def __exit__(self, *exc):
         return False
+
+
+def _fact(end, val, start=None, form="10-K"):
+    return {"start": start or f"{end[:4]}-01-01", "end": end, "val": val, "filed": f"{int(end[:4]) + 1}-02-15", "form": form}
+
+
+def _facts():
+    return {"facts": {"us-gaap": {
+        "PaymentsOfDividendsCommonStock": {"units": {"USD": [_fact("2025-12-31", 0.0), _fact("2024-12-31", 100e6)]}},
+        "DividendsPreferredStock": {"units": {"USD": [_fact("2025-12-31", 331e6)]}},
+        "ShareBasedCompensation": {"units": {"USD": [_fact("2025-12-31", 5e6, start="2025-10-01"),  # kwartał
+                                                       _fact("2018-12-31", 4e6, form="10-Q")]}},
+    }}}
+
+
+def test_annual_facts_keeps_only_full_year_10k_values():
+    cf = _facts()
+    assert d.annual_facts(cf, "PaymentsOfDividendsCommonStock") == {"2025-12-31": 0.0, "2024-12-31": 100e6}
+    assert d.annual_facts(cf, "ShareBasedCompensation") == {}
+    assert d.annual_facts(cf, "Missing") == {}
