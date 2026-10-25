@@ -1621,6 +1621,16 @@ def _render_instrument_correction(portfolio_conn, position: dict) -> None:
     jawnego potwierdzenia. Transakcje (koszt) zostają nietknięte."""
     position_id = position["position_id"]
     st.markdown("##### Instrument")
+    if asset_class_of(position) in (*PHYSICAL, COMMODITY):
+        # 2026-10-25: wyszukiwarka i klasy akcja/ETF/ETC/ETN nie dotyczą
+        # metalu; zapis zmieniłby pozycję w akcję bez ceny NBP/spot.
+        st.info(
+            "Dla metalu korekta instrumentu (symbol giełdowy, klasa akcja/ETF/ETC/ETN) nie dotyczy. "
+            "Błędne dane produktu (masa sztuki, jednostka, próba) popraw tak: „+ Dodaj transakcję” → "
+            "„Skopiuj istniejącą transakcję” → „Nowa pozycja z tymi samymi danymi produktu” (z poprawionymi "
+            "danymi), a błędny wpis anuluj poniżej."
+        )
+        return
     status = "potwierdzony" if is_instrument_confirmed(position) else "NIEPOTWIERDZONY — cena bieżąca nie jest pobierana"
     provider = position.get("price_provider") or ("FMP" if is_instrument_confirmed(position) else "—")
     st.write(
