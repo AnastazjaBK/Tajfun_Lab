@@ -23,7 +23,13 @@ import datetime as dt
 
 from buffett_scanner.point_in_time import extract_fact_history
 
-COMMON_DIVIDEND_TAGS = ("PaymentsOfDividendsCommonStock", "DividendsCommonStockCash", "DividendsCommonStock")
+# Wyłącznie wypłaty gotówkowe (przepływy pieniężne), jak `dividends_paid`
+# z FMP i backtest (`point_in_time.CANDIDATE_TAGS`). 2026-10-25: tagi
+# zadeklarowanych dywidend (`DividendsCommonStockCash`, `DividendsCommonStock`,
+# zestawienie zmian w kapitale) różnią się od wypłat terminem -- CRH:
+# zadeklarowane 2023/2024 = 1688/956 mln, wypłacone (FMP) 851/1706 mln --
+# więc korekta nimi przesuwała kwoty między latami.
+COMMON_DIVIDEND_TAGS = ("PaymentsOfDividendsCommonStock",)
 TOTAL_DIVIDEND_TAG = "PaymentsOfDividends"
 PREFERRED_DIVIDEND_TAGS = (
     "PaymentsOfDividendsPreferredStockAndPreferenceStock", "DividendsPreferredStockCash", "DividendsPreferredStock",
@@ -97,11 +103,30 @@ def sec_preferred_stock_present(facts: dict | None, period_end: str, as_of: str)
     return False
 
 
+def sec_preferred_stock_reported_zero(facts: dict | None, period_end: str, as_of: str) -> bool:
+    """SEC jawnie podaje akcje uprzywilejowane = 0 na koniec okresu (jest
+    fakt, żaden nie jest > 0). Brak faktu to NIE zero."""
+    if not facts:
+        return False
+    values = [f.val for tag in PREFERRED_STOCK_INSTANT_TAGS for f in extract_fact_history(facts, tag)
+              if f.filed[:10] <= as_of and _near(f.end, period_end)]
+    return bool(values) and all(v == 0 for v in values)
+
+
 def verify_with_sec(*, reported: float | None, facts: dict | None, period_end: str, as_of: str,
-                    source_preferred_evidence: bool = False) -> tuple[float | None, str, str]:
-    """Weryfikacja kwoty ze źródła (FMP albo zapasowego tagu SEC) faktami SEC."""
+                    source_preferred_evidence: bool = False,
+                    source_preferred_issuance: bool = False) -> tuple[float | None, str, str]:
+    """Weryfikacja kwoty ze źródła (FMP albo zapasowego tagu SEC) faktami SEC.
+
+    `source_preferred_evidence`: wypłaty dywidend uprzywilejowanych w źródle.
+    `source_preferred_issuance`: emisja/umorzenie akcji uprzywilejowanych w
+    źródle (FMP `netPreferredStockIssuance`) -- 2026-10-25: pole bywa
+    niezerowe u spółek bez akcji uprzywilejowanych (QCOM FY2023 -955 mln,
+    JBL, CHRW, DPZ; SEC: PreferredStockValue = 0), więc nie jest śladem,
+    gdy SEC jawnie podaje zero akcji uprzywilejowanych na koniec okresu."""
     sec_preferred = sec_annual_tag_value(facts, PREFERRED_DIVIDEND_TAGS, period_end, as_of)
-    evidence = (source_preferred_evidence or (sec_preferred is not None and sec_preferred > 0)
+    issuance = source_preferred_issuance and not sec_preferred_stock_reported_zero(facts, period_end, as_of)
+    evidence = (source_preferred_evidence or issuance or (sec_preferred is not None and sec_preferred > 0)
                 or sec_preferred_stock_present(facts, period_end, as_of))
     return resolve_common_dividends(
         reported=reported, preferred_evidence=evidence,

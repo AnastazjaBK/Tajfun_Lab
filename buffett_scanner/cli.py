@@ -2363,11 +2363,11 @@ def _verify_common_dividends(conn, survivors, *, user_agent: str, run_date: str,
         return
     with SecEdgarClient(user_agent) as sec_client:
         for ticker, cik, rows in payers:
-            pref = {r["fiscal_period"]: r for r in conn.execute(
+            pref = conn.execute(
                 "SELECT fiscal_period, period_end_date, line_item, value FROM fundamentals_raw WHERE cik = ? "
                 "AND line_item IN ('preferred_dividends_paid', 'preferred_stock_issuance_net') AND value <> 0",
                 (cik,),
-            )}
+            ).fetchall()
             try:
                 facts = sec_client.get_company_facts(cik)
             except SecEdgarError as exc:
@@ -2375,10 +2375,11 @@ def _verify_common_dividends(conn, survivors, *, user_agent: str, run_date: str,
                 facts = None
             states = {}
             for r in rows:
-                fmp_evidence = any(p["period_end_date"] <= r["period_end_date"] for p in pref.values())
+                earlier = [p for p in pref if p["period_end_date"] <= r["period_end_date"]]
                 value, state, why = verify_with_sec(
                     reported=r["value"], facts=facts, period_end=r["period_end_date"], as_of=run_date,
-                    source_preferred_evidence=fmp_evidence,
+                    source_preferred_evidence=any(p["line_item"] == "preferred_dividends_paid" for p in earlier),
+                    source_preferred_issuance=any(p["line_item"] == "preferred_stock_issuance_net" for p in earlier),
                 )
                 if value != r["value"]:
                     conn.execute(
@@ -3326,6 +3327,140 @@ def cmd_verify_run_complete(args: argparse.Namespace) -> int:
     return 0
 
 
+# 2026-10-25 (zgoda właścicielki): korekta danych ISTNIEJĄCEGO skanu po
+# poprawce kontroli dywidend, bez ponownego płacenia za gotowe analizy.
+# Pozycje cash flow porównywane z FMP, żeby wykryć zmianę danych od dnia
+# skanu (dywidendy i CAPEX pomijane: skan je weryfikował i nadpisywał).
+_RERANK_CONSISTENCY_ITEMS = ("operating_cash_flow", "share_buybacks", "preferred_dividends_paid",
+                             "preferred_stock_issuance_net")
+
+
+def cmd_rerank_live_scan(args: argparse.Namespace) -> int:
+    """Przywraca `dividends_paid` z FMP (te same okresy co w skanie), powtarza
+    weryfikację dywidend w SEC (fakty złożone najpóźniej w dniu skanu) i
+    przelicza ranking i shortlistę tymi samymi funkcjami co etap 1 skanu.
+    Gotowe analizy zostają; nowe spółki na shortliście dostają PENDING
+    (do `analyze-live-scan-shortlist`). Przerywa bez zmian, gdy dane FMP się
+    zmieniły, gdy zmieniłby się wynik spółki z gotową analizą albo gdy z
+    shortlisty wypadłaby spółka z gotową analizą."""
+    config = load_config()
+    fmp_key = config.data_provider.resolve_api_key()
+    user_agent = config.sources.sec_edgar.resolve_user_agent()
+    conn = init_db(args.db)
+    run = get_live_scan_run(conn, args.run_id)
+    if run is None:
+        raise SystemExit(f"BŁĄD: brak run_id {args.run_id} w bazie.")
+    run_date = run["run_date"]
+    rows = get_live_scan_candidates(conn, args.run_id)
+
+    restored: dict[str, list[str]] = {}
+    with FMPClient(fmp_key) as client:
+        for r in rows:
+            fetched = normalize_fundamentals_rows([], [], client.get_cash_flow_statement(r["ticker"]))
+            stored = {(x["fiscal_period"], x["line_item"]): x["value"] for x in conn.execute(
+                "SELECT fiscal_period, line_item, value FROM fundamentals_raw WHERE cik = ? AND source = 'fmp'",
+                (r["cik"],),
+            )}
+            for f in fetched:
+                key = (f["fiscal_period"], f["line_item"])
+                if key not in stored:
+                    continue  # okres spoza skanu (np. złożony później) -- nie dodajemy
+                if f["line_item"] in _RERANK_CONSISTENCY_ITEMS and stored[key] != f["value"]:
+                    raise SystemExit(
+                        f"STOP: {r['ticker']} {key}: dane FMP zmieniły się od skanu "
+                        f"({stored[key]} -> {f['value']}). Baza bez zmian."
+                    )
+                if f["line_item"] == "dividends_paid" and stored[key] != f["value"]:
+                    conn.execute(
+                        "UPDATE fundamentals_raw SET value = ? WHERE cik = ? AND fiscal_period = ? "
+                        "AND line_item = 'dividends_paid' AND source = 'fmp'",
+                        (f["value"], r["cik"], f["fiscal_period"]),
+                    )
+                    restored.setdefault(r["ticker"], []).append(f["fiscal_period"])
+
+    dq = DataQuality(session_date=run_date)
+    survivors = [(r["ticker"], r["cik"], None, json.loads(r["decline_flags_json"])) for r in rows]
+    _verify_common_dividends(conn, survivors, user_agent=user_agent, run_date=run_date, dq=dq)
+
+    old = {r["cik"]: r for r in rows}
+    ranked: list[RankedCandidate] = []
+    for ticker, cik, _snap, flags in survivors:
+        profile_row = conn.execute("SELECT sector_profile FROM companies WHERE cik = ?", (cik,)).fetchone()
+        score = compute_deterministic_score(
+            periods=get_fundamentals_periods(conn, cik),
+            sector_profile=profile_row["sector_profile"] if profile_row else "GENERAL",
+            current_price=old[cik]["current_price"], config=config,
+        )
+        hard_gates = evaluate_deterministic_hard_gates(
+            safety=score.safety_score, margin_of_safety_base_pct=score.margin_of_safety_base_pct, config=config,
+        )
+        ranked.append(RankedCandidate(
+            ticker=ticker, cik=cik, current_price=old[cik]["current_price"], decline_snapshot=None,
+            triggered_decline_flags=flags, score=score, hard_gate_result=hard_gates,
+        ))
+    ranked = rank_all_candidates(ranked)
+    shortlist = select_shortlist(ranked, limit=run["shortlist_limit"])
+    shortlist_ciks = {c.cik for c in shortlist}
+
+    changed = []
+    for c in ranked:
+        before = old[c.cik]["deterministic_score_pct"]
+        if before != c.score.deterministic_score_pct:
+            changed.append((c.ticker, before, c.score.deterministic_score_pct))
+            if old[c.cik]["llm_status"] == "COMPLETE":
+                raise SystemExit(f"STOP: zmieniłby się wynik spółki z gotową analizą ({c.ticker}). Baza bez zmian.")
+    dropped = [o["ticker"] for o in rows if o["in_shortlist"] and o["cik"] not in shortlist_ciks]
+    if any(old[c]["llm_status"] == "COMPLETE" for c in old if old[c]["ticker"] in dropped):
+        raise SystemExit(f"STOP: z shortlisty wypadłyby spółki z gotową analizą: {dropped}. Baza bez zmian.")
+
+    added = []
+    for i, c in zip(competition_ranks(ranked), ranked):
+        s = c.score
+        newly = c.cik in shortlist_ciks and not old[c.cik]["in_shortlist"]
+        if newly:
+            added.append(c.ticker)
+        conn.execute(
+            """
+            UPDATE live_scan_candidates SET rank = ?, deterministic_score_pct = ?, deterministic_partial_score = ?,
+                available_components_json = ?, missing_components_json = ?, safety_score = ?, valuation_score = ?,
+                dividend_score = ?, margin_of_safety_base_pct = ?, hard_gate_passed_deterministic = ?,
+                hard_gate_triggered_deterministic_json = ?, in_shortlist = ?,
+                llm_status = CASE WHEN ? THEN 'PENDING' WHEN ? THEN llm_status ELSE 'NOT_SHORTLISTED' END
+            WHERE run_id = ? AND cik = ?
+            """,
+            (i, s.deterministic_score_pct, s.deterministic_partial_score,
+             json.dumps(list(s.available_components)), json.dumps(list(s.missing_components)),
+             s.safety_score, s.valuation_score, s.dividend_score, s.margin_of_safety_base_pct,
+             int(c.hard_gate_result.passed), json.dumps(list(c.hard_gate_result.triggered)),
+             int(c.cik in shortlist_ciks), newly, c.cik in shortlist_ciks, args.run_id, c.cik),
+        )
+    conn.execute("UPDATE live_scan_runs SET shortlist_size = ? WHERE run_id = ?", (len(shortlist), args.run_id))
+    if added:
+        update_live_scan_run_status(conn, args.run_id, "INCOMPLETE_LLM_ANALYSIS")
+    conn.commit()
+
+    lines = [f"# Przeliczenie rankingu {args.run_id} (sesja {run_date})", "",
+             f"- Przywrócone dywidendy z FMP: {', '.join(f'{t} ({len(p)})' for t, p in sorted(restored.items())) or 'brak'}",
+             f"- Dywidendy NIEZNANE po weryfikacji: {', '.join(sorted(dq.dividend_unknown)) or 'brak'}",
+             f"- Zmienione wyniki: " + ("; ".join(f"{t}: {a:.2f} -> {b:.2f}" for t, a, b in changed) or "brak"),
+             f"- Shortlista: {len(shortlist)}; nowe (do analizy Claude): {', '.join(added) or 'brak'}; "
+             f"wypadają: {', '.join(dropped) or 'brak'}", ""]
+    lines += ["Weryfikacja dywidend:"] + [f"- {t}: " + "; ".join(f"{p}: {v}" for p, v in st.items())
+                                          for t, st in sorted(dq.dividend_checks.items())]
+    lines += ["", render_full_ranking_table(ranked)]
+    report = "\n".join(lines)
+    print(report)
+    if args.report_out:
+        out = Path(args.report_out)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "rerank.md").write_text(report, encoding="utf-8")
+        (out / "rerank_dividends.json").write_text(json.dumps(
+            {"dividend_checks": dq.dividend_checks, "dividend_unknown": dq.dividend_unknown,
+             "restored": restored, "changed": changed, "added": added, "dropped": dropped},
+            ensure_ascii=False, indent=1), encoding="utf-8")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="buffett_scanner")
     parser.add_argument("--db", default=DEFAULT_DB_PATH, help="Ścieżka do pliku SQLite.")
@@ -3559,6 +3694,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Katalog roboczy na tymczasowy plik pointer.json przed uploadem.",
     )
     p_publish_snapshot.set_defaults(func=cmd_publish_snapshot)
+
+    p_rerank = sub.add_parser("rerank-live-scan")
+    p_rerank.add_argument("--run-id", required=True)
+    p_rerank.add_argument("--report-out", default="reports")
+    p_rerank.set_defaults(func=cmd_rerank_live_scan)
 
     p_verify = sub.add_parser("verify-run-complete")
     p_verify.add_argument("--report-out", default="reports", help="Katalog na raport run_status.md.")

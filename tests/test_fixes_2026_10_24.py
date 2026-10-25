@@ -444,3 +444,51 @@ def test_call_limit_stops_instead_of_truncating():
     assert q.worst_case_calls(45, 2) == 135
     assert q.within_call_limit(25, max_calls=75, max_repair_attempts=2)
     assert not q.within_call_limit(26, max_calls=75, max_repair_attempts=2)
+
+
+# --- 2026-10-25: przyczyny z diagnostyki skanu 23.10 (run 40180283457) ----------------
+
+def _instant(end, val):
+    return {"end": end, "val": val, "filed": f"{int(end[:4]) + 1}-02-15", "form": "10-K",
+            "fy": int(end[:4]), "fp": "FY", "accn": "x"}
+
+
+def test_qcom_fmp_issuance_with_sec_zero_preferred_stock_is_not_evidence():
+    """QCOM FY2023: FMP netPreferredStockIssuance -955 mln, SEC PreferredStockValue = 0
+    -> brak akcji uprzywilejowanych, kwota z FMP bez zmian (wcześniej NIEZNANE)."""
+    facts = _facts(PreferredStockValue=[_instant("2023-09-24", 0)])
+    value, state, _ = verify_with_sec(reported=3462e6, facts=facts, period_end="2023-09-30", as_of="2026-10-23",
+                                      source_preferred_issuance=True)
+    assert (value, state) == (3462e6, DIV_NO_PREFERRED)
+
+
+def test_fmp_issuance_without_sec_zero_fact_is_still_evidence():
+    """Brak faktu SEC o akcjach uprzywilejowanych to nie zero -- zachowanie bez zmian."""
+    facts = _facts(PaymentsOfDividends=[_fact("2025-12-31", 300e6)])
+    assert verify_with_sec(reported=300e6, facts=facts, period_end="2025-12-31", as_of="2026-10-23",
+                           source_preferred_issuance=True)[1] == DIV_UNKNOWN
+
+
+def test_sec_zero_does_not_override_preferred_dividends_evidence():
+    """BA FY2025: emisja 2024 + SEC DividendsPreferredStockCash 345 mln -> nadal NIEZNANE,
+    także gdyby saldo akcji uprzywilejowanych było 0; wypłaty dywidend uprzywilejowanych
+    w źródle zawsze są śladem."""
+    facts = _facts(PaymentsOfDividends=[_fact("2025-12-31", 331e6)],
+                   DividendsPreferredStockCash=[_fact("2025-12-31", 345e6)],
+                   PreferredStockValue=[_instant("2025-12-31", 0)])
+    assert verify_with_sec(reported=331e6, facts=facts, period_end="2025-12-31", as_of="2026-10-23",
+                           source_preferred_issuance=True)[1] == DIV_UNKNOWN
+    assert verify_with_sec(reported=331e6, facts=_facts(PreferredStockValue=[_instant("2025-12-31", 0)]),
+                           period_end="2025-12-31", as_of="2026-10-23",
+                           source_preferred_evidence=True)[1] == DIV_UNKNOWN
+
+
+def test_crh_declared_dividends_never_replace_cash_paid():
+    """CRH: SEC ma tylko zadeklarowane dywidendy (DividendsCommonStock 2024 = 956 mln),
+    FMP wypłacone 1706 mln; akcje uprzywilejowane istnieją (1 mln). Zadeklarowane nie
+    zastępują wypłaconych (wcześniej: 956, przesunięcie między latami) -> NIEZNANE."""
+    facts = _facts(DividendsCommonStock=[_fact("2024-12-31", 956e6)],
+                   DividendsPreferredStock=[_fact("2024-12-31", 1e6)],
+                   PreferredStockValue=[_instant("2024-12-31", 1e6)])
+    value, state, _ = verify_with_sec(reported=1706e6, facts=facts, period_end="2024-12-31", as_of="2026-10-23")
+    assert (value, state) == (None, DIV_UNKNOWN)

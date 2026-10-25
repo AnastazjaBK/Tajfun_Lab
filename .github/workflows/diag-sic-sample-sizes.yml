@@ -15,11 +15,15 @@ on:
         description: "Pełny SHA commitu gałęzi roboczej, który ma zostać uruchomiony"
         required: true
       mode:
-        description: "sic = diagnostyka SIC i liczebności; preferred-dividends = kontrola dywidend uprzywilejowanych (zgoda 2026-10-25)"
+        description: "sic = diagnostyka SIC i liczebności; preferred-dividends = kontrola dywidend uprzywilejowanych; rerank = korekta danych i rankingu istniejącego skanu, bez Claude (zgoda 2026-10-25)"
         required: false
         default: "sic"
+      live_run_id:
+        description: "Tryb rerank: run_id skanu w bazie"
+        required: false
+        default: "live-scan-2026-10-24T220005090685Z"
       scan_run_id:
-        description: "Tryb preferred-dividends: run skanu (artefakt phase6-live-scan-result)"
+        description: "Tryby preferred-dividends/rerank: run skanu (artefakt phase6-live-scan-result)"
         required: false
         default: "40136571596"
       max_ciks:
@@ -70,8 +74,45 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: Testy skryptu diagnostycznego (offline)
-        if: inputs.mode != 'preferred-dividends'
+        if: inputs.mode == 'sic'
         run: python -m pytest -q tests/test_diag_sic_and_sample_sizes.py
+
+      - name: "[rerank] Testy (pełny zestaw)"
+        if: inputs.mode == 'rerank'
+        run: python -m pytest -q
+
+      - name: "[rerank] Baza skanu"
+        if: inputs.mode == 'rerank'
+        uses: actions/download-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: previous-result
+          run-id: ${{ inputs.scan_run_id }}
+          github-token: ${{ github.token }}
+
+      - name: "[rerank] Korekta danych i rankingu (SEC + FMP, bez Claude)"
+        if: inputs.mode == 'rerank'
+        env:
+          SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
+          FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
+        run: |
+          [ -z "${ANTHROPIC_API_KEY:-}" ] || { echo "STOP: brak dostępu do Claude w tym trybie"; exit 1; }
+          sha256sum previous-result/live_scan_result.db
+          cp previous-result/live_scan_result.db live_scan_result.db
+          cp -r previous-result/reports reports
+          python -m buffett_scanner.cli --db live_scan_result.db rerank-live-scan \
+            --run-id "${{ inputs.live_run_id }}" --report-out reports
+
+      - name: "[rerank] Wynik (baza do wznowienia przez phase6b, bez publikacji)"
+        if: always() && inputs.mode == 'rerank'
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase6-live-scan-result
+          path: |
+            reports/
+            live_scan_result.db
+          retention-days: 30
+          if-no-files-found: warn
 
       - name: "[preferred-dividends] Testy skryptu (offline)"
         if: inputs.mode == 'preferred-dividends'
@@ -104,7 +145,7 @@ jobs:
           if-no-files-found: warn
 
       - name: Artefakt kalibracji (tylko odczyt)
-        if: inputs.mode != 'preferred-dividends'
+        if: inputs.mode == 'sic'
         uses: actions/download-artifact@v4
         with:
           name: calibration-round1-baseline-db
@@ -112,7 +153,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Snapshot 22.10 (tylko odczyt) i kontrola SHA256
-        if: inputs.mode != 'preferred-dividends'
+        if: inputs.mode == 'sic'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -121,7 +162,7 @@ jobs:
           sha256sum calibration_result.db
 
       - name: Diagnostyka (SEC + FMP, bez Claude)
-        if: inputs.mode != 'preferred-dividends'
+        if: inputs.mode == 'sic'
         env:
           SEC_EDGAR_USER_AGENT: ${{ secrets.SEC_EDGAR_USER_AGENT }}
           FMP_API_KEY: ${{ secrets.FMP_API_KEY }}
@@ -133,7 +174,7 @@ jobs:
             --max-ciks "${{ inputs.max_ciks }}"
 
       - name: Wynik jako artefakt
-        if: always() && inputs.mode != 'preferred-dividends'
+        if: always() && inputs.mode == 'sic'
         uses: actions/upload-artifact@v4
         with:
           name: diag-sic-sample-sizes
