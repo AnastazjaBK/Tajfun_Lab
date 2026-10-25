@@ -110,6 +110,7 @@ from buffett_scanner.ui.assets import (
     asset_class_of,
     category_summaries,
     exposure_summary,
+    has_no_valid_transactions,
     is_active,
     pure_grams_per_piece,
     commodity_cost_error,
@@ -1207,7 +1208,8 @@ def _render_categories(portfolio_conn, positions_with_summaries: list) -> None:
         st.warning("* Wycena częściowa — brak ceny lub kursu dla: " + ", ".join(data["missing"]) + ".")
 
     active = [(p, s) for p, s in data["positions"] if is_active(s)]
-    closed = [(p, s) for p, s in data["positions"] if not is_active(s)]
+    empty = [(p, s) for p, s in data["positions"] if has_no_valid_transactions(s)]
+    closed = [(p, s) for p, s in data["positions"] if not is_active(s) and not has_no_valid_transactions(s)]
     if active:
         rows, signs = [], []
         for position, summary in active:
@@ -1232,10 +1234,19 @@ def _render_categories(portfolio_conn, positions_with_summaries: list) -> None:
             for p, s in closed
         ))
 
-    by_id = {p["position_id"]: (p, s) for p, s in active + closed}
+    if empty:
+        st.caption(
+            "Bez aktywnych transakcji (wszystkie wpisy anulowane): "
+            + ", ".join(_instrument_label(p) for p, _ in empty)
+            + " — usuń w karcie pozycji: „Popraw dane / anuluj błędny wpis” → „Usuń pozycję”."
+        )
+
+    by_id = {p["position_id"]: (p, s) for p, s in active + closed + empty}
 
     def label(position_id) -> str:
         position, summary = by_id[position_id]
+        if has_no_valid_transactions(summary):
+            return _instrument_label(position) + " (anulowane wpisy)"
         return _instrument_label(position) + ("" if is_active(summary) else " (zamknięta)")
 
     if len(by_id) <= 20:

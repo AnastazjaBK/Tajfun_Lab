@@ -151,3 +151,19 @@ def test_category_dashboard_values_share_active_and_missing_prices():
     assert stocks["realized_pl_pln"] == pytest.approx(30.0)
     assert stocks["share_pct"] + metals["share_pct"] == pytest.approx(100.0)
     assert not is_active(sold)
+
+
+def test_position_with_only_voided_entries_is_not_counted_as_closed():
+    """Wszystkie wpisy anulowane != sprzedana w całości (2026-10-25)."""
+    from buffett_scanner.ui.assets import has_no_valid_transactions
+
+    voided = compute_position_summary(5, [], [], current_price=500.0, current_price_currency="PLN", fx=FX)
+    gold = _summary(6, 510.0, "PLN", invested=616.0)
+    cats = category_summaries([
+        ({"ticker": "Złoto: Sztabka złota 1 oz", "asset_class": "PHYSICAL_GOLD"}, voided),
+        ({"ticker": "Złoto: sztabka 1 g", "asset_class": "PHYSICAL_GOLD"}, gold),
+    ])
+    physical = next(iter(cats.values()))
+    assert has_no_valid_transactions(voided) and not has_no_valid_transactions(gold)
+    assert physical["active_count"] == 1 and physical["closed_count"] == 0
+    assert physical["value_pln"] == pytest.approx(510.0)

@@ -161,6 +161,12 @@ def is_active(summary) -> bool:
     return any(sub.shares_held > 1e-12 for sub in summary.by_broker_currency)
 
 
+def has_no_valid_transactions(summary) -> bool:
+    """Wszystkie wpisy pozycji anulowane -- to nie jest pozycja zamknięta
+    (sprzedana), tylko błędny wpis do usunięcia w karcie pozycji."""
+    return not summary.by_broker_currency
+
+
 def category_summaries(positions_with_summaries: list) -> dict[str, dict]:
     """Dashboard kategorii: dla każdej kategorii z pozycjami -- wartość,
     koszt, wynik niezrealizowany (kwota, %), zrealizowany, udział w
@@ -177,11 +183,12 @@ def category_summaries(positions_with_summaries: list) -> dict[str, dict]:
             continue
         pln = compute_portfolio_pln_summary(subset)
         active = sum(1 for _, s in subset if is_active(s))
+        empty = sum(1 for _, s in subset if has_no_valid_transactions(s))
         result[key] = {
             **pln,
             "share_pct": (pln["value_pln"] / total_value * 100.0) if total_value > 0 else None,
             "active_count": active,
-            "closed_count": len(subset) - active,
+            "closed_count": len(subset) - active - empty,
             "positions": subset,
         }
     return result
