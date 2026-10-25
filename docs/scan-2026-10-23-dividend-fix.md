@@ -40,3 +40,10 @@ Wznowienie `phase6b` z bazy runu 40181315863: Claude analizuje wyłącznie QCOM 
 - Koszt: około 0,10 USD (zakres pojedynczej analizy w skanie: 0,074–0,134 USD).
 - Twardy limit: 3 wywołania (najgorszy przypadek: 1 analiza + 2 naprawy, około 0,5 USD).
 - Wymaga zgody właścicielki. Publikacja tylko po osobnej zgodzie.
+
+## Wynik końcowy (run 40191825696, phase6b na bazie z runu 40181315863)
+
+- **Analiza QCOM:** COMPLETE w 1 wywołaniu, 0 napraw, 0 odrzuconych odpowiedzi, 0,0953 USD.
+- **Skan:** COMPLETE, 21/21 analiz kompletnych. Look-ahead: brak. Publikacja dozwolona, ale nie wykonana.
+- **TOP 5 bez zmian:** INTU 79,6, ADBE 78,8, DECK 78,5, TPR 78,5, BKNG 77,2. QCOM poza TOP 5; jego dokładny pełny wynik nie jest w logu, wiadomo tylko, że jest niższy niż 77,2.
+- **Koszt Claude za cały skan:** 1,9954 (20 analiz) + 0,0953 (QCOM) = **2,0907 USD**. Diagnostyka i przeliczenie bez kosztu Claude.
