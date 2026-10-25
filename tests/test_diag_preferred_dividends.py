@@ -35,7 +35,7 @@ def test_reports_which_condition_gave_preferred_evidence():
     assert p["evidence"]["fmp_preferred_rows_up_to_period"] == [("2025-09-28", "preferred_stock_issuance_net", 5.0e8)]
     assert p["evidence"]["sec_preferred_stock_value_gt_0"] is False
     assert p["sec_total"] == 3.8e9 and p["sec_common"] is None
-    assert p["result"]["state"] == "NIEZNANE"
+    assert p["result"]["state"] == "BEZ_UPRZYWILEJOWANYCH"  # emisja z FMP nie jest śladem (2026-10-25)
     assert "PaymentsOfDividends" in r["sec_facts"]["tags"]
 
 

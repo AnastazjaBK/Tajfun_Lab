@@ -11,6 +11,8 @@ Backtest ma to samo ryzyko: gdy spółka nie ma tagu dla akcji zwykłych,
 bierze `PaymentsOfDividends` (suma).
 
 Reguła (jedna, wspólna dla skanu i backtestu):
+- ślad akcji uprzywilejowanych: wypłaty ich dywidend (FMP albo SEC) albo
+  saldo w bilansie SEC > 0 (nie emisja z FMP -- patrz `verify_with_sec`);
 - brak śladów akcji uprzywilejowanych -> kwota bez zmian;
 - są ślady i SEC podaje dywidendy na akcje zwykłe -> wartość z SEC;
 - są ślady, SEC podaje sumę i część uprzywilejowaną -> różnica;
@@ -103,30 +105,19 @@ def sec_preferred_stock_present(facts: dict | None, period_end: str, as_of: str)
     return False
 
 
-def sec_preferred_stock_reported_zero(facts: dict | None, period_end: str, as_of: str) -> bool:
-    """SEC jawnie podaje akcje uprzywilejowane = 0 na koniec okresu (jest
-    fakt, żaden nie jest > 0). Brak faktu to NIE zero."""
-    if not facts:
-        return False
-    values = [f.val for tag in PREFERRED_STOCK_INSTANT_TAGS for f in extract_fact_history(facts, tag)
-              if f.filed[:10] <= as_of and _near(f.end, period_end)]
-    return bool(values) and all(v == 0 for v in values)
-
-
 def verify_with_sec(*, reported: float | None, facts: dict | None, period_end: str, as_of: str,
-                    source_preferred_evidence: bool = False,
-                    source_preferred_issuance: bool = False) -> tuple[float | None, str, str]:
+                    source_preferred_evidence: bool = False) -> tuple[float | None, str, str]:
     """Weryfikacja kwoty ze źródła (FMP albo zapasowego tagu SEC) faktami SEC.
 
-    `source_preferred_evidence`: wypłaty dywidend uprzywilejowanych w źródle.
-    `source_preferred_issuance`: emisja/umorzenie akcji uprzywilejowanych w
-    źródle (FMP `netPreferredStockIssuance`) -- 2026-10-25: pole bywa
-    niezerowe u spółek bez akcji uprzywilejowanych (QCOM FY2023 -955 mln,
-    JBL, CHRW, DPZ; SEC: PreferredStockValue = 0), więc nie jest śladem,
-    gdy SEC jawnie podaje zero akcji uprzywilejowanych na koniec okresu."""
+    `source_preferred_evidence`: wypłaty dywidend uprzywilejowanych w źródle
+    (FMP `preferredDividendsPaid`). 2026-10-25: emisja/umorzenie akcji
+    uprzywilejowanych z FMP (`netPreferredStockIssuance`) NIE jest śladem --
+    pole bywa niezerowe u spółek bez akcji uprzywilejowanych (QCOM FY2023
+    -955 mln, JBL, CHRW, DPZ; SEC: PreferredStockValue = 0). Rzeczywiste
+    akcje uprzywilejowane widać w wypłatach dywidend (FMP/SEC) albo w
+    saldzie w bilansie SEC (np. BA FY2025: SEC DividendsPreferredStockCash)."""
     sec_preferred = sec_annual_tag_value(facts, PREFERRED_DIVIDEND_TAGS, period_end, as_of)
-    issuance = source_preferred_issuance and not sec_preferred_stock_reported_zero(facts, period_end, as_of)
-    evidence = (source_preferred_evidence or issuance or (sec_preferred is not None and sec_preferred > 0)
+    evidence = (source_preferred_evidence or (sec_preferred is not None and sec_preferred > 0)
                 or sec_preferred_stock_present(facts, period_end, as_of))
     return resolve_common_dividends(
         reported=reported, preferred_evidence=evidence,

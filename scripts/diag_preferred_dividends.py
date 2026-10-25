@@ -71,7 +71,6 @@ def diagnose(conn, facts_by_ticker: dict, fmp_by_ticker: dict, run_date: str) ->
             value, state, why = (None, "BRAK_FMP", "") if reported is None else dv.verify_with_sec(
                 reported=reported, facts=facts, period_end=end, as_of=run_date,
                 source_preferred_evidence=any(x[1] == "preferred_dividends_paid" for x in fmp_pref),
-                source_preferred_issuance=any(x[1] == "preferred_stock_issuance_net" for x in fmp_pref),
             )
             periods.append({
                 "fiscal_period": fiscal_period, "period_end": end,
@@ -81,7 +80,6 @@ def diagnose(conn, facts_by_ticker: dict, fmp_by_ticker: dict, run_date: str) ->
                     "fmp_preferred_rows_up_to_period": fmp_pref,
                     "sec_preferred_dividends": sec_pref_div,
                     "sec_preferred_stock_value_gt_0": sec_stock,
-                    "sec_preferred_stock_reported_zero": dv.sec_preferred_stock_reported_zero(facts, end, run_date),
                 },
                 "sec_common": dv.sec_annual_tag_value(facts, dv.COMMON_DIVIDEND_TAGS, end, run_date),
                 "sec_total": dv.sec_annual_tag_value(facts, (dv.TOTAL_DIVIDEND_TAG,), end, run_date),
@@ -108,7 +106,7 @@ def _print_summary(results: list[dict]) -> None:
             print(f"   {p['fiscal_period']} {p['period_end']}: FMP common={f.get('commonDividendsPaid')} "
                   f"pref={f.get('preferredDividendsPaid')} netPrefIssuance={f.get('netPreferredStockIssuance')} "
                   f"| ślad: FMP={e['fmp_preferred_rows_up_to_period']} SECprefDiv={e['sec_preferred_dividends']} "
-                  f"SECprefStock>0={e['sec_preferred_stock_value_gt_0']} SECprefStock=0={e['sec_preferred_stock_reported_zero']} | SEC common={p['sec_common']} "
+                  f"SECprefStock>0={e['sec_preferred_stock_value_gt_0']} | SEC common={p['sec_common']} "
                   f"total={p['sec_total']} -> {p['result']['state']} {p['result']['value']}")
 
 

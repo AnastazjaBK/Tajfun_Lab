@@ -2363,9 +2363,11 @@ def _verify_common_dividends(conn, survivors, *, user_agent: str, run_date: str,
         return
     with SecEdgarClient(user_agent) as sec_client:
         for ticker, cik, rows in payers:
+            # Ślad akcji uprzywilejowanych z FMP: tylko wypłaty ich dywidend
+            # (emisja z FMP bywa błędna -- `verify_with_sec`, 2026-10-25).
             pref = conn.execute(
-                "SELECT fiscal_period, period_end_date, line_item, value FROM fundamentals_raw WHERE cik = ? "
-                "AND line_item IN ('preferred_dividends_paid', 'preferred_stock_issuance_net') AND value <> 0",
+                "SELECT period_end_date FROM fundamentals_raw WHERE cik = ? "
+                "AND line_item = 'preferred_dividends_paid' AND value <> 0",
                 (cik,),
             ).fetchall()
             try:
@@ -2375,11 +2377,9 @@ def _verify_common_dividends(conn, survivors, *, user_agent: str, run_date: str,
                 facts = None
             states = {}
             for r in rows:
-                earlier = [p for p in pref if p["period_end_date"] <= r["period_end_date"]]
                 value, state, why = verify_with_sec(
                     reported=r["value"], facts=facts, period_end=r["period_end_date"], as_of=run_date,
-                    source_preferred_evidence=any(p["line_item"] == "preferred_dividends_paid" for p in earlier),
-                    source_preferred_issuance=any(p["line_item"] == "preferred_stock_issuance_net" for p in earlier),
+                    source_preferred_evidence=any(p["period_end_date"] <= r["period_end_date"] for p in pref),
                 )
                 if value != r["value"]:
                     conn.execute(

@@ -333,13 +333,31 @@ def test_backtest_common_dividend_tag_is_used_as_is():
 
 
 class _PreferredFMP(g._SessionConsistentFMP):
-    """FMP: `commonDividendsPaid` zawiera dywidendę uprzywilejowaną (jak BA),
-    a w danych jest emisja akcji uprzywilejowanych."""
+    """FMP: są wypłaty dywidend uprzywilejowanych, więc `commonDividendsPaid`
+    może zawierać część uprzywilejowaną (jak BA)."""
 
     def get_cash_flow_statement(self, symbol):
         rows = super().get_cash_flow_statement(symbol)
-        return [{**r, "preferredDividendsPaid": 0, "netPreferredStockIssuance": 5_000.0 if i == 0 else 0}
+        return [{**r, "preferredDividendsPaid": -3.0 if i == 0 else 0} for i, r in enumerate(rows)]
+
+
+class _IssuanceOnlyFMP(g._SessionConsistentFMP):
+    """QCOM 23.10: jedynym „śladem” jest emisja akcji uprzywilejowanych w FMP."""
+
+    def get_cash_flow_statement(self, symbol):
+        rows = super().get_cash_flow_statement(symbol)
+        return [{**r, "preferredDividendsPaid": 0, "netPreferredStockIssuance": -955.0 if i == 0 else 0}
                 for i, r in enumerate(rows)]
+
+
+def test_live_scan_fmp_preferred_issuance_alone_keeps_fmp_dividends(tmp_path, monkeypatch, capsys):
+    g._setup(monkeypatch, _IssuanceOnlyFMP)
+    code, db, dq = g._scan(tmp_path, "--session-date", g.SESSION)
+    capsys.readouterr()
+    assert code == 0
+    values = [r[0] for r in connect(db).execute(
+        "SELECT value FROM fundamentals_raw WHERE line_item = 'dividends_paid' ORDER BY period_end_date")]
+    assert values == [10.0, 12.0] and dq["dividend_unknown"] == []
 
 
 def test_live_scan_unconfirmed_common_dividends_are_unknown_reported_and_do_not_stop_scan(
@@ -453,34 +471,22 @@ def _instant(end, val):
             "fy": int(end[:4]), "fp": "FY", "accn": "x"}
 
 
-def test_qcom_fmp_issuance_with_sec_zero_preferred_stock_is_not_evidence():
-    """QCOM FY2023: FMP netPreferredStockIssuance -955 mln, SEC PreferredStockValue = 0
-    -> brak akcji uprzywilejowanych, kwota z FMP bez zmian (wcześniej NIEZNANE)."""
+def test_qcom_without_preferred_dividends_or_sec_balance_keeps_fmp_amount():
+    """QCOM FY2023: jedynym „śladem” była emisja z FMP (-955 mln, pole błędne;
+    SEC PreferredStockValue = 0). Bez wypłat dywidend uprzywilejowanych i bez
+    salda w SEC -> brak akcji uprzywilejowanych, kwota z FMP bez zmian."""
     facts = _facts(PreferredStockValue=[_instant("2023-09-24", 0)])
-    value, state, _ = verify_with_sec(reported=3462e6, facts=facts, period_end="2023-09-30", as_of="2026-10-23",
-                                      source_preferred_issuance=True)
+    value, state, _ = verify_with_sec(reported=3462e6, facts=facts, period_end="2023-09-30", as_of="2026-10-23")
     assert (value, state) == (3462e6, DIV_NO_PREFERRED)
 
 
-def test_fmp_issuance_without_sec_zero_fact_is_still_evidence():
-    """Brak faktu SEC o akcjach uprzywilejowanych to nie zero -- zachowanie bez zmian."""
-    facts = _facts(PaymentsOfDividends=[_fact("2025-12-31", 300e6)])
-    assert verify_with_sec(reported=300e6, facts=facts, period_end="2025-12-31", as_of="2026-10-23",
-                           source_preferred_issuance=True)[1] == DIV_UNKNOWN
-
-
-def test_sec_zero_does_not_override_preferred_dividends_evidence():
-    """BA FY2025: emisja 2024 + SEC DividendsPreferredStockCash 345 mln -> nadal NIEZNANE,
-    także gdyby saldo akcji uprzywilejowanych było 0; wypłaty dywidend uprzywilejowanych
-    w źródle zawsze są śladem."""
+def test_ba_preferred_dividends_in_sec_remain_evidence():
+    """BA FY2025 (przypadek, od którego zaczęła się kontrola): SEC
+    DividendsPreferredStockCash 345 mln -> nadal NIEZNANE bez śladu z FMP."""
     facts = _facts(PaymentsOfDividends=[_fact("2025-12-31", 331e6)],
-                   DividendsPreferredStockCash=[_fact("2025-12-31", 345e6)],
-                   PreferredStockValue=[_instant("2025-12-31", 0)])
-    assert verify_with_sec(reported=331e6, facts=facts, period_end="2025-12-31", as_of="2026-10-23",
-                           source_preferred_issuance=True)[1] == DIV_UNKNOWN
-    assert verify_with_sec(reported=331e6, facts=_facts(PreferredStockValue=[_instant("2025-12-31", 0)]),
-                           period_end="2025-12-31", as_of="2026-10-23",
-                           source_preferred_evidence=True)[1] == DIV_UNKNOWN
+                   DividendsPreferredStockCash=[_fact("2025-12-31", 345e6)])
+    assert verify_with_sec(reported=331e6, facts=facts, period_end="2025-12-31",
+                           as_of="2026-10-23")[1] == DIV_UNKNOWN
 
 
 def test_crh_declared_dividends_never_replace_cash_paid():
