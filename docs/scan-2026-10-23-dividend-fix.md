@@ -47,3 +47,24 @@ Wznowienie `phase6b` z bazy runu 40181315863: Claude analizuje wyłącznie QCOM 
 - **Skan:** COMPLETE, 21/21 analiz kompletnych. Look-ahead: brak. Publikacja dozwolona, ale nie wykonana.
 - **TOP 5 bez zmian:** INTU 79,6, ADBE 78,8, DECK 78,5, TPR 78,5, BKNG 77,2. QCOM poza TOP 5; jego dokładny pełny wynik nie jest w logu, wiadomo tylko, że jest niższy niż 77,2.
 - **Koszt Claude za cały skan:** 1,9954 (20 analiz) + 0,0953 (QCOM) = **2,0907 USD**. Diagnostyka i przeliczenie bez kosztu Claude.
+
+## Publikacja (2026-10-25, zgoda właścicielki)
+
+- **Run publikacji:** 40192973854, baza z runu 40191825696.
+- **Release:** `scanner-snapshot-live-scan-2026-10-24T220005090685Z`, SHA256 `27e87935f775491580b2170520ca10da5c1cd4d82a65cf5f536e37e8e40b30f6`.
+- **Wskaźnik:** `scanner-snapshot-latest` → ten release; shortlista 21.
+- **Kontrola opublikowanego pliku:**
+  - status COMPLETE, 21/21 analiz kompletnych, 21 rekordów analiz;
+  - aplikacja (ten sam kod gałęzi, lokalnie na kopii pliku) renderuje bez błędów tabelę TOP 20, oznaczenia TOP 5 i „BRAK wyceny DCF” oraz karty spółek z pełną analizą.
+- **Dokładne pełne wyniki TOP 5:**
+
+| Poz. | Spółka | Pełny wynik |
+|---|---|---|
+| ★ 1 | INTU | 79,59 |
+| ★ 2 | ADBE | 78,77 |
+| ★ 3= | DECK | 78,48 |
+| ★ 3= | TPR | 78,48 |
+| ★ 5= | BKNG | 77,22 |
+
+- **Remis na granicy TOP 5:** LDOS ma wynik identyczny z BKNG (77,22). Reguła z 6.10 bierze pierwsze 5, więc LDOS nie ma ★. Aplikacja pokazuje ostrzeżenie o remisie.
+- **Dalsze pozycje:** APP 76,93, QCOM 76,71, DXCM 76,40, XYL 76,00.
